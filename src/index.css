@@ -1,0 +1,275 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background-color: #05080E;
+    color: #F8FAFC;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+}
+
+/* Cyber-Executive Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #05080E;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1E293B;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #F59E0B;
+}
+
+/* Holographic & Glass Utilities */
+.cyber-glass {
+  background: rgba(13, 20, 32, 0.75);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.cyber-glass-glow {
+  background: rgba(17, 26, 39, 0.85);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(245, 158, 11, 0.2);
+  box-shadow: 0 0 25px rgba(245, 158, 11, 0.08);
+}
+
+.cyber-glow-gold {
+  box-shadow: 0 0 20px rgba(245, 158, 11, 0.35);
+}
+
+.cyber-glow-cyan {
+  box-shadow: 0 0 20px rgba(6, 182, 212, 0.35);
+}
+
+.cyber-glow-emerald {
+  box-shadow: 0 0 20px rgba(16, 185, 129, 0.35);
+}
+
+/* ---------------------------------------------------------------
+   LIGHT / DARK THEME SYSTEM
+---------------------------------------------------------------- */
+:root {
+  --btn-ghost-bg: rgba(255, 255, 255, 0.05);
+  --btn-ghost-text: #F1F5F9;
+  --btn-ghost-border: rgba(255, 255, 255, 0.14);
+  --btn-ghostdark-bg: rgba(245, 158, 11, 0.08);
+  --btn-ghostdark-text: #FCD34D;
+  --btn-ghostdark-border: rgba(245, 158, 11, 0.35);
+}
+
+.theme-light {
+  background-color: #F8FAFC !important;
+  color: #0F172A !important;
+  --btn-ghost-bg: rgba(15, 23, 42, 0.06);
+  --btn-ghost-text: #0F172A;
+  --btn-ghost-border: rgba(15, 23, 42, 0.16);
+  --btn-ghostdark-bg: rgba(245, 158, 11, 0.1);
+  --btn-ghostdark-text: #B45309;
+  --btn-ghostdark-border: rgba(245, 158, 11, 0.45);
+}
+
+.theme-light ::-webkit-scrollbar-track {
+  background: #F1F5F9;
+}
+
+.theme-light ::-webkit-scrollbar-thumb {
+  background: #CBD5E1;
+}
+
+.theme-light ::-webkit-scrollbar-thumb:hover {
+  background: #F59E0B;
+}
+
+/* Background overrides in light mode */
+.theme-light [style*="background: #05080E"],
+.theme-light [style*="background-color: #05080E"],
+.theme-light [style*="background: rgb(5, 8, 14)"],
+.theme-light [style*="background: #080D16"],
+.theme-light [style*="background: rgb(8, 13, 22)"] {
+  background: #F8FAFC !important;
+  color: #0F172A !important;
+}
+
+.theme-light [style*="background: #030509"],
+.theme-light [style*="background: #070B10"],
+.theme-light [style*="background-color: #070B10"] {
+  background: #F8FAFC !important;
+  color: #0F172A !important;
+}
+
+.theme-light [style*="background: #0B111A"],
+.theme-light [style*="background: #06090E"],
+.theme-light [style*="background: #070C15"],
+.theme-light [style*="background: #0E1520"],
+.theme-light [style*="background: #131C28"],
+.theme-light [style*="background: rgba(7, 11, 16"],
+.theme-light [style*="background: rgba(11, 17, 25"],
+.theme-light [style*="background: rgba(14, 21, 32"],
+.theme-light [style*="background: rgba(5, 8, 14"],
+.theme-light [style*="background: rgba(11, 17, 26"],
+.theme-light [style*="background: rgba(13, 20, 32"] {
+  background: #FFFFFF !important;
+  color: #0F172A !important;
+}
+
+.theme-light [style*="background: #111A27"],
+.theme-light [style*="background: #0D141F"],
+.theme-light [style*="background: #0F1724"],
+.theme-light [style*="background: #141F30"] {
+  background: #F1F5F9 !important;
+  color: #0F172A !important;
+}
+
+/* Glass and borders in light mode */
+.theme-light .cyber-glass {
+  background: rgba(255, 255, 255, 0.85) !important;
+  border-color: #E2E8F0 !important;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05) !important;
+}
+
+.theme-light .cyber-glass-glow {
+  background: rgba(255, 255, 255, 0.95) !important;
+  border-color: rgba(245, 158, 11, 0.3) !important;
+  box-shadow: 0 4px 25px rgba(245, 158, 11, 0.08) !important;
+}
+
+.theme-light .border-white\/10,
+.theme-light .border-white\/15,
+.theme-light .border-white\/20,
+.theme-light .border-white\/5,
+.theme-light .border-white\/\[0\.08\] {
+  border-color: #E2E8F0 !important;
+}
+
+/* Typography contrast in light mode */
+.theme-light h1.text-white,
+.theme-light h2.text-white,
+.theme-light h3.text-white,
+.theme-light h4.text-white,
+.theme-light p.text-white,
+.theme-light span.text-white:not([class*="bg-"]):not([style*="background"]) {
+  color: #0F172A !important;
+}
+
+.theme-light .text-slate-200,
+.theme-light .text-slate-300 {
+  color: #334155 !important;
+}
+
+.theme-light .text-slate-400 {
+  color: #64748B !important;
+}
+
+.theme-light .text-slate-500 {
+  color: #64748B !important;
+}
+
+.theme-light .bg-white\/\[0\.04\],
+.theme-light .bg-white\/\[0\.02\],
+.theme-light .bg-white\/\[0\.03\],
+.theme-light .bg-white\/5,
+.theme-light .bg-white\/10 {
+  background-color: #F1F5F9 !important;
+  color: #334155 !important;
+  border-color: #E2E8F0 !important;
+}
+
+/* Inputs, selects, and textareas in light mode */
+.theme-light input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+.theme-light select,
+.theme-light textarea {
+  background-color: #FFFFFF !important;
+  color: #0F172A !important;
+  border-color: #CBD5E1 !important;
+}
+
+.theme-light input::placeholder,
+.theme-light textarea::placeholder {
+  color: #94A3B8 !important;
+}
+
+/* Enhanced clean shadows for light mode cards */
+.theme-light .shadow-2xl,
+.theme-light .shadow-xl,
+.theme-light .shadow-lg {
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.06), 0 8px 10px -6px rgba(0, 0, 0, 0.04) !important;
+}
+
+/* Preserve Google Meet Video Call Room (Always Dark Theatre Native Google Meet Theme) */
+.google-meet-room,
+.theme-light .google-meet-room {
+  color: #E8EAED !important;
+}
+.google-meet-room *,
+.theme-light .google-meet-room * {
+  color: inherit;
+}
+.google-meet-room h1, .theme-light .google-meet-room h1,
+.google-meet-room h2, .theme-light .google-meet-room h2,
+.google-meet-room h3, .theme-light .google-meet-room h3,
+.google-meet-room h4, .theme-light .google-meet-room h4,
+.google-meet-room p.text-white, .theme-light .google-meet-room p.text-white,
+.google-meet-room span.text-white, .theme-light .google-meet-room span.text-white,
+.google-meet-room div.text-white, .theme-light .google-meet-room div.text-white,
+.google-meet-room button.text-white, .theme-light .google-meet-room button.text-white {
+  color: #FFFFFF !important;
+}
+.google-meet-room .text-slate-100, .theme-light .google-meet-room .text-slate-100,
+.google-meet-room .text-slate-200, .theme-light .google-meet-room .text-slate-200 {
+  color: #E8EAED !important;
+}
+.google-meet-room .text-slate-300, .theme-light .google-meet-room .text-slate-300 {
+  color: #BDC1C6 !important;
+}
+.google-meet-room .text-slate-400, .theme-light .google-meet-room .text-slate-400 {
+  color: #9AA0A6 !important;
+}
+.google-meet-room .text-slate-500, .theme-light .google-meet-room .text-slate-500 {
+  color: #80868B !important;
+}
+.google-meet-room input, .theme-light .google-meet-room input,
+.google-meet-room textarea, .theme-light .google-meet-room textarea {
+  background-color: #303134 !important;
+  color: #E8EAED !important;
+  border-color: #5F6368 !important;
+}
+.google-meet-room input::placeholder, .theme-light .google-meet-room input::placeholder,
+.google-meet-room textarea::placeholder, .theme-light .google-meet-room textarea::placeholder {
+  color: #9AA0A6 !important;
+}
+.google-meet-room .bg-black\/90, .theme-light .google-meet-room .bg-black\/90 {
+  background-color: rgba(0, 0, 0, 0.9) !important;
+}
+.google-meet-room [style*="background: #202124"],
+.theme-light .google-meet-room [style*="background: #202124"],
+.google-meet-room [style*="background-color: #202124"],
+.theme-light .google-meet-room [style*="background-color: #202124"] {
+  background: #202124 !important;
+}
+
+/* ---------------------------------------------------------------
+   GLOBAL MAGNIFICATIONDOCK BUTTON ANIMATION SYSTEM
+   Hardware-accelerated transforms, zero layout shifts,
+   smooth Framer Motion spring physics.
+---------------------------------------------------------------- */
+@media (hover: hover) and (pointer: fine) {
+  button:not(:disabled):not([aria-disabled="true"]) {
+    transform-origin: center center;
+    backface-visibility: hidden;
+    will-change: transform;
+  }
+}
+
+

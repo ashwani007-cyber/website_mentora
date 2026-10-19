@@ -1,0 +1,212 @@
+[
+  {
+    "section": "LandingPage",
+    "feature": "Hero & 3D Network Canvas",
+    "passed": true,
+    "details": "Executive headline and platform proposition active",
+    "failureReason": null
+  },
+  {
+    "section": "LandingPage",
+    "feature": "Theme Toggle (Light/Dark)",
+    "passed": true,
+    "details": "Theme toggle responds and switches CSS theme tokens",
+    "failureReason": null
+  },
+  {
+    "section": "LandingPage",
+    "feature": "Domain Category Filter Pills",
+    "passed": true,
+    "details": "Category pills rendered for expert specialization navigation",
+    "failureReason": null
+  },
+  {
+    "section": "LandingPage",
+    "feature": "Category Filter Interaction",
+    "passed": true,
+    "details": "Clicking category filters advisor grid to matching specialists",
+    "failureReason": null
+  },
+  {
+    "section": "LandingPage",
+    "feature": "Advisor Card Dossier Modal",
+    "passed": true,
+    "details": "Public visitor can inspect comprehensive verified dossier from landing card",
+    "failureReason": null
+  },
+  {
+    "section": "LandingPage",
+    "feature": "Advisor Card Book Action (Auth Guard)",
+    "passed": true,
+    "details": "Unauthenticated visitor prompted to create account or sign in",
+    "failureReason": null
+  },
+  {
+    "section": "LandingPage",
+    "feature": "Notification Center Bell & Popover",
+    "passed": true,
+    "details": "Global notification drawer opens with active announcements",
+    "failureReason": null
+  },
+  {
+    "section": "LandingPage",
+    "feature": "AI Chatbot Assistant Widget",
+    "passed": true,
+    "details": "Intelligent floating assistant widget expands with real-time prompt console",
+    "failureReason": null
+  },
+  {
+    "section": "ClientPortal",
+    "feature": "Shell & Profile Header",
+    "passed": false,
+    "details": "Client identity verified with active session",
+    "failureReason": null
+  },
+  {
+    "section": "ClientPortal",
+    "feature": "Escrow Wallet Balance Badge",
+    "passed": false,
+    "details": "Client escrow wallet balance displayed in header",
+    "failureReason": null
+  },
+  {
+    "section": "ClientPortal",
+    "feature": "Advisory Booking Modal (Date & Slots)",
+    "passed": false,
+    "details": "Upcoming dates and time slots rendered dynamically without past-date expiration",
+    "failureReason": "Booking modal failed to render active upcoming availability slots"
+  },
+  {
+    "section": "ClientPortal",
+    "feature": "Time Slot Selection",
+    "passed": false,
+    "details": "Interactive time slot button selectable with live fee preview",
+    "failureReason": "No active slot buttons found in Booking Modal"
+  },
+  {
+    "section": "ClientPortal",
+    "feature": "Dedicated Project Review Request Modal",
+    "passed": false,
+    "details": "Workflow B request modal rendered with dynamic pricing formula (rate * 3 + GST)",
+    "failureReason": null
+  },
+  {
+    "section": "ClientPortal",
+    "feature": "My Dedicated Project Reviews Dashboard",
+    "passed": false,
+    "details": "Multi-stage lifecycle tracking for audits and written findings",
+    "failureReason": null
+  },
+  {
+    "section": "ExpertPortal",
+    "feature": "Header & Verification Status",
+    "passed": true,
+    "details": "Expert profile rendered with green Verified badge",
+    "failureReason": null
+  },
+  {
+    "section": "ExpertPortal",
+    "feature": "Sessions Tab & Telemetry",
+    "passed": false,
+    "details": "Upcoming consultations ledger rendered",
+    "failureReason": null
+  },
+  {
+    "section": "ExpertPortal",
+    "feature": "Availability Calendar & Presets",
+    "passed": false,
+    "details": "Interactive 7-day schedule grid with quick preset slot generator",
+    "failureReason": null
+  },
+  {
+    "section": "ExpertPortal",
+    "feature": "Dedicated Project Reviews Decision Desk",
+    "passed": false,
+    "details": "Accept/Decline incoming project audits, review materials, schedule meetings",
+    "failureReason": null
+  },
+  {
+    "section": "ExpertPortal",
+    "feature": "KYC Documents Desk",
+    "passed": true,
+    "details": "Uploaded KYC documents list rendered",
+    "failureReason": null
+  },
+  {
+    "section": "AdminPortal",
+    "feature": "Executive Desk 1: Overview & KPIs",
+    "passed": true,
+    "details": "Platform overview, gross volume, and active experts rendered",
+    "failureReason": null
+  },
+  {
+    "section": "AdminPortal",
+    "feature": "Executive Desk 2: Document Audit & KYC",
+    "passed": true,
+    "details": "Document audit queue with approval/rejection controls loaded",
+    "failureReason": null
+  },
+  {
+    "section": "AdminPortal",
+    "feature": "Executive Desk 3: Expert Rates & Markups",
+    "passed": true,
+    "details": "Platform markup controls and client-facing fee multipliers loaded",
+    "failureReason": null
+  },
+  {
+    "section": "AdminPortal",
+    "feature": "Executive Desk 4: Hero 3D Spotlight Cards",
+    "passed": true,
+    "details": "Top & bottom hero spotlight assignment desk loaded",
+    "failureReason": null
+  },
+  {
+    "section": "AdminPortal",
+    "feature": "Executive Desk 5: Client Reviews Moderation",
+    "passed": true,
+    "details": "Review moderation, approval, and homepage featuring desk loaded",
+    "failureReason": null
+  },
+  {
+    "section": "AdminPortal",
+    "feature": "Executive Desk 6: Meeting & Session Ops",
+    "passed": true,
+    "details": "Operations ledger, Google Meet links, and force-completion loaded",
+    "failureReason": null
+  },
+  {
+    "section": "AdminPortal",
+    "feature": "Executive Desk 7: Notification Management",
+    "passed": true,
+    "details": "Multi-channel broadcast console (All/Client/Expert/Landing) loaded",
+    "failureReason": null
+  },
+  {
+    "section": "AdminPortal",
+    "feature": "Executive Desk 8: Database & Diagnostics",
+    "passed": true,
+    "details": "Atlas collection counts, KV store telemetry, and backup loaded",
+    "failureReason": null
+  },
+  {
+    "section": "AdminPortal",
+    "feature": "Executive Desk 9: Expertise Fields Manager",
+    "passed": true,
+    "details": "Domain management and real-time category broadcasting loaded",
+    "failureReason": null
+  },
+  {
+    "section": "AdminPortal",
+    "feature": "Executive Desk 10: Cross-Expert Availability OPS",
+    "passed": true,
+    "details": "Cross-expert schedule manager loaded",
+    "failureReason": null
+  },
+  {
+    "section": "AdminPortal",
+    "feature": "Executive Desk 11: Dedicated Project Review OPS",
+    "passed": true,
+    "details": "Dedicated project review governance desk loaded",
+    "failureReason": null
+  }
+]
