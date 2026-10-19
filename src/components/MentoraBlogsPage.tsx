@@ -96,7 +96,7 @@ export const MentoraBlogsPage: React.FC<MentoraBlogsPageProps> = ({
         if (Array.isArray(res.categories) && res.categories.length > 0) {
           setDbCategories(['All', ...res.categories.map((c: any) => c.name)]);
         } else {
-          const uniqueCats = Array.from(new Set(res.articles.map(a => a.category))).filter(Boolean);
+          const uniqueCats = Array.from(new Set<string>(res.articles.map((article: any) => article.category).filter(Boolean)));
           setDbCategories(['All', ...uniqueCats]);
         }
       } else {
@@ -543,6 +543,26 @@ export const MentoraBlogsPage: React.FC<MentoraBlogsPageProps> = ({
             </button>
 
             <button
+              onClick={() => setPage('client')}
+              className="transition-colors cursor-pointer"
+              style={{ color: palette.textMuted }}
+              onMouseEnter={(e) => (e.currentTarget.style.color = palette.primary)}
+              onMouseLeave={(e) => (e.currentTarget.style.color = palette.textMuted)}
+            >
+              Client Advisory
+            </button>
+
+            <button
+              onClick={() => setPage('expert')}
+              className="transition-colors cursor-pointer"
+              style={{ color: palette.textMuted }}
+              onMouseEnter={(e) => (e.currentTarget.style.color = palette.primary)}
+              onMouseLeave={(e) => (e.currentTarget.style.color = palette.textMuted)}
+            >
+              Senior Experts
+            </button>
+
+            <button
               onClick={() => setPage('about')}
               className="transition-colors cursor-pointer"
               style={{ color: palette.textMuted }}
@@ -699,6 +719,30 @@ export const MentoraBlogsPage: React.FC<MentoraBlogsPageProps> = ({
                 style={{ color: palette.textMuted }}
               >
                 <span>Stories</span>
+                <ChevronRight className="w-4 h-4 opacity-40" />
+              </button>
+
+              <button
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  setPage('client');
+                }}
+                className="py-2 text-left cursor-pointer flex items-center justify-between"
+                style={{ color: palette.textMuted }}
+              >
+                <span>Client Advisory</span>
+                <ChevronRight className="w-4 h-4 opacity-40" />
+              </button>
+
+              <button
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  setPage('expert');
+                }}
+                className="py-2 text-left cursor-pointer flex items-center justify-between"
+                style={{ color: palette.textMuted }}
+              >
+                <span>Senior Experts</span>
                 <ChevronRight className="w-4 h-4 opacity-40" />
               </button>
 

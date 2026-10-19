@@ -51,29 +51,120 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess }) => {
     });
   }, [domain]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const [isLoading, setIsLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setErrorMessage('');
     if (!email.trim() || !password.trim()) {
       alert('Please fill in email and password.');
       return;
     }
 
-    const newUser: AuthUser = {
-      id: `user-${Date.now()}`,
-      name: name || (selectedRole === 'client' ? 'Startup Founder & CEO' : 'Dr. Rameshwar Sharma'),
-      email,
-      role: selectedRole,
-      avatarUrl: selectedRole === 'professional'
-        ? 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=400&q=80'
-        : 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80',
-      exCompany: exCompany || 'TATA Motors & L&T',
-      yearsOfExperience: yearsExp,
-      domain,
-      hourlyRate,
-      isVerified: selectedRole === 'professional' ? false : true
-    };
+    setIsLoading(true);
+    try {
+      if (authMode === 'signup') {
+        const payload = {
+          email: email.trim().toLowerCase(),
+          password,
+          fullName: name || (selectedRole === 'client' ? 'Startup Founder & CEO' : 'Dr. Rameshwar Sharma'),
+          role: selectedRole === 'professional' ? 'expert' : selectedRole,
+          phone: '+91 98765 43210',
+          company: exCompany || (selectedRole === 'client' ? 'Client Enterprise' : 'TATA Motors & L&T'),
+          field: domain,
+          years: yearsExp,
+          baseRate: hourlyRate,
+          bio: selectedRole === 'client' ? 'Seeking strategic advisory.' : 'Senior industry professional.'
+        };
 
-    onLoginSuccess(newUser);
+        const res = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+
+        if (!data.success && res.status >= 400) {
+          alert(`❌ Registration error: ${data.message || data.error || 'Failed to register'}`);
+          setIsLoading(false);
+          return;
+        }
+
+        const userRecord = data.user || {};
+        const returnedRole: UserRole = (userRecord.role === 'expert' || userRecord.role === 'professional') 
+          ? 'professional' 
+          : (userRecord.role === 'admin' ? 'admin' : 'client');
+
+        const authUser: AuthUser = {
+          id: userRecord.id || `user-${Date.now()}`,
+          name: userRecord.name || userRecord.full_name || name,
+          email: userRecord.email || email,
+          role: returnedRole,
+          avatarUrl: returnedRole === 'professional'
+            ? 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=400&q=80'
+            : 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80',
+          exCompany: userRecord.company || exCompany,
+          yearsOfExperience: userRecord.years || yearsExp,
+          domain: (userRecord.field || domain) as DomainCategory,
+          hourlyRate: userRecord.baseRate || hourlyRate,
+          isVerified: userRecord.is_verified ?? true
+        };
+
+        if (data.token) {
+          localStorage.setItem('admin_token', data.token);
+          sessionStorage.setItem('admin_token', data.token);
+        }
+
+        alert(`✅ ${data.message || 'Account registered successfully!'}`);
+        onLoginSuccess(authUser);
+      } else {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: email.trim().toLowerCase(), password })
+        });
+        const data = await res.json();
+
+        if (!data.success) {
+          alert(`⚠️ Login Failed: ${data.message || data.error || 'Invalid credentials'}`);
+          setIsLoading(false);
+          return;
+        }
+
+        const userRecord = data.user || {};
+        const returnedRole: UserRole = (userRecord.role === 'expert' || userRecord.role === 'professional') 
+          ? 'professional' 
+          : (userRecord.role === 'admin' ? 'admin' : 'client');
+
+        const authUser: AuthUser = {
+          id: userRecord.id || `user-${Date.now()}`,
+          name: userRecord.name || userRecord.full_name || 'User',
+          email: userRecord.email || email,
+          role: returnedRole,
+          avatarUrl: returnedRole === 'professional'
+            ? 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=400&q=80'
+            : 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80',
+          exCompany: userRecord.company || '',
+          yearsOfExperience: userRecord.years || 25,
+          domain: (userRecord.field || 'Finance & Taxation') as DomainCategory,
+          hourlyRate: userRecord.baseRate || 799,
+          isVerified: userRecord.is_verified ?? true
+        };
+
+        if (data.token) {
+          localStorage.setItem('admin_token', data.token);
+          sessionStorage.setItem('admin_token', data.token);
+        }
+
+        alert(`✅ Welcome Back! Signed in successfully.`);
+        onLoginSuccess(authUser);
+      }
+    } catch (err: any) {
+      alert(`❌ Connection error: ${err.message || 'Network error'}`);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleQuickLogin = (role: UserRole) => {

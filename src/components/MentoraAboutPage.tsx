@@ -217,6 +217,26 @@ export const MentoraAboutPage: React.FC<MentoraAboutPageProps> = ({
             Stories
           </button>
 
+          <button
+            onClick={() => setPage("client")}
+            className="transition-colors cursor-pointer"
+            style={{ color: colors.secondaryText }}
+            onMouseEnter={(e) => (e.currentTarget.style.color = colors.accent)}
+            onMouseLeave={(e) => (e.currentTarget.style.color = colors.secondaryText)}
+          >
+            Client Advisory
+          </button>
+
+          <button
+            onClick={() => setPage("expert")}
+            className="transition-colors cursor-pointer"
+            style={{ color: colors.secondaryText }}
+            onMouseEnter={(e) => (e.currentTarget.style.color = colors.accent)}
+            onMouseLeave={(e) => (e.currentTarget.style.color = colors.secondaryText)}
+          >
+            Senior Experts
+          </button>
+
           {/* ACTIVE STATE FOR "ABOUT" ITEM */}
           <div className="relative py-1">
             <span
@@ -412,6 +432,28 @@ export const MentoraAboutPage: React.FC<MentoraAboutPageProps> = ({
               style={{ color: colors.secondaryText }}
             >
               Stories
+            </button>
+
+            <button
+              onClick={() => {
+                setMobileMenuOpen(false);
+                setPage("client");
+              }}
+              className="py-2 text-left cursor-pointer transition-colors font-medium"
+              style={{ color: colors.secondaryText }}
+            >
+              Client Advisory
+            </button>
+
+            <button
+              onClick={() => {
+                setMobileMenuOpen(false);
+                setPage("expert");
+              }}
+              className="py-2 text-left cursor-pointer transition-colors font-medium"
+              style={{ color: colors.secondaryText }}
+            >
+              Senior Experts
             </button>
 
             <div

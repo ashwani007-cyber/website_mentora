@@ -143,7 +143,7 @@ function sharedDbPlugin(): Plugin {
     if (url.startsWith('/api/auth')) {
       (async () => {
         try {
-          const handlerPath = pathToFileURL(path.resolve(__dirname, 'server/mongoHandler.js')).href
+          const handlerPath = pathToFileURL(path.resolve(__dirname, 'server/authHandler.js')).href
           const mod = await import(`${handlerPath}?t=${Date.now()}`)
           await mod.handleApiMiddleware(req, res, next)
         } catch (err: any) {

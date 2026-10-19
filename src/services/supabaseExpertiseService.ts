@@ -41,6 +41,36 @@ export interface ExpertAvailability {
 const EXPERTISE_STORAGE_KEY = 'mentora_expertise_data';
 
 export const expertiseService = {
+  // Helper to fetch from local API if Supabase table is unavailable
+  async getLocalExperts(): Promise<Expert[]> {
+    try {
+      const response = await fetch('/api/experts');
+      if (response.ok) {
+        const data = await response.json();
+        if (Array.isArray(data) && data.length > 0) return data;
+      }
+      const dbRes = await fetch('/api/db');
+      if (dbRes.ok) {
+        const db = await dbRes.json();
+        if (Array.isArray(db?.experts) && db.experts.length > 0) return db.experts;
+      }
+    } catch {}
+    return this.loadFromLocalStorage();
+  },
+
+  // Helper to fetch local availability
+  async getLocalAvailability(expertId: string, date?: string): Promise<ExpertAvailability[]> {
+    try {
+      const url = `/api/availability?expertId=${encodeURIComponent(expertId)}${date ? `&date=${encodeURIComponent(date)}` : ''}`;
+      const res = await fetch(url);
+      if (res.ok) {
+        const json = await res.json();
+        if (Array.isArray(json?.availabilities)) return json.availabilities;
+      }
+    } catch {}
+    return [];
+  },
+
   // Get all experts
   async getExperts(): Promise<Expert[]> {
     try {
@@ -49,11 +79,13 @@ export const expertiseService = {
         .select('*')
         .order('created_at', { ascending: false });
 
-      if (error) throw error;
-      return data || [];
-    } catch (err) {
-      console.error('Error fetching experts:', err);
-      return [];
+      if (error) {
+        return await this.getLocalExperts();
+      }
+      if (Array.isArray(data) && data.length > 0) return data;
+      return await this.getLocalExperts();
+    } catch {
+      return await this.getLocalExperts();
     }
   },
 
@@ -66,10 +98,13 @@ export const expertiseService = {
         .eq('id', id)
         .single();
 
-      if (error) throw error;
-      return data;
-    } catch (err) {
-      console.error('Error fetching expert:', err);
+      if (!error && data) return data;
+    } catch {}
+
+    try {
+      const list = await this.getLocalExperts();
+      return list.find(e => e.id === id || (e as any)._id === id) || null;
+    } catch {
       return null;
     }
   },
@@ -87,11 +122,10 @@ export const expertiseService = {
       }
 
       const { data, error } = await query;
-      if (error) throw error;
-      return data || [];
-    } catch (err) {
-      console.error('Error fetching availability:', err);
-      return [];
+      if (!error && data && data.length > 0) return data;
+      return await this.getLocalAvailability(expertId, date);
+    } catch {
+      return await this.getLocalAvailability(expertId, date);
     }
   },
 
@@ -110,10 +144,17 @@ export const expertiseService = {
         .eq('id', slotId)
         .eq('status', 'AVAILABLE');
 
-      if (error) throw error;
-      return true;
-    } catch (err) {
-      console.error('Error booking availability:', err);
+      if (!error) return true;
+    } catch {}
+
+    try {
+      const res = await fetch('/api/availability/book', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slotId, bookingId, clientId, clientName })
+      });
+      return res.ok;
+    } catch {
       return false;
     }
   },
@@ -127,12 +168,21 @@ export const expertiseService = {
         .select()
         .single();
 
-      if (error) throw error;
-      return data;
-    } catch (err) {
-      console.error('Error creating expert:', err);
-      return null;
-    }
+      if (!error && data) return data;
+    } catch {}
+
+    try {
+      const res = await fetch('/api/experts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(expert)
+      });
+      if (res.ok) {
+        const json = await res.json();
+        return json.expert || json;
+      }
+    } catch {}
+    return null;
   },
 
   // Update expert
@@ -145,12 +195,21 @@ export const expertiseService = {
         .select()
         .single();
 
-      if (error) throw error;
-      return data;
-    } catch (err) {
-      console.error('Error updating expert:', err);
-      return null;
-    }
+      if (!error && data) return data;
+    } catch {}
+
+    try {
+      const res = await fetch('/api/experts/markup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, ...updates })
+      });
+      if (res.ok) {
+        const json = await res.json();
+        return json.expert || json;
+      }
+    } catch {}
+    return null;
   },
 
   // Save to local storage (for offline support)

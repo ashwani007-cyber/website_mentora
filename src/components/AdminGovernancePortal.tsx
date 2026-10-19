@@ -97,8 +97,8 @@ function handleImgError(e: React.SyntheticEvent<HTMLImageElement, Event>) {
 
 interface AdminGovernancePortalProps {
   setPage: (p: string) => void;
-  experts: ExpertDoc[];
-  pendingVerifications: any[];
+  experts?: ExpertDoc[];
+  pendingVerifications?: any[];
   onUpdateExpertMarkup: (expId: string, base: number, markup: number) => void;
   onOpenMongoModal: () => void;
   onToggleFeatured?: (expId: string, featured: boolean) => void;
@@ -116,8 +116,8 @@ interface AdminGovernancePortalProps {
 
 export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
   setPage,
-  experts,
-  pendingVerifications,
+  experts: propExperts = [],
+  pendingVerifications = [],
   onUpdateExpertMarkup,
   onOpenMongoModal,
   onToggleFeatured,
@@ -132,6 +132,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
   onToggleTheme,
   onLogout,
 }) => {
+  const experts = Array.isArray(propExperts) ? propExperts : [];
   // Navigation Desks State
   const [activeDesk, setActiveDesk] = useState<"kpi" | "kyc" | "pricing" | "spotlight" | "reviews" | "sessions" | "broadcast" | "diagnostics" | "expertise" | "availability" | "project_reviews" | "blogs">("kpi");
   const [adminInspectingReviewId, setAdminInspectingReviewId] = useState<string | null>(null);
@@ -1218,9 +1219,10 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
 
 
   // Expert Markup Pricing State
-  const [markupState, setMarkupState] = useState<Record<string, { base: number; markup: number }>>(
-    experts.reduce((acc, e) => {
-      acc[e.id] = { base: e.baseRate || e.rate - 150, markup: e.adminMarkup || 150 };
+  const [markupState, setMarkupState] = useState<Record<string, { base: number; markup: number }>>(() =>
+    (experts || []).reduce((acc, e) => {
+      if (!e) return acc;
+      acc[e.id] = { base: e.baseRate || (e.rate ? e.rate - 150 : 100), markup: e.adminMarkup || 150 };
       return acc;
     }, {} as Record<string, { base: number; markup: number }>)
   );
@@ -1228,9 +1230,9 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
   useEffect(() => {
     setMarkupState((prev) => {
       const next = { ...prev };
-      experts.forEach((e) => {
-        if (!next[e.id]) {
-          next[e.id] = { base: e.baseRate || e.rate - 150, markup: e.adminMarkup || 150 };
+      (experts || []).forEach((e) => {
+        if (e && !next[e.id]) {
+          next[e.id] = { base: e.baseRate || (e.rate ? e.rate - 150 : 100), markup: e.adminMarkup || 150 };
         }
       });
       return next;
@@ -1286,11 +1288,18 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
       >
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-3">
-            <img
-              src={isLight ? "/mentora-logo-horizontal-light.png" : "/mentora-logo-horizontal-dark.png"}
-              alt="Mentora — Empowering Future Leaders"
-              className="h-9 w-auto object-contain drop-shadow-sm brightness-[1.02] contrast-[1.05]"
-            />
+            <button
+              type="button"
+              onClick={() => setPage("landing")}
+              className="bg-transparent border-0 p-0 cursor-pointer hover:opacity-90 transition-opacity"
+              title="Return to Mentora Home"
+            >
+              <img
+                src={isLight ? "/mentora-logo-horizontal-light.png" : "/mentora-logo-horizontal-dark.png"}
+                alt="Mentora — Empowering Future Leaders"
+                className="h-9 w-auto object-contain drop-shadow-sm brightness-[1.02] contrast-[1.05]"
+              />
+            </button>
             <div className="hidden sm:block border-l pl-3" style={{ borderColor: T.lineInk }}>
               <div className="flex items-center gap-2">
                 <span
@@ -1332,20 +1341,69 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
 
         {/* Executive Right Controls */}
         <div className="flex items-center gap-3">
-          {/* Quick Bridge Button to Public Website */}
-          <button
-            onClick={() => setPage("landing")}
-            className="text-xs px-3.5 py-1.5 rounded font-semibold flex items-center gap-1.5 cursor-pointer transition-all border hover:border-amber-400"
-            style={{
-              background: isLight ? "#F1F5F9" : "rgba(255,255,255,0.04)",
-              borderColor: isLight ? "#CBD5E1" : "rgba(201,160,99,0.35)",
-              color: isLight ? "#92400E" : T.brassLight
-            }}
-            title="Open Live Public Website in Client View"
-          >
-            <ExternalLink size={13} />
-            <span>View Live Website ↗</span>
-          </button>
+          {/* Quick Bridge Buttons to All Portals */}
+          <div className="hidden xl:flex items-center gap-1.5">
+            <button
+              onClick={() => setPage("landing")}
+              className="text-xs px-2.5 py-1 rounded font-medium flex items-center gap-1 cursor-pointer transition-all border hover:border-amber-400"
+              style={{
+                background: isLight ? "#F1F5F9" : "rgba(255,255,255,0.04)",
+                borderColor: isLight ? "#CBD5E1" : "rgba(201,160,99,0.35)",
+                color: isLight ? "#92400E" : T.brassLight
+              }}
+              title="Public Home"
+            >
+              <ExternalLink size={12} /> Home
+            </button>
+            <button
+              onClick={() => setPage("client")}
+              className="text-xs px-2.5 py-1 rounded font-medium flex items-center gap-1 cursor-pointer transition-all border hover:border-amber-400"
+              style={{
+                background: isLight ? "#F1F5F9" : "rgba(255,255,255,0.04)",
+                borderColor: isLight ? "#CBD5E1" : "rgba(201,160,99,0.35)",
+                color: isLight ? "#92400E" : T.brassLight
+              }}
+              title="Client Advisory Portal"
+            >
+              Client
+            </button>
+            <button
+              onClick={() => setPage("expert")}
+              className="text-xs px-2.5 py-1 rounded font-medium flex items-center gap-1 cursor-pointer transition-all border hover:border-amber-400"
+              style={{
+                background: isLight ? "#F1F5F9" : "rgba(255,255,255,0.04)",
+                borderColor: isLight ? "#CBD5E1" : "rgba(201,160,99,0.35)",
+                color: isLight ? "#92400E" : T.brassLight
+              }}
+              title="Expert Consultation Portal"
+            >
+              Expert
+            </button>
+            <button
+              onClick={() => setPage("about")}
+              className="text-xs px-2.5 py-1 rounded font-medium flex items-center gap-1 cursor-pointer transition-all border hover:border-amber-400"
+              style={{
+                background: isLight ? "#F1F5F9" : "rgba(255,255,255,0.04)",
+                borderColor: isLight ? "#CBD5E1" : "rgba(201,160,99,0.35)",
+                color: isLight ? "#92400E" : T.brassLight
+              }}
+              title="About Mentora"
+            >
+              About
+            </button>
+            <button
+              onClick={() => setPage("blogs")}
+              className="text-xs px-2.5 py-1 rounded font-medium flex items-center gap-1 cursor-pointer transition-all border hover:border-amber-400"
+              style={{
+                background: isLight ? "#F1F5F9" : "rgba(255,255,255,0.04)",
+                borderColor: isLight ? "#CBD5E1" : "rgba(201,160,99,0.35)",
+                color: isLight ? "#92400E" : T.brassLight
+              }}
+              title="Blogs & Articles"
+            >
+              Blogs
+            </button>
+          </div>
 
           {/* Theme Toggle Button (☀️ Light / 🌙 Dark) */}
           <button

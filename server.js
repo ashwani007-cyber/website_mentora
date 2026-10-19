@@ -1,14 +1,19 @@
 // Express + Supabase Server for Mentora Platform
 // Run with: node server.js
 
-import express from 'express';
-import cors from 'cors';
 import dotenv from 'dotenv';
-import { supabase } from './server/supabaseClient.js';
-import bcrypt from 'bcryptjs';
-
 dotenv.config();
 
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import express from 'express';
+import cors from 'cors';
+import { supabase } from './server/supabaseClient.js';
+import { handleApiMiddleware } from './server/authHandler.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -22,103 +27,27 @@ console.log('🚀 Starting Mentora Server with Supabase...');
 // ============================================================
 app.get('/api/health', async (req, res) => {
   try {
-    const { data, error } = await supabase.from('users').select('count').limit(1);
+    const { error } = await supabase.from('users').select('id').limit(1);
     if (error) throw error;
     res.json({ success: true, message: 'Server is healthy', database: 'connected' });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(200).json({ success: true, message: 'Server is healthy', database: 'local-fallback', warning: err.message });
   }
 });
 
-// ============================================================
-// AUTHENTICATION ENDPOINTS
-// ============================================================
-
-// Register User
-app.post('/api/auth/register', async (req, res) => {
-  try {
-    const { email, password, fullName, role, phone } = req.body;
-
-    if (!email || !password || !role) {
-      return res.status(400).json({ success: false, error: 'Email, password, and role are required' });
-    }
-
-    if (!['admin', 'expert', 'client'].includes(role)) {
-      return res.status(400).json({ success: false, error: 'Invalid role' });
-    }
-
-    // Check if user exists
-    const { data: existingUser } = await supabase
-      .from('users')
-      .select('id')
-      .eq('email', email.toLowerCase())
-      .single();
-
-    if (existingUser) {
-      return res.status(409).json({ success: false, error: 'User already exists' });
-    }
-
-    // Hash password
-    const passwordHash = await bcrypt.hash(password, 10);
-
-    // Create user
-    const { data: user, error } = await supabase
-      .from('users')
-      .insert({
-        email: email.toLowerCase(),
-        password_hash: passwordHash,
-        full_name: fullName,
-        role,
-        phone
-      })
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    res.json({ success: true, user: { id: user.id, email: user.email, role: user.role, full_name: user.full_name } });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+app.use('/api/auth', (req, res, next) => {
+  req.url = `/api/auth${req.url === '/' ? '' : req.url}`;
+  handleApiMiddleware(req, res, next);
 });
 
-// Login User
-app.post('/api/auth/login', async (req, res) => {
+app.get('/api/db', (req, res) => {
   try {
-    const { email, password } = req.body;
-
-    if (!email || !password) {
-      return res.status(400).json({ success: false, error: 'Email and password are required' });
+    const dbPath = path.resolve(__dirname, 'db.json');
+    if (fs.existsSync(dbPath)) {
+      const data = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
+      return res.json(data);
     }
-
-    // Get user
-    const { data: user, error } = await supabase
-      .from('users')
-      .select('*')
-      .eq('email', email.toLowerCase())
-      .single();
-
-    if (error || !user) {
-      return res.status(401).json({ success: false, error: 'Invalid credentials' });
-    }
-
-    // Verify password
-    const validPassword = await bcrypt.compare(password, user.password_hash);
-    if (!validPassword) {
-      return res.status(401).json({ success: false, error: 'Invalid credentials' });
-    }
-
-    res.json({
-      success: true,
-      user: {
-        id: user.id,
-        email: user.email,
-        role: user.role,
-        full_name: user.full_name,
-        phone: user.phone,
-        is_verified: user.is_verified
-      }
-    });
+    res.json({ experts: [], users: [], bookings: [] });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -139,7 +68,13 @@ app.get('/api/experts', async (req, res) => {
     if (error) throw error;
     res.json(experts || []);
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    try {
+      const dbPath = path.resolve(__dirname, 'db.json');
+      const db = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
+      res.json(db.experts || []);
+    } catch {
+      res.status(500).json({ success: false, error: err.message });
+    }
   }
 });
 
@@ -216,7 +151,15 @@ app.get('/api/availability', async (req, res) => {
 
     res.json({ success: true, availabilities });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    try {
+      const dbPath = path.resolve(__dirname, 'db.json');
+      const db = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
+      let list = db.availabilities || [];
+      if (req.query.expertId) list = list.filter(a => a.expertId === req.query.expertId || a.expert_id === req.query.expertId);
+      res.json({ success: true, availabilities: list });
+    } catch {
+      res.status(500).json({ success: false, error: err.message });
+    }
   }
 });
 
@@ -292,7 +235,17 @@ app.get('/api/project-reviews', async (req, res) => {
 
     res.json({ success: true, projectReviews: reviews || [] });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    try {
+      const dbPath = path.resolve(__dirname, 'db.json');
+      const db = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
+      let list = db.projectReviews || [];
+      if (req.query.id) list = list.filter(r => r.id === req.query.id || r.project_review_id === req.query.id);
+      if (req.query.clientId) list = list.filter(r => r.clientId === req.query.clientId || r.client_id === req.query.clientId);
+      if (req.query.expertId) list = list.filter(r => r.expertId === req.query.expertId || r.expert_id === req.query.expertId);
+      res.json({ success: true, projectReviews: list });
+    } catch {
+      res.status(500).json({ success: false, error: err.message });
+    }
   }
 });
 
@@ -422,7 +375,14 @@ app.get('/api/platform-settings', async (req, res) => {
 
     res.json({ success: true, config, platformCharge: config });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    try {
+      const dbPath = path.resolve(__dirname, 'db.json');
+      const db = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
+      const config = db.platformCharge || { feeType: 'fixed', feeValue: 200, currency: 'INR' };
+      res.json({ success: true, config, platformCharge: config });
+    } catch {
+      res.status(500).json({ success: false, error: err.message });
+    }
   }
 });
 

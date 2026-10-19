@@ -174,9 +174,10 @@ export const AdminProjectReviewDesk: React.FC<AdminProjectReviewDeskProps> = ({
   const loadReviews = async () => {
     try {
       const list = await mongoDB.getProjectReviews({ includeArchived: true });
-      setReviews(list);
+      setReviews(Array.isArray(list) ? list : (Array.isArray((list as any)?.projectReviews) ? (list as any).projectReviews : []));
     } catch (e) {
       console.error('Failed to load project reviews for admin:', e);
+      setReviews([]);
     } finally {
       setIsLoading(false);
     }

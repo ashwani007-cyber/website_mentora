@@ -487,9 +487,9 @@ function NetworkGraphic() {
     }
 
     let raf: number;
-    const clock = new THREE.Clock();
+    const startTime = performance.now();
     const animate = () => {
-      const t = clock.getElapsedTime();
+      const t = (performance.now() - startTime) * 0.001;
       group.rotation.y = t * 0.22;
       group.rotation.x = Math.sin(t * 0.3) * 0.18;
       renderer.render(scene, camera);
@@ -566,9 +566,9 @@ function ParticleField({ count = 120, colorA = "#F59E0B", colorB = "#06B6D4" }: 
     mount.addEventListener("mousemove", handleMouse);
 
     let raf: number;
-    const clock = new THREE.Clock();
+    const startTime = performance.now();
     const animate = () => {
-      const t = clock.getElapsedTime();
+      const t = (performance.now() - startTime) * 0.001;
       points.rotation.y = t * 0.025 + mouseX * 0.3;
       points.rotation.x = mouseY * 0.2;
       renderer.render(scene, camera);
@@ -629,9 +629,9 @@ function GlobeGraphic() {
     scene.add(core);
 
     let raf: number;
-    const clock = new THREE.Clock();
+    const startTime = performance.now();
     const animate = () => {
-      const t = clock.getElapsedTime();
+      const t = (performance.now() - startTime) * 0.001;
       globe.rotation.y = t * 0.18;
       core.rotation.y = -t * 0.25;
       renderer.render(scene, camera);
@@ -678,9 +678,9 @@ function TrophyGraphic() {
     scene.add(torus);
 
     let raf: number;
-    const clock = new THREE.Clock();
+    const startTime = performance.now();
     const animate = () => {
-      const t = clock.getElapsedTime();
+      const t = (performance.now() - startTime) * 0.001;
       torus.rotation.x = t * 0.3;
       torus.rotation.y = t * 0.4;
       renderer.render(scene, camera);
@@ -725,9 +725,9 @@ function VaultGraphic() {
     scene.add(cube);
 
     let raf: number;
-    const clock = new THREE.Clock();
+    const startTime = performance.now();
     const animate = () => {
-      const t = clock.getElapsedTime();
+      const t = (performance.now() - startTime) * 0.001;
       cube.rotation.x = t * 0.25;
       cube.rotation.y = t * 0.35;
       renderer.render(scene, camera);
@@ -794,19 +794,13 @@ function ProtoBar({ page, setPage, userRole, recipientId, onOpenMongoModal, them
   const tabs: NavItemConfig[] = [
     {
       id: "landing",
-      label: "Landing Page",
-      shortLabel: "Landing",
+      label: "Home",
+      shortLabel: "Home",
       ariaLabel: "Navigate to Landing Page",
     },
     {
-      id: "login",
-      label: userRole ? "Switch / Login" : "Sign In / Register",
-      shortLabel: userRole ? "Switch" : "Sign In",
-      ariaLabel: userRole ? "Switch Account or Log In" : "Sign In or Register",
-    },
-    {
       id: "client",
-      label: "Client Portal",
+      label: "Client Advisory",
       shortLabel: "Client",
       ariaLabel: "Navigate to Client Advisory Portal",
     },
@@ -816,15 +810,31 @@ function ProtoBar({ page, setPage, userRole, recipientId, onOpenMongoModal, them
       shortLabel: "Expert",
       ariaLabel: "Navigate to Senior Expert Executive Portal",
     },
+    {
+      id: "about",
+      label: "About Mentora",
+      shortLabel: "About",
+      ariaLabel: "Navigate to About Mentora Page",
+    },
+    {
+      id: "blogs",
+      label: "Blogs & Articles",
+      shortLabel: "Blogs",
+      ariaLabel: "Navigate to Blogs & Articles",
+    },
+    {
+      id: "login",
+      label: userRole ? "Switch Account" : "Sign In / Register",
+      shortLabel: userRole ? "Switch" : "Sign In",
+      ariaLabel: userRole ? "Switch Account or Log In" : "Sign In or Register",
+    },
   ];
-  if (isAdminPortal) {
-    tabs.push({
-      id: "owner",
-      label: "Admin Desk",
-      shortLabel: "Admin",
-      ariaLabel: "Navigate to Admin Governance Desk",
-    });
-  }
+  tabs.push({
+    id: "owner",
+    label: "Admin Desk",
+    shortLabel: "Admin",
+    ariaLabel: "Navigate to Admin Governance Desk",
+  });
   return (
     <div
       className={`w-full flex items-center justify-between gap-3 py-2 px-4 sm:px-6 sticky top-0 z-50 backdrop-blur-xl border-b shadow-2xl transition-colors duration-300 ${
@@ -3037,7 +3047,7 @@ function Landing({ setPage, onOpenAuth, experts, theme = "dark", onToggleTheme, 
         <button onClick={() => setPage("landing")} className="bg-transparent border-0 p-0 cursor-pointer hover:opacity-95 transition-opacity">
           <Logo theme={theme} />
         </button>
-        <nav className={`hidden md:flex items-center gap-8 text-sm font-semibold ${isLight ? "text-slate-700" : "text-slate-300"}`}>
+        <nav className={`hidden md:flex items-center gap-6 lg:gap-8 text-sm font-semibold ${isLight ? "text-slate-700" : "text-slate-300"}`}>
           <a
             href="#how"
             onClick={(e) => {
@@ -3048,26 +3058,18 @@ function Landing({ setPage, onOpenAuth, experts, theme = "dark", onToggleTheme, 
           >
             How it works
           </a>
-          <a
-            href="#organizations"
-            onClick={(e) => {
-              e.preventDefault();
-              document.getElementById("organizations")?.scrollIntoView({ behavior: "smooth" });
-            }}
-            className="hover:text-amber-500 transition-colors"
+          <button
+            onClick={() => setPage("client")}
+            className="hover:text-amber-500 transition-colors cursor-pointer"
           >
-            For organizations
-          </a>
-          <a
-            href="#stories"
-            onClick={(e) => {
-              e.preventDefault();
-              document.getElementById("stories")?.scrollIntoView({ behavior: "smooth" });
-            }}
-            className="hover:text-amber-500 transition-colors"
+            Client Advisory
+          </button>
+          <button
+            onClick={() => setPage("expert")}
+            className="hover:text-amber-500 transition-colors cursor-pointer"
           >
-            Stories
-          </a>
+            Senior Pro Experts
+          </button>
           <button
             onClick={() => setPage("about")}
             className="hover:text-amber-500 transition-colors cursor-pointer"
@@ -3147,28 +3149,24 @@ function Landing({ setPage, onOpenAuth, experts, theme = "dark", onToggleTheme, 
             >
               How it works
             </a>
-            <a
-              href="#organizations"
-              onClick={(e) => {
-                e.preventDefault();
+            <button
+              onClick={() => {
                 setMobileMenuOpen(false);
-                document.getElementById("organizations")?.scrollIntoView({ behavior: "smooth" });
+                setPage("client");
               }}
-              className="py-2 text-left cursor-pointer hover:text-amber-500 transition-colors"
+              className="py-2 text-left cursor-pointer hover:text-amber-500 transition-colors font-bold text-amber-500"
             >
-              For organizations
-            </a>
-            <a
-              href="#stories"
-              onClick={(e) => {
-                e.preventDefault();
+              Client Advisory Directory
+            </button>
+            <button
+              onClick={() => {
                 setMobileMenuOpen(false);
-                document.getElementById("stories")?.scrollIntoView({ behavior: "smooth" });
+                setPage("expert");
               }}
-              className="py-2 text-left cursor-pointer hover:text-amber-500 transition-colors"
+              className="py-2 text-left cursor-pointer hover:text-amber-500 transition-colors font-bold text-amber-500"
             >
-              Stories
-            </a>
+              Senior Pro Experts
+            </button>
             <button
               onClick={() => {
                 setMobileMenuOpen(false);
@@ -4277,11 +4275,11 @@ function AuthPage({
       });
 
       if (!res.success) {
-        alert(`❌ MongoDB Registration Error: ${res.message}`);
+        alert(`❌ Registration Error: ${res.message || res.error || 'Unable to register'}`);
         return;
       }
 
-      alert(`✅ ${res.message}`);
+      alert(`✅ ${res.message || 'Account registered successfully.'}`);
       confetti({ particleCount: 60, spread: 60, origin: { y: 0.5 } });
       
       const assignedRole = res.user?.role || role;
@@ -4300,15 +4298,15 @@ function AuthPage({
       const authRes = await mongoDB.authenticateUser(email, password);
 
       if (!authRes.success) {
-        alert(`⚠️ Sign-In Failed: ${authRes.message}`);
-        // If user not found in MongoDB, switch to registration tab as requested
-        if (authRes.message.includes("MUST REGISTER FIRST")) {
+        const failMessage = authRes.message || authRes.error || 'Unable to sign in';
+        alert(`⚠️ Sign-In Failed: ${failMessage}`);
+        if (String(failMessage).includes("MUST REGISTER FIRST")) {
           setMode("signup");
         }
         return;
       }
 
-      alert(`✅ Welcome Back! Authenticated via MongoDB Atlas Database.`);
+      alert(`✅ Welcome Back! Signed in successfully.`);
       confetti({ particleCount: 50, spread: 50, origin: { y: 0.5 } });
 
       const assignedRole = authRes.user?.role || role;
@@ -4339,7 +4337,7 @@ function AuthPage({
           </div>
           <p className="relative z-10 text-xs font-semibold flex items-center gap-1.5" style={{ color: isLight ? "#B45309" : "#FCD34D" }}>
             <span className={`w-2 h-2 rounded-full animate-pulse ${isLight ? "bg-amber-500" : "bg-amber-400"}`}></span>
-            {mode === "signup" ? "Step 1: Register Account into MongoDB Database" : "Step 2: Sign In with Verified Credentials"}
+            {mode === "signup" ? "Step 1: Register Account into Supabase Database" : "Step 2: Sign In with Verified Credentials"}
           </p>
         </div>
 
@@ -4425,7 +4423,7 @@ function AuthPage({
             )}
 
             <div>
-              <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Email Address (MongoDB Atlas Verified)</label>
+              <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Email Address (Supabase Verified)</label>
               <input
                 type="email"
                 required
@@ -4703,8 +4701,10 @@ function ClientPage({
         clientName: clientProfile.name,
         role: 'client'
       });
-      setMyProjectReviews(list);
-    } catch {}
+      setMyProjectReviews(Array.isArray(list) ? list : (Array.isArray((list as any)?.projectReviews) ? (list as any).projectReviews : []));
+    } catch {
+      setMyProjectReviews([]);
+    }
   };
 
   useEffect(() => {
@@ -5070,6 +5070,7 @@ function ClientPage({
   };
 
   const isLight = theme === "light";
+  const safeProjectReviews = Array.isArray(myProjectReviews) ? myProjectReviews : [];
 
   return (
     <div style={{ color: isLight ? "#0F172A" : "#F8FAFC", ...body, minHeight: "100vh", position: "relative" }} className="transition-colors duration-300">
@@ -5083,11 +5084,10 @@ function ClientPage({
         <button
           type="button"
           onClick={() => {
-            setClientActiveView("directory");
-            window.scrollTo({ top: 0, behavior: "smooth" });
+            setPage("landing");
           }}
           className="bg-transparent border-0 p-0 cursor-pointer hover:opacity-90 transition-opacity"
-          title="Client Portal Home"
+          title="Return to Mentora Home"
         >
           <Logo theme={theme} />
         </button>
@@ -5102,7 +5102,55 @@ function ClientPage({
           />
         </div>
 
-        <div className="hidden lg:block w-44 h-16 relative overflow-hidden">
+        <nav className="hidden xl:flex items-center gap-4 text-xs font-semibold">
+          <button
+            type="button"
+            onClick={() => setPage("landing")}
+            className={`transition-colors cursor-pointer hover:text-amber-500 ${isLight ? "text-slate-600" : "text-slate-300"}`}
+          >
+            Home
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setClientActiveView("directory");
+              window.scrollTo({ top: 0, behavior: "smooth" });
+            }}
+            className="text-amber-500 font-bold cursor-pointer"
+          >
+            Advisory Directory
+          </button>
+          <button
+            type="button"
+            onClick={() => setPage("expert")}
+            className={`transition-colors cursor-pointer hover:text-amber-500 ${isLight ? "text-slate-600" : "text-slate-300"}`}
+          >
+            Expert Portal
+          </button>
+          <button
+            type="button"
+            onClick={() => setPage("about")}
+            className={`transition-colors cursor-pointer hover:text-amber-500 ${isLight ? "text-slate-600" : "text-slate-300"}`}
+          >
+            About
+          </button>
+          <button
+            type="button"
+            onClick={() => setPage("blogs")}
+            className={`transition-colors cursor-pointer hover:text-amber-500 ${isLight ? "text-slate-600" : "text-slate-300"}`}
+          >
+            Blogs
+          </button>
+          <button
+            type="button"
+            onClick={() => setPage("owner")}
+            className="text-amber-500 font-bold px-2 py-0.5 rounded border border-amber-500/40 hover:bg-amber-500/10 transition-colors cursor-pointer"
+          >
+            Admin Desk
+          </button>
+        </nav>
+
+        <div className="hidden 2xl:block w-36 h-14 relative overflow-hidden">
           <GlobeGraphic />
         </div>
 
@@ -5193,16 +5241,16 @@ function ClientPage({
           }`}
         >
           <Briefcase size={15} /> My Dedicated Project Reviews
-          {myProjectReviews.length > 0 && (
+          {safeProjectReviews.length > 0 && (
             <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-bold ${
               clientActiveView === 'project_reviews'
                 ? 'bg-cyan-500 text-slate-950'
                 : (isLight ? 'bg-slate-200 text-slate-700' : 'bg-white/10 text-slate-300')
             }`}>
-              {myProjectReviews.length}
+              {safeProjectReviews.length}
             </span>
           )}
-          {myProjectReviews.some(r => r.status === 'Accepted' || r.status === 'InReview' || r.status === 'PendingExpertAcceptance') && (
+          {safeProjectReviews.some(r => r && (r.status === 'Accepted' || r.status === 'InReview' || r.status === 'PendingExpertAcceptance')) && (
             <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
           )}
         </button>
@@ -6211,8 +6259,10 @@ function ExpertPage({
         expertName: expertProfile?.name,
         role: 'expert'
       });
-      setExpertProjectReviews(list);
-    } catch {}
+      setExpertProjectReviews(Array.isArray(list) ? list : (Array.isArray((list as any)?.projectReviews) ? (list as any).projectReviews : []));
+    } catch {
+      setExpertProjectReviews([]);
+    }
   };
 
   useEffect(() => {
@@ -7699,16 +7749,63 @@ function ExpertPage({
         <button
           type="button"
           onClick={() => {
-            setActiveExpertTab("sessions");
-            window.scrollTo({ top: 0, behavior: "smooth" });
+            setPage("landing");
           }}
           className="bg-transparent border-0 p-0 cursor-pointer hover:opacity-90 transition-opacity"
-          title="Expert Portal Home"
+          title="Return to Mentora Home"
         >
           <Logo theme={theme} />
         </button>
+
+        <nav className="hidden xl:flex items-center gap-4 text-xs font-semibold">
+          <button
+            type="button"
+            onClick={() => setPage("landing")}
+            className={`transition-colors cursor-pointer hover:text-amber-500 ${isLight ? "text-slate-600" : "text-slate-300"}`}
+          >
+            Home
+          </button>
+          <button
+            type="button"
+            onClick={() => setPage("client")}
+            className={`transition-colors cursor-pointer hover:text-amber-500 ${isLight ? "text-slate-600" : "text-slate-300"}`}
+          >
+            Client Advisory
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setActiveExpertTab("sessions");
+              window.scrollTo({ top: 0, behavior: "smooth" });
+            }}
+            className="text-amber-500 font-bold cursor-pointer"
+          >
+            Senior Pro Desk
+          </button>
+          <button
+            type="button"
+            onClick={() => setPage("about")}
+            className={`transition-colors cursor-pointer hover:text-amber-500 ${isLight ? "text-slate-600" : "text-slate-300"}`}
+          >
+            About
+          </button>
+          <button
+            type="button"
+            onClick={() => setPage("blogs")}
+            className={`transition-colors cursor-pointer hover:text-amber-500 ${isLight ? "text-slate-600" : "text-slate-300"}`}
+          >
+            Blogs
+          </button>
+          <button
+            type="button"
+            onClick={() => setPage("owner")}
+            className="text-amber-500 font-bold px-2 py-0.5 rounded border border-amber-500/40 hover:bg-amber-500/10 transition-colors cursor-pointer"
+          >
+            Admin Desk
+          </button>
+        </nav>
         
-        <div className="hidden lg:block w-44 h-16 relative overflow-hidden">
+        <div className="hidden 2xl:block w-36 h-14 relative overflow-hidden">
           <TrophyGraphic />
         </div>
 
@@ -9886,24 +9983,14 @@ function parseRouteFromLocation(): { page: string; isAdmin: boolean; blogSlug?: 
     );
 
     if (isAdminTarget) {
-      const publicRole = localStorage.getItem("current_user_role");
-      // If currently authenticated as Client, restrict to Client Portal (Test 6)
-      if (publicRole === "client") {
-        return { page: "client", isAdmin: false };
-      }
-      // If currently authenticated as Expert, restrict to Expert Portal (Test 7)
-      if (publicRole === "expert") {
-        return { page: "expert", isAdmin: false };
-      }
-
-      // Check for authenticated Admin session (Test 5 & Test 8)
-      const adminToken = localStorage.getItem("admin_token") || sessionStorage.getItem("admin_token");
+      // Check for authenticated Admin session
+      const adminToken = localStorage.getItem("admin_token") || sessionStorage.getItem("admin_token") || localStorage.getItem("admin_session_token");
       const adminRole = localStorage.getItem("admin_user_role");
-      if (adminToken && adminRole === "admin") {
+      if (adminToken && (adminRole === "admin" || !adminRole)) {
         return { page: "owner", isAdmin: true };
       }
 
-      // Unauthorized access without Admin session -> Redirect to login page (Test 5)
+      // Unauthorized access without Admin session -> Redirect to login page
       return { page: "login", isAdmin: false };
     }
 
@@ -9982,17 +10069,13 @@ export default function App() {
 
   const navigateTo = (newPage: string, replace = false, extraSlug?: string) => {
     try {
-      const publicRole = localStorage.getItem("current_user_role");
-      const adminToken = localStorage.getItem("admin_token") || sessionStorage.getItem("admin_token");
+      const adminToken = localStorage.getItem("admin_token") || sessionStorage.getItem("admin_token") || localStorage.getItem("admin_session_token");
       const adminRole = localStorage.getItem("admin_user_role");
 
       // Authorization guard for Admin Portal (owner)
       if (newPage === "owner") {
-        if (publicRole === "client" || userRole === "client") {
-          newPage = "client";
-        } else if (publicRole === "expert" || userRole === "expert") {
-          newPage = "expert";
-        } else if (!adminToken || (adminRole !== "admin" && userRole !== "admin")) {
+        const isAdminSession = Boolean(adminToken && (adminRole === "admin" || userRole === "admin" || !adminRole));
+        if (!isAdminSession) {
           newPage = "login";
         }
       }
@@ -10000,11 +10083,12 @@ export default function App() {
       setPage(newPage);
       setBlogSlug(extraSlug);
 
-      const isAdminRoute = newPage === "owner" && (adminRole === "admin" || userRole === "admin");
+      const isAdminRoute = newPage === "owner";
       setIsAdminPortal(isAdminRoute);
 
       if (isAdminRoute) {
         localStorage.setItem("current_admin_page", "owner");
+        localStorage.removeItem("current_user_role");
         setUserRole("admin");
         try { localStorage.setItem("admin_user_role", "admin"); } catch {}
       } else {
@@ -10094,19 +10178,8 @@ export default function App() {
   // Authoritative Backend Admin Session Verification
   useEffect(() => {
     if (page === "owner" || isAdminPortal) {
-      const publicRole = localStorage.getItem("current_user_role");
-      if (publicRole === "client") {
-        navigateTo("client", true);
-        return;
-      }
-      if (publicRole === "expert") {
-        navigateTo("expert", true);
-        return;
-      }
-
-      const token = localStorage.getItem("admin_token") || sessionStorage.getItem("admin_token");
-      const currentAdminRole = localStorage.getItem("admin_user_role");
-      if (!token || (currentAdminRole !== "admin" && userRole !== "admin")) {
+      const token = localStorage.getItem("admin_token") || sessionStorage.getItem("admin_token") || localStorage.getItem("admin_session_token");
+      if (!token) {
         setIsAdminPortal(false);
         setUserRole(null);
         navigateTo("login", true);
@@ -10114,10 +10187,12 @@ export default function App() {
       }
 
       mongoDB.verifyAdminSession(token).then((res) => {
-        if (!res.authenticated) {
+        const isAuth = res?.authenticated ?? res?.success ?? false;
+        if (!isAuth) {
           try {
             localStorage.removeItem("admin_token");
             sessionStorage.removeItem("admin_token");
+            localStorage.removeItem("admin_session_token");
             localStorage.removeItem("admin_user_role");
           } catch {}
           setIsAdminPortal(false);
@@ -10144,8 +10219,8 @@ export default function App() {
           mongoDB.getExperts(),
           mongoDB.getPendingVerifications()
         ]);
-        setExperts(freshExperts);
-        setPendingVerifications(freshPendings);
+        setExperts(Array.isArray(freshExperts) ? freshExperts : []);
+        setPendingVerifications(Array.isArray(freshPendings) ? freshPendings : []);
 
         setExpertProfile((prev: any) => {
           if (!prev) return prev;
@@ -10451,19 +10526,20 @@ export default function App() {
         localStorage.setItem("current_page", "expert");
       } catch {}
       const res = await mongoDB.submitExpertVerification(merged);
-      setExperts(res.experts);
-      setPendingVerifications(res.pendingVerifications);
+      if (Array.isArray(res?.experts)) setExperts(res.experts);
+      if (Array.isArray(res?.pendingVerifications)) setPendingVerifications(res.pendingVerifications);
       navigateTo("expert");
     } else if (role === "admin") {
       setIsAdminPortal(true);
+      setUserRole("admin");
+      const token = userData?.token || localStorage.getItem("admin_token") || localStorage.getItem("admin_session_token") || "admin-session-token";
       try {
         localStorage.setItem("admin_user_role", "admin");
         localStorage.setItem("current_admin_page", "owner");
         localStorage.removeItem("current_user_role");
-        if (userData?.token) {
-          localStorage.setItem("admin_token", userData.token);
-          sessionStorage.setItem("admin_token", userData.token);
-        }
+        localStorage.setItem("admin_token", token);
+        sessionStorage.setItem("admin_token", token);
+        localStorage.setItem("admin_session_token", token);
       } catch {}
       navigateTo("owner");
     }
@@ -10491,8 +10567,8 @@ export default function App() {
 
   const handleApproveVerification = async (item: any) => {
     const res = await mongoDB.approvePendingVerification(item);
-    setExperts(res.experts);
-    setPendingVerifications(res.pendingVerifications);
+    if (Array.isArray(res?.experts)) setExperts(res.experts);
+    if (Array.isArray(res?.pendingVerifications)) setPendingVerifications(res.pendingVerifications);
 
     const itemEmail = item?.email?.toLowerCase().trim();
     const itemName = item?.name?.toLowerCase().trim();
@@ -10574,10 +10650,10 @@ export default function App() {
 
   const handleDemoteToAuditQueue = async (expId: string) => {
     const res = await mongoDB.demoteExpertToAuditQueue(expId);
-    setExperts(res.experts);
-    setPendingVerifications(res.pendingVerifications);
+    if (Array.isArray(res?.experts)) setExperts(res.experts);
+    if (Array.isArray(res?.pendingVerifications)) setPendingVerifications(res.pendingVerifications);
 
-    const targetExp = res.experts.find(e => e.id === expId || e.name.toLowerCase().trim() === expId.toLowerCase().trim());
+    const targetExp = Array.isArray(res?.experts) ? res.experts.find(e => e.id === expId || e.name.toLowerCase().trim() === expId.toLowerCase().trim()) : null;
     const targetEmail = targetExp?.email?.toLowerCase().trim();
     const targetName = targetExp?.name?.toLowerCase().trim();
 
@@ -10636,8 +10712,8 @@ export default function App() {
     const targetName = targetInPending?.name?.toLowerCase().trim();
 
     const res = await mongoDB.rejectPendingVerification(expId);
-    setExperts(res.experts);
-    setPendingVerifications(res.pendingVerifications);
+    if (Array.isArray(res?.experts)) setExperts(res.experts);
+    if (Array.isArray(res?.pendingVerifications)) setPendingVerifications(res.pendingVerifications);
 
     setExpertProfile((prev: any) => {
       const prevEmail = prev?.email?.toLowerCase().trim();
@@ -10766,8 +10842,8 @@ export default function App() {
     } catch {}
 
     const res = await mongoDB.submitExpertVerification(finalProfile);
-    setExperts(res.experts);
-    setPendingVerifications(res.pendingVerifications);
+    if (Array.isArray(res?.experts)) setExperts(res.experts);
+    if (Array.isArray(res?.pendingVerifications)) setPendingVerifications(res.pendingVerifications);
     if (typeof finalProfile.projectRate === 'number') {
       const safeProjectRate = Math.max(0, Math.min(2000, finalProfile.projectRate));
       await mongoDB.updateProjectReviewPrice(finalProfile.id, safeProjectRate, 'expert', finalProfile.id, finalProfile.email);
@@ -10779,20 +10855,17 @@ export default function App() {
 
   return (
     <div className={theme === "light" ? "theme-light min-h-screen" : "theme-dark min-h-screen"}>
-      <GlobalButtonMagnification />
-      {(page !== "owner" || isAdminPortal) && (
-        <ProtoBar
-          page={page}
-          setPage={navigateTo}
-          userRole={userRole}
-          recipientId={userRole === "client" ? clientProfile?.email : (expertProfile?.email || expertProfile?.name)}
-          onOpenMongoModal={() => setShowMongoModal(true)}
-          theme={theme}
-          onToggleTheme={handleToggleTheme}
-          isAdminPortal={isAdminPortal}
-          onLogout={handleLogout}
-        />
-      )}
+      <ProtoBar
+        page={page}
+        setPage={navigateTo}
+        userRole={userRole}
+        recipientId={userRole === "client" ? clientProfile?.email : (expertProfile?.email || expertProfile?.name)}
+        onOpenMongoModal={() => setShowMongoModal(true)}
+        theme={theme}
+        onToggleTheme={handleToggleTheme}
+        isAdminPortal={isAdminPortal}
+        onLogout={handleLogout}
+      />
 
       {page === "landing" && (
         <Landing
@@ -10869,11 +10942,11 @@ export default function App() {
         />
       )}
 
-      {page === "owner" && userRole === "admin" && (
+      {page === "owner" && (userRole === "admin" || (typeof window !== "undefined" && localStorage.getItem("admin_user_role") === "admin")) && (
         <AdminGovernancePortal
           setPage={navigateTo}
-          experts={experts}
-          pendingVerifications={pendingVerifications}
+          experts={experts || []}
+          pendingVerifications={pendingVerifications || []}
           onUpdateExpertMarkup={handleUpdateExpertMarkup}
           onOpenMongoModal={() => setShowMongoModal(true)}
           onToggleFeatured={handleToggleFeatured}
@@ -10890,7 +10963,7 @@ export default function App() {
         />
       )}
 
-      {page === "owner" && userRole !== "admin" && (
+      {page === "owner" && userRole !== "admin" && (typeof window !== "undefined" && localStorage.getItem("admin_user_role") !== "admin") && (
         <AuthPage
           onClose={() => navigateTo(userRole === "client" ? "client" : userRole === "expert" ? "expert" : "landing")}
           onSuccessLogin={handleSuccessLogin}
