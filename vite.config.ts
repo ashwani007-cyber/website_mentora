@@ -155,6 +155,22 @@ function sharedDbPlugin(): Plugin {
       return
     }
 
+    // Endpoint: /api/domains (Domains Taxonomy Manager)
+    if (url.startsWith('/api/domains')) {
+      (async () => {
+        try {
+          const handlerPath = pathToFileURL(path.resolve(__dirname, 'server/domainHandler.js')).href
+          const mod = await import(`${handlerPath}?t=${Date.now()}`)
+          await mod.handleDomainApiMiddleware(req, res, next)
+        } catch (err: any) {
+          res.statusCode = 500
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ success: false, error: err.message }))
+        }
+      })()
+      return
+    }
+
     // Endpoint: /api/db (GET all, POST update)
     if (url.startsWith('/api/db')) {
       if (req.method === 'GET') {

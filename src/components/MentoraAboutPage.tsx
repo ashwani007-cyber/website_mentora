@@ -191,21 +191,6 @@ export const MentoraAboutPage: React.FC<MentoraAboutPageProps> = ({
             onClick={() => {
               setPage("landing");
               setTimeout(() => {
-                document.getElementById("how")?.scrollIntoView({ behavior: "smooth" });
-              }, 120);
-            }}
-            className="transition-colors cursor-pointer"
-            style={{ color: colors.secondaryText }}
-            onMouseEnter={(e) => (e.currentTarget.style.color = colors.accent)}
-            onMouseLeave={(e) => (e.currentTarget.style.color = colors.secondaryText)}
-          >
-            How it works
-          </button>
-
-          <button
-            onClick={() => {
-              setPage("landing");
-              setTimeout(() => {
                 document.getElementById("stories")?.scrollIntoView({ behavior: "smooth" });
               }, 120);
             }}
@@ -215,26 +200,6 @@ export const MentoraAboutPage: React.FC<MentoraAboutPageProps> = ({
             onMouseLeave={(e) => (e.currentTarget.style.color = colors.secondaryText)}
           >
             Stories
-          </button>
-
-          <button
-            onClick={() => setPage("client")}
-            className="transition-colors cursor-pointer"
-            style={{ color: colors.secondaryText }}
-            onMouseEnter={(e) => (e.currentTarget.style.color = colors.accent)}
-            onMouseLeave={(e) => (e.currentTarget.style.color = colors.secondaryText)}
-          >
-            Client Advisory
-          </button>
-
-          <button
-            onClick={() => setPage("expert")}
-            className="transition-colors cursor-pointer"
-            style={{ color: colors.secondaryText }}
-            onMouseEnter={(e) => (e.currentTarget.style.color = colors.accent)}
-            onMouseLeave={(e) => (e.currentTarget.style.color = colors.secondaryText)}
-          >
-            Senior Experts
           </button>
 
           {/* ACTIVE STATE FOR "ABOUT" ITEM */}
@@ -411,20 +376,6 @@ export const MentoraAboutPage: React.FC<MentoraAboutPageProps> = ({
                 setMobileMenuOpen(false);
                 setPage("landing");
                 setTimeout(() => {
-                  document.getElementById("how")?.scrollIntoView({ behavior: "smooth" });
-                }, 120);
-              }}
-              className="py-2 text-left cursor-pointer transition-colors"
-              style={{ color: colors.secondaryText }}
-            >
-              How it works
-            </button>
-
-            <button
-              onClick={() => {
-                setMobileMenuOpen(false);
-                setPage("landing");
-                setTimeout(() => {
                   document.getElementById("stories")?.scrollIntoView({ behavior: "smooth" });
                 }, 120);
               }}
@@ -432,28 +383,6 @@ export const MentoraAboutPage: React.FC<MentoraAboutPageProps> = ({
               style={{ color: colors.secondaryText }}
             >
               Stories
-            </button>
-
-            <button
-              onClick={() => {
-                setMobileMenuOpen(false);
-                setPage("client");
-              }}
-              className="py-2 text-left cursor-pointer transition-colors font-medium"
-              style={{ color: colors.secondaryText }}
-            >
-              Client Advisory
-            </button>
-
-            <button
-              onClick={() => {
-                setMobileMenuOpen(false);
-                setPage("expert");
-              }}
-              className="py-2 text-left cursor-pointer transition-colors font-medium"
-              style={{ color: colors.secondaryText }}
-            >
-              Senior Experts
             </button>
 
             <div

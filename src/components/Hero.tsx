@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useMemo } from 'react';
 import { Sparkles, ShieldCheck, Search, ArrowRight, Star, TrendingUp, CheckCircle2 } from 'lucide-react';
 import { DomainCategory } from '../types';
-import { expertiseService } from '../services/expertiseService';
+import { useDomains } from '../context/DomainsContext';
 
 interface HeroProps {
   selectedDomain: DomainCategory;
@@ -18,19 +18,15 @@ export const Hero: React.FC<HeroProps> = ({
   searchQuery,
   setSearchQuery,
 }) => {
-  const [expertiseFields, setExpertiseFields] = useState<string[]>(() => expertiseService.getAll());
+  const { domains } = useDomains();
 
-  useEffect(() => {
-    return expertiseService.subscribe(setExpertiseFields);
-  }, []);
-
-  const categories: { name: DomainCategory; count: string }[] = [
-    { name: 'All', count: '100+' },
-    ...expertiseFields.map((f) => ({
-      name: f,
-      count: 'Active'
+  const categories = useMemo(() => [
+    { name: 'All' as DomainCategory, count: '100+' },
+    ...domains.filter(d => d.is_active !== false).map((f) => ({
+      name: f.name as DomainCategory,
+      count: f.expert_count ? `${f.expert_count}` : 'Active'
     }))
-  ];
+  ], [domains]);
 
   return (
     <section className="relative overflow-hidden bg-slate-950 text-white pt-12 pb-16 px-4 sm:px-6 lg:px-8 border-b border-white/10">

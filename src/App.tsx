@@ -15,6 +15,7 @@ import {
 } from "recharts";
 import confetti from "canvas-confetti";
 
+import { supabase } from "./supabaseClient";
 import { mongoDB, ExpertDoc, ExpertDocumentsRecord, ExpertDocumentItem, getDocFile } from "./mongoDBService";
 import { DocumentViewerModal, DocumentViewerItem } from "./components/DocumentViewerModal";
 import { processRazorpayPayment } from "./services/razorpayService";
@@ -22,7 +23,7 @@ import { MetalButton } from "./components/ui/metal-button";
 import { NotificationCenter } from "./components/NotificationCenter";
 import { notificationService, NOTIFICATION_EVENT_NAME } from "./services/notificationService";
 import { notificationEngine } from "./services/notificationEngine";
-import { expertiseService, EXPERTISE_STORAGE_KEY } from "./services/expertiseService";
+import { useDomains } from "./context/DomainsContext";
 import { AdminGovernancePortal } from "./components/AdminGovernancePortal";
 import { ExpertAvailabilityManager } from "./components/ExpertAvailabilityManager";
 import { ProjectReviewRequestModal } from "./components/ProjectReviewRequestModal";
@@ -117,12 +118,6 @@ function handleImgError(e: React.SyntheticEvent<HTMLImageElement, Event>) {
   e.currentTarget.onerror = null;
   e.currentTarget.src = "https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=300&auto=format&fit=crop&q=80";
 }
-
-const getDynamicCategories = (fields?: string[]) => {
-  const current = fields && fields.length > 0 ? fields : expertiseService.getAll();
-  return ["All", ...current];
-};
-const CATEGORIES = ["All", ...expertiseService.getAll()];
 
 function sanitizeBookings(items: any[]): any[] {
   if (!Array.isArray(items)) return [];
@@ -800,9 +795,9 @@ function ProtoBar({ page, setPage, userRole, recipientId, onOpenMongoModal, them
     },
     {
       id: "client",
-      label: "Client Advisory",
+      label: "Client Portal",
       shortLabel: "Client",
-      ariaLabel: "Navigate to Client Advisory Portal",
+      ariaLabel: "Navigate to Client Portal",
     },
     {
       id: "expert",
@@ -811,30 +806,12 @@ function ProtoBar({ page, setPage, userRole, recipientId, onOpenMongoModal, them
       ariaLabel: "Navigate to Senior Expert Executive Portal",
     },
     {
-      id: "about",
-      label: "About Mentora",
-      shortLabel: "About",
-      ariaLabel: "Navigate to About Mentora Page",
-    },
-    {
-      id: "blogs",
-      label: "Blogs & Articles",
-      shortLabel: "Blogs",
-      ariaLabel: "Navigate to Blogs & Articles",
-    },
-    {
       id: "login",
       label: userRole ? "Switch Account" : "Sign In / Register",
       shortLabel: userRole ? "Switch" : "Sign In",
       ariaLabel: userRole ? "Switch Account or Log In" : "Sign In or Register",
     },
   ];
-  tabs.push({
-    id: "owner",
-    label: "Admin Desk",
-    shortLabel: "Admin",
-    ariaLabel: "Navigate to Admin Governance Desk",
-  });
   return (
     <div
       className={`w-full flex items-center justify-between gap-3 py-2 px-4 sm:px-6 sticky top-0 z-50 backdrop-blur-xl border-b shadow-2xl transition-colors duration-300 ${
@@ -881,16 +858,7 @@ function ProtoBar({ page, setPage, userRole, recipientId, onOpenMongoModal, them
           </span>
         ))}
 
-        <button
-          onClick={onOpenMongoModal}
-          className="text-[11px] px-2 sm:px-3 py-0.5 rounded-full font-mono hidden sm:flex items-center gap-1.5 cursor-pointer transition-all hover:brightness-125"
-          style={{ background: "rgba(16, 185, 129, 0.12)", color: "#10B981", border: "1px solid rgba(16, 185, 129, 0.3)", boxShadow: "0 0 10px rgba(16, 185, 129, 0.15)" }}
-          title="Inspect MongoDB connection details"
-        >
-          <Database size={11} className="text-emerald-500" />
-          <span className="hidden sm:inline">MongoDB: Live</span>
-          <span className="sm:hidden">DB</span>
-        </button>
+
       </div>
 
       <div className="flex items-center gap-2">
@@ -1560,17 +1528,18 @@ function EditClientProfileModal({ profile, onClose, onSave, theme = "dark" }: { 
 
 function EditExpertProfileModal({ profile, onClose, onSave, theme = "dark" }: { profile: any; onClose: () => void; onSave: (p: any) => void; theme?: "dark" | "light" }) {
   const isLight = theme === "light";
+  const { domains, getDomainName } = useDomains();
+  const availableFields = useMemo(() => domains.filter(d => d.is_active !== false).map(d => d.name), [domains]);
   const [name, setName] = useState(profile?.name || "Sunita Rao");
   const [title, setTitle] = useState(profile?.title || "Former Chief Financial Officer (Ex-CFO)");
-  const [field, setField] = useState(profile?.field || "Finance & Taxation");
-  const [availableFields, setAvailableFields] = useState<string[]>(() => expertiseService.getAll());
+  const [field, setField] = useState(profile?.field ? getDomainName(profile.field) : (availableFields[0] || "Finance & Taxation"));
   const [years, setYears] = useState(profile?.years || 34);
 
   useEffect(() => {
-    return expertiseService.subscribe((fields) => {
-      setAvailableFields(fields);
-    });
-  }, []);
+    if (availableFields.length > 0 && !availableFields.includes(field)) {
+      setField(availableFields[0]);
+    }
+  }, [availableFields, field]);
   const [baseRate, setBaseRate] = useState(profile?.baseRate || 600);
   const [projectRate, setProjectRate] = useState(typeof profile?.projectRate === "number" ? profile.projectRate : 1000);
   const [email, setEmail] = useState(profile?.email || "sunita.rao@registry.com");
@@ -1863,6 +1832,8 @@ function EditExpertProfileModal({ profile, onClose, onSave, theme = "dark" }: { 
 function ExpertProfileModal({ expert, onClose, onBook, theme = "dark" }: { expert: any; onClose: () => void; onBook: (e: any) => void; theme?: "dark" | "light" }) {
   if (!expert) return null;
   const isLight = theme === "light";
+  const { getDomainName } = useDomains();
+  const domainName = getDomainName(expert);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xl">
@@ -1884,8 +1855,8 @@ function ExpertProfileModal({ expert, onClose, onBook, theme = "dark" }: { exper
                 <h2 style={{ ...display }} className={`text-2xl font-bold ${isLight ? "text-slate-900" : "text-white"}`}>{expert.name}</h2>
                 {expert.verified && <span title="Verified Professional History"><ShieldCheck size={18} className="text-emerald-500" /></span>}
               </div>
-              <p className={`text-xs font-bold mt-0.5 ${isLight ? "text-amber-700" : "text-amber-400"}`}>{expert.title || expert.field}</p>
-              <p className={`text-xs mt-0.5 ${isLight ? "text-slate-600" : "text-slate-400"}`}>{expert.years} Years Executive Experience · {expert.field}</p>
+              <p className={`text-xs font-bold mt-0.5 ${isLight ? "text-amber-700" : "text-amber-400"}`}>{expert.title || domainName}</p>
+              <p className={`text-xs mt-0.5 ${isLight ? "text-slate-600" : "text-slate-400"}`}>{expert.years} Years Executive Experience · {domainName}</p>
             </div>
           </div>
 
@@ -1932,7 +1903,7 @@ function ExpertProfileModal({ expert, onClose, onBook, theme = "dark" }: { exper
             )) : (
               <span className={`text-xs px-3 py-1 rounded-full font-medium border ${
                 isLight ? "bg-slate-100 text-slate-700 border-slate-200" : "bg-white/[0.04] text-slate-300 border-white/10"
-              }`}>{expert.field}</span>
+              }`}>{domainName}</span>
             )}
           </div>
         </div>
@@ -1955,7 +1926,7 @@ function ExpertProfileModal({ expert, onClose, onBook, theme = "dark" }: { exper
               <div className={`p-3.5 rounded-xl border text-xs ${
                 isLight ? "bg-slate-50 border-slate-200 text-slate-800" : "bg-[#111A27] border-white/10 text-slate-300"
               }`}>
-                <p className={`font-bold ${isLight ? "text-slate-900" : "text-white"}`}>{expert.field} Senior Executive</p>
+                <p className={`font-bold ${isLight ? "text-slate-900" : "text-white"}`}>{domainName} Senior Executive</p>
                 <p className={`text-[11px] ${isLight ? "text-slate-500" : "text-slate-400"}`}>30+ years in corporate leadership roles.</p>
               </div>
             )}
@@ -2881,8 +2852,8 @@ function TeleconsultSimulatorModal({ session, onClose }: { session: any; onClose
 ---------------------------------------------------------------- */
 function Landing({ setPage, onOpenAuth, experts, theme = "dark", onToggleTheme, userRole, onLogout, onViewDossier }: { setPage: (p: string) => void; onOpenAuth: (mode: "signup" | "login", role?: string) => void; experts?: ExpertDoc[]; theme?: "dark" | "light"; onToggleTheme?: () => void; userRole?: string | null; onLogout?: () => void; onViewDossier?: (expert: any) => void }) {
   const [tilt, setTilt] = useState({ x: 0, y: 0 });
-  const [activeCategory, setActiveCategory] = useState("All");
-  const [expertiseFields, setExpertiseFields] = useState<string[]>(() => expertiseService.getAll());
+  const { domains, selectedDomain: activeCategory, setSelectedDomain: setActiveCategory, getDomainName, refreshDomains } = useDomains();
+  const expertiseFields = useMemo(() => domains.filter(d => d.is_active !== false).map(d => d.name), [domains]);
   const isLight = theme === "light";
   const categoryScrollRef = useRef<HTMLDivElement>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -2899,10 +2870,6 @@ function Landing({ setPage, onOpenAuth, experts, theme = "dark", onToggleTheme, 
   const [landingAnnouncements, setLandingAnnouncements] = useState<any[]>(() => 
     notificationService.getForUser('landing').filter(n => !n.read)
   );
-
-  useEffect(() => {
-    return expertiseService.subscribe(setExpertiseFields);
-  }, []);
 
   useEffect(() => {
     notificationService.syncWithBackend('landing');
@@ -2986,13 +2953,14 @@ function Landing({ setPage, onOpenAuth, experts, theme = "dark", onToggleTheme, 
 
   const filteredAdvisors = activeCategory === "All" 
     ? FEATURED_ADVISORS 
-    : FEATURED_ADVISORS.filter(a => 
-        a.field && (
-          a.field.toLowerCase() === activeCategory.toLowerCase() ||
-          a.field.toLowerCase().includes(activeCategory.toLowerCase()) ||
-          activeCategory.toLowerCase().includes(a.field.toLowerCase())
-        )
-      );
+    : FEATURED_ADVISORS.filter(a => {
+        const dName = getDomainName(a);
+        return dName && (
+          dName.toLowerCase() === activeCategory.toLowerCase() ||
+          dName.toLowerCase().includes(activeCategory.toLowerCase()) ||
+          activeCategory.toLowerCase().includes(dName.toLowerCase())
+        );
+      });
 
   return (
     <div 
@@ -3058,18 +3026,16 @@ function Landing({ setPage, onOpenAuth, experts, theme = "dark", onToggleTheme, 
           >
             How it works
           </a>
-          <button
-            onClick={() => setPage("client")}
-            className="hover:text-amber-500 transition-colors cursor-pointer"
+          <a
+            href="#stories"
+            onClick={(e) => {
+              e.preventDefault();
+              document.getElementById("stories")?.scrollIntoView({ behavior: "smooth" });
+            }}
+            className="hover:text-amber-500 transition-colors"
           >
-            Client Advisory
-          </button>
-          <button
-            onClick={() => setPage("expert")}
-            className="hover:text-amber-500 transition-colors cursor-pointer"
-          >
-            Senior Pro Experts
-          </button>
+            Stories
+          </a>
           <button
             onClick={() => setPage("about")}
             className="hover:text-amber-500 transition-colors cursor-pointer"
@@ -3149,24 +3115,17 @@ function Landing({ setPage, onOpenAuth, experts, theme = "dark", onToggleTheme, 
             >
               How it works
             </a>
-            <button
-              onClick={() => {
+            <a
+              href="#stories"
+              onClick={(e) => {
+                e.preventDefault();
                 setMobileMenuOpen(false);
-                setPage("client");
+                document.getElementById("stories")?.scrollIntoView({ behavior: "smooth" });
               }}
-              className="py-2 text-left cursor-pointer hover:text-amber-500 transition-colors font-bold text-amber-500"
+              className="py-2 text-left cursor-pointer hover:text-amber-500 transition-colors"
             >
-              Client Advisory Directory
-            </button>
-            <button
-              onClick={() => {
-                setMobileMenuOpen(false);
-                setPage("expert");
-              }}
-              className="py-2 text-left cursor-pointer hover:text-amber-500 transition-colors font-bold text-amber-500"
-            >
-              Senior Pro Experts
-            </button>
+              Stories
+            </a>
             <button
               onClick={() => {
                 setMobileMenuOpen(false);
@@ -4227,21 +4186,19 @@ function AuthPage({
   const [phone, setPhone] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [field, setField] = useState("Finance & Taxation");
-  const [availableFields, setAvailableFields] = useState<string[]>(() => expertiseService.getAll());
+  const { domains } = useDomains();
+  const availableFields = useMemo(() => domains.filter(d => d.is_active !== false).map(d => d.name), [domains]);
+  const [field, setField] = useState(availableFields[0] || "Finance & Taxation");
   const [title, setTitle] = useState("");
   const [years, setYears] = useState(25);
   const [baseRate, setBaseRate] = useState(600);
   const [bio, setBio] = useState("");
 
   useEffect(() => {
-    return expertiseService.subscribe((fields) => {
-      setAvailableFields(fields);
-      if (fields.length > 0 && !fields.includes(field)) {
-        setField(fields[0]);
-      }
-    });
-  }, [field]);
+    if (availableFields.length > 0 && !availableFields.includes(field)) {
+      setField(availableFields[0]);
+    }
+  }, [availableFields, field]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -4265,7 +4222,7 @@ function AuthPage({
         email,
         password,
         name: name || (role === "client" ? "Northwind Client" : "Sunita Rao"),
-        phone: phone || "+91 98765 43210",
+        phone: phone || "",
         company: company || (role === "client" ? "Northwind Retail Pvt Ltd" : ""),
         title: title || (role === "expert" ? "Senior Executive Advisor" : ""),
         field,
@@ -4554,20 +4511,10 @@ function ClientPage({
   initialExpertForProjectReview?: any;
   onProjectReviewExpertConsumed?: () => void;
 }) {
-  const [activeCategory, setActiveCategory] = useState("All");
-  const [expertiseFields, setExpertiseFields] = useState<string[]>(() => expertiseService.getAll());
+  const { domains, selectedDomain: activeCategory, setSelectedDomain: setActiveCategory, getDomainName, refreshDomains } = useDomains();
+  const expertiseFields = useMemo(() => domains.filter(d => d.is_active !== false).map(d => d.name), [domains]);
   const [searchQuery, setSearchQuery] = useState("");
   const [rateLimit, setRateLimit] = useState(1500);
-
-  useEffect(() => {
-    return expertiseService.subscribe(setExpertiseFields);
-  }, []);
-
-  useEffect(() => {
-    if (activeCategory !== "All" && !expertiseFields.some(f => f.toLowerCase() === activeCategory.toLowerCase())) {
-      setActiveCategory("All");
-    }
-  }, [expertiseFields, activeCategory]);
   const storageKey = `client_upcoming_${(clientProfile?.email || "guest").toLowerCase()}`;
   const walletStorageKey = `client_wallet_${(clientProfile?.email || "guest").toLowerCase()}`;
 
@@ -4641,14 +4588,7 @@ function ClientPage({
             setWalletBalance(num);
           }
         }
-        const serverFields = await mongoDB.getKv(EXPERTISE_STORAGE_KEY);
-        if (Array.isArray(serverFields) && serverFields.length > 0) {
-          const localFields = localStorage.getItem(EXPERTISE_STORAGE_KEY);
-          if (JSON.stringify(serverFields) !== localFields) {
-            localStorage.setItem(EXPERTISE_STORAGE_KEY, JSON.stringify(serverFields));
-            setExpertiseFields(serverFields);
-          }
-        }
+        refreshDomains().catch(() => {});
       } catch {}
     };
 
@@ -4824,8 +4764,9 @@ function ClientPage({
       e.documents?.status === "Rejected"
     ) return false;
     if (pendingVerifications && pendingVerifications.some((p: any) => p.id === e.id || p.name.toLowerCase().trim() === e.name.toLowerCase().trim())) return false;
-    if (activeCategory !== "All" && !e.field?.toLowerCase().includes(activeCategory.toLowerCase()) && !activeCategory.toLowerCase().includes(e.field?.toLowerCase() || "")) return false;
-    if (searchQuery.trim() && !e.name.toLowerCase().includes(searchQuery.toLowerCase()) && !e.field?.toLowerCase().includes(searchQuery.toLowerCase())) return false;
+    const dName = getDomainName(e);
+    if (activeCategory !== "All" && !dName?.toLowerCase().includes(activeCategory.toLowerCase()) && !activeCategory.toLowerCase().includes(dName?.toLowerCase() || "")) return false;
+    if (searchQuery.trim() && !e.name.toLowerCase().includes(searchQuery.toLowerCase()) && !dName?.toLowerCase().includes(searchQuery.toLowerCase())) return false;
     if (e.rate > rateLimit) return false;
     return true;
   });
@@ -5102,53 +5043,7 @@ function ClientPage({
           />
         </div>
 
-        <nav className="hidden xl:flex items-center gap-4 text-xs font-semibold">
-          <button
-            type="button"
-            onClick={() => setPage("landing")}
-            className={`transition-colors cursor-pointer hover:text-amber-500 ${isLight ? "text-slate-600" : "text-slate-300"}`}
-          >
-            Home
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setClientActiveView("directory");
-              window.scrollTo({ top: 0, behavior: "smooth" });
-            }}
-            className="text-amber-500 font-bold cursor-pointer"
-          >
-            Advisory Directory
-          </button>
-          <button
-            type="button"
-            onClick={() => setPage("expert")}
-            className={`transition-colors cursor-pointer hover:text-amber-500 ${isLight ? "text-slate-600" : "text-slate-300"}`}
-          >
-            Expert Portal
-          </button>
-          <button
-            type="button"
-            onClick={() => setPage("about")}
-            className={`transition-colors cursor-pointer hover:text-amber-500 ${isLight ? "text-slate-600" : "text-slate-300"}`}
-          >
-            About
-          </button>
-          <button
-            type="button"
-            onClick={() => setPage("blogs")}
-            className={`transition-colors cursor-pointer hover:text-amber-500 ${isLight ? "text-slate-600" : "text-slate-300"}`}
-          >
-            Blogs
-          </button>
-          <button
-            type="button"
-            onClick={() => setPage("owner")}
-            className="text-amber-500 font-bold px-2 py-0.5 rounded border border-amber-500/40 hover:bg-amber-500/10 transition-colors cursor-pointer"
-          >
-            Admin Desk
-          </button>
-        </nav>
+
 
         <div className="hidden 2xl:block w-36 h-14 relative overflow-hidden">
           <GlobeGraphic />
@@ -5350,7 +5245,7 @@ function ClientPage({
                       <p className={`text-sm font-bold truncate transition-colors ${
                         isLight ? "text-slate-900 group-hover:text-amber-600" : "text-white group-hover:text-amber-300"
                       }`}>{e.name}</p>
-                      <p className={`text-xs truncate ${isLight ? "text-slate-500" : "text-slate-400"}`}>{e.field}</p>
+                      <p className={`text-xs truncate ${isLight ? "text-slate-500" : "text-slate-400"}`}>{getDomainName(e)}</p>
                     </div>
                     {e.verified !== false ? (
                       <span title="Verified Expert" className="ml-auto shrink-0 flex items-center">
@@ -6226,6 +6121,7 @@ function ExpertPage({
     }
     setIsSavingPrice(true);
     setPriceFeedbackMsg(null);
+    const oldPrice = currentProjectReviewPrice;
     const res = await mongoDB.updateProjectReviewPrice(
       resolvedExpertId || expertProfile?.id,
       num,
@@ -6239,6 +6135,37 @@ function ExpertPage({
       setIsEditingPRPrice(false);
       setPriceFeedbackMsg("✅ Price updated and synchronized across all portals!");
       setTimeout(() => setPriceFeedbackMsg(null), 4000);
+
+      // Log profile diff and broadcast in real-time to Admin Document Audit & KYC desk
+      try {
+        const expId = resolvedExpertId || expertProfile?.id;
+        await fetch('/api/expert/profile-change', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            expertId: expId,
+            fieldName: 'Project Review Price',
+            oldValue: `₹${oldPrice}`,
+            newValue: `₹${num}`,
+            changedBy: 'expert'
+          })
+        });
+
+        const ch = supabase.channel('admin-kyc-desk');
+        await ch.send({
+          type: 'broadcast',
+          event: 'expert_profile_updated',
+          payload: {
+            expertId: expId,
+            fieldName: 'project_rate',
+            oldValue: oldPrice,
+            newValue: num,
+            expertName: expertProfile?.name
+          }
+        });
+      } catch (err) {
+        console.warn('Realtime price change broadcast note:', err);
+      }
     } else {
       setPriceFeedbackMsg(`❌ ${res.error || "Failed to update price"}`);
     }
@@ -6797,6 +6724,89 @@ function ExpertPage({
 
   const [meetLinkInputs, setMeetLinkInputs] = useState<{ [sessionId: string]: string }>({});
   const [editingMeetSessionId, setEditingMeetSessionId] = useState<string | null>(null);
+
+  // Supabase Realtime synchronization with Admin Document Audit & KYC desk
+  useEffect(() => {
+    const ch = supabase.channel('admin-kyc-desk-expert', {
+      config: { broadcast: { self: false } }
+    });
+
+    ch.on('broadcast', { event: 'expert_status_changed' }, (payload: any) => {
+      const p = payload.payload;
+      if (!p) return;
+      const myId = String(expertProfile?.id || '').toLowerCase();
+      const myEmail = String(expertProfile?.email || '').toLowerCase();
+      const targetId = String(p.expertId || '').toLowerCase();
+      const targetEmail = String(p.email || '').toLowerCase();
+
+      if ((targetId && targetId === myId) || (targetEmail && targetEmail === myEmail)) {
+        console.log('[EXPERT PORTAL] Real-time status event received:', p);
+        const isApproved = p.status === 'approved';
+        const isRejected = p.status === 'changes_requested' || p.status === 'rejected';
+
+        const updatedProfile = {
+          ...expertProfile,
+          verified: isApproved,
+          verificationStatus: isApproved ? 'approved' : (isRejected ? 'rejected' : 'pending'),
+          rejected: isRejected,
+          rejectionReason: p.rejectionReason || null
+        };
+
+        if (onUpdateExpertProfile) {
+          onUpdateExpertProfile(updatedProfile);
+        }
+
+        try {
+          const activeKey = localStorage.getItem("admin_logged_in_expert") ? "admin_logged_in_expert" : "current_logged_in_expert";
+          localStorage.setItem(activeKey, JSON.stringify(updatedProfile));
+        } catch {}
+
+        const latestDocs = mongoDB.getExpertDocuments(expertProfile?.id || expertProfile?.email || expertProfile?.name);
+        if (latestDocs) setExpertDocs(latestDocs);
+      }
+    });
+
+    ch.on(
+      'postgres_changes',
+      {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'expert_profiles',
+        filter: expertProfile?.id ? `id=eq.${expertProfile.id}` : undefined
+      },
+      (payload: any) => {
+        const newRecord = payload.new;
+        if (!newRecord) return;
+        const isApproved = newRecord.status === 'approved';
+        const isRejected = newRecord.status === 'rejected' || newRecord.status === 'changes_requested';
+
+        const updatedProfile = {
+          ...expertProfile,
+          verified: isApproved,
+          verificationStatus: isApproved ? 'approved' : (isRejected ? 'rejected' : 'pending'),
+          rejected: isRejected,
+          rejectionReason: newRecord.rejection_reason || null
+        };
+
+        if (onUpdateExpertProfile) {
+          onUpdateExpertProfile(updatedProfile);
+        }
+
+        try {
+          const activeKey = localStorage.getItem("admin_logged_in_expert") ? "admin_logged_in_expert" : "current_logged_in_expert";
+          localStorage.setItem(activeKey, JSON.stringify(updatedProfile));
+        } catch {}
+      }
+    );
+
+    ch.subscribe((status) => {
+      console.log('[EXPERT PORTAL] Realtime channel status:', status);
+    });
+
+    return () => {
+      supabase.removeChannel(ch);
+    };
+  }, [expertProfile?.id, expertProfile?.email]);
 
   const handleAcceptRequest = (req: any) => {
     if (!req) return;
@@ -7621,6 +7631,54 @@ function ExpertPage({
 
     setIsSavingDocs(true);
     try {
+      // 1. Upload new documents to Supabase Storage & Documents Table via /api/documents/upload
+      const uploadedMap: Record<string, any> = {};
+      const docSlots: Array<"expCert" | "offerLetter" | "resume"> = ["expCert", "offerLetter", "resume"];
+
+      for (const slot of docSlots) {
+        const item = selectedDocs[slot];
+        if (item?.fileData) {
+          try {
+            const upRes = await fetch("/api/documents/upload", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                expertId: expId,
+                documentType: slot,
+                fileName: item.fileName,
+                fileData: item.fileData,
+                fileSize: item.fileSize
+              })
+            });
+            if (upRes.ok) {
+              const upJson = await upRes.json();
+              if (upJson.success) {
+                uploadedMap[slot] = upJson;
+              }
+            }
+          } catch (upErr) {
+            console.warn(`Supabase document upload warning for ${slot}:`, upErr);
+          }
+        }
+      }
+
+      // 2. Broadcast realtime document_uploaded event to Admin Desk
+      try {
+        const ch = supabase.channel('admin-kyc-desk');
+        await ch.send({
+          type: 'broadcast',
+          event: 'document_uploaded',
+          payload: {
+            expertId: expId,
+            expertName: expName,
+            uploadedDocs: Object.keys(uploadedMap),
+            timestamp: new Date().toISOString()
+          }
+        });
+      } catch (brErr) {
+        console.warn("Realtime broadcast note:", brErr);
+      }
+
       const saved = await mongoDB.saveExpertDocuments(expId, expName, expEmail, {
         expCert: selectedDocs.expCert,
         offerLetter: selectedDocs.offerLetter,
@@ -7630,9 +7688,9 @@ function ExpertPage({
       const fullDocsWithBinaries: ExpertDocumentsRecord = {
         ...saved,
         docs: {
-          expCert: selectedDocs.expCert?.fileData ? { ...saved.docs.expCert!, fileData: selectedDocs.expCert.fileData } : saved.docs.expCert,
-          offerLetter: selectedDocs.offerLetter?.fileData ? { ...saved.docs.offerLetter!, fileData: selectedDocs.offerLetter.fileData } : saved.docs.offerLetter,
-          resume: selectedDocs.resume?.fileData ? { ...saved.docs.resume!, fileData: selectedDocs.resume.fileData } : saved.docs.resume,
+          expCert: selectedDocs.expCert?.fileData ? { ...saved.docs.expCert!, fileData: selectedDocs.expCert.fileData, filePath: uploadedMap.expCert?.filePath } : (uploadedMap.expCert ? { ...saved.docs.expCert!, filePath: uploadedMap.expCert.filePath } : saved.docs.expCert),
+          offerLetter: selectedDocs.offerLetter?.fileData ? { ...saved.docs.offerLetter!, fileData: selectedDocs.offerLetter.fileData, filePath: uploadedMap.offerLetter?.filePath } : (uploadedMap.offerLetter ? { ...saved.docs.offerLetter!, filePath: uploadedMap.offerLetter.filePath } : saved.docs.offerLetter),
+          resume: selectedDocs.resume?.fileData ? { ...saved.docs.resume!, fileData: selectedDocs.resume.fileData, filePath: uploadedMap.resume?.filePath } : (uploadedMap.resume ? { ...saved.docs.resume!, filePath: uploadedMap.resume.filePath } : saved.docs.resume),
         }
       };
 
@@ -7654,15 +7712,28 @@ function ExpertPage({
             updatedAt: saved.updatedAt,
             status: "Pending Audit"
           };
+          parsed.verificationStatus = "pending";
+          parsed.rejected = false;
+          parsed.rejectionReason = null;
           localStorage.setItem(activeKey, JSON.stringify(parsed));
         }
       } catch {}
+
+      // Update parent profile state so banner turns back to Pending
+      if (onUpdateExpertProfile && expertProfile) {
+        onUpdateExpertProfile({
+          ...expertProfile,
+          verificationStatus: "pending",
+          rejected: false,
+          rejectionReason: null
+        });
+      }
 
       notificationService.add({
         target: "admin",
         type: "verification",
         title: "Verification Documents Saved & Updated",
-        message: `Expert ${expName} uploaded and saved verification documents in MongoDB database for audit.`,
+        message: `Expert ${expName} uploaded and saved verification documents in Supabase & database for audit.`,
         actionLink: "owner"
       });
 
@@ -7676,7 +7747,7 @@ function ExpertPage({
       });
 
       confetti({ particleCount: 50, spread: 60, origin: { y: 0.5 } });
-      alert("✅ Verification documents permanently saved in database and synchronized with Admin Audit Queue!");
+      alert("✅ Verification documents permanently uploaded to private storage and synchronized with Admin Audit Queue!");
     } catch (err: any) {
       console.error("Failed to save expert documents:", err);
       alert(`Failed to save documents to database: ${err?.message || "Storage error"}. Please try again.`);
@@ -7685,13 +7756,29 @@ function ExpertPage({
     }
   };
 
-  const handleOpenDocPreview = async (docSlot?: ExpertDocumentItem, defaultTitle = "Document Proof") => {
+  const handleOpenDocPreview = async (docSlot?: any, defaultTitle = "Document Proof") => {
     if (!docSlot) return;
     const docId = docSlot.id || `doc-${expertProfile?.id || "exp"}-${docSlot.type}`;
     let fileData = docSlot.fileData;
 
+    // 1. Try Supabase Storage signed URL if filePath exists
+    const filePath = docSlot.filePath || docSlot.file_path;
+    if (filePath && (!fileData || (!fileData.startsWith("data:") && !fileData.startsWith("blob:") && !fileData.includes("supabase.co")))) {
+      try {
+        const sRes = await fetch(`/api/documents/signed-url?filePath=${encodeURIComponent(filePath)}`);
+        if (sRes.ok) {
+          const sData = await sRes.json();
+          if (sData.signedUrl) {
+            fileData = sData.signedUrl;
+          }
+        }
+      } catch (e) {
+        console.warn("Signed URL fetch failed:", e);
+      }
+    }
+
     // Direct static server check
-    if (docSlot.fileName) {
+    if (docSlot.fileName && (!fileData || !fileData.startsWith("data:"))) {
       try {
         const staticUrl = `/uploaded_docs/${encodeURIComponent(docSlot.fileName)}`;
         const chk = await fetch(staticUrl, { method: "HEAD" });
@@ -8457,13 +8544,20 @@ function ExpertPage({
                   isLight ? "bg-rose-50 text-rose-900 border-rose-300 shadow-sm" : "bg-rose-950/50 text-rose-200 border-rose-500/40"
                 }`}>
                   <UserX size={22} className={isLight ? "text-rose-600 shrink-0 mt-0.5" : "text-rose-400 shrink-0 mt-0.5"} />
-                  <div>
+                  <div className="w-full">
                     <p className={`font-bold text-sm flex items-center gap-2 ${isLight ? "text-rose-900" : "text-rose-100"}`}>
                       ❌ Verification Audit Rejected / Moved to Re-Audit Queue
                     </p>
                     <p className={`text-xs mt-1 leading-relaxed ${isLight ? "text-rose-800" : "text-rose-300/90"}`}>
                       Admin has demoted your verification status back to the Document Audit Queue. Please update your details or re-upload your work certificates for re-audit.
                     </p>
+                    {expertProfile?.rejectionReason && (
+                      <div className={`mt-2.5 p-2.5 rounded-xl border text-xs font-mono ${
+                        isLight ? "bg-rose-100/70 border-rose-300 text-rose-950" : "bg-rose-900/40 border-rose-500/40 text-rose-200"
+                      }`}>
+                        <strong>Admin Rejection Reason:</strong> {expertProfile.rejectionReason}
+                      </div>
+                    )}
                   </div>
                 </div>
               );
@@ -10834,6 +10928,55 @@ export default function App() {
       verificationStatus: status, 
       rejected: isRejected 
     };
+
+    // Profile change audit log and realtime broadcast to Admin KYC desk
+    try {
+      const expId = finalProfile.id;
+      const fieldsToCheck = [
+        { key: 'baseRate', label: 'Base Rate', prefix: '₹' },
+        { key: 'projectRate', label: 'Project Review Price', prefix: '₹' },
+        { key: 'title', label: 'Professional Title' },
+        { key: 'field', label: 'Domain Field' },
+        { key: 'years', label: 'Experience Years' },
+        { key: 'phone', label: 'Phone Number' },
+        { key: 'bio', label: 'Executive Bio' },
+      ];
+
+      for (const f of fieldsToCheck) {
+        const oldV = expertProfile ? expertProfile[f.key] : undefined;
+        const newV = finalProfile[f.key];
+        if (oldV !== undefined && newV !== undefined && String(oldV) !== String(newV)) {
+          const oldStr = f.prefix ? `${f.prefix}${oldV}` : String(oldV);
+          const newStr = f.prefix ? `${f.prefix}${newV}` : String(newV);
+          fetch('/api/expert/profile-change', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              expertId: expId,
+              fieldName: f.label,
+              oldValue: oldStr,
+              newValue: newStr,
+              changedBy: 'expert'
+            })
+          }).catch(() => {});
+
+          const ch = supabase.channel('admin-kyc-desk');
+          ch.send({
+            type: 'broadcast',
+            event: 'expert_profile_updated',
+            payload: {
+              expertId: expId,
+              fieldName: f.key,
+              oldValue: oldV,
+              newValue: newV,
+              expertName: finalProfile.name
+            }
+          }).catch(() => {});
+        }
+      }
+    } catch (diffErr) {
+      console.warn('Profile diff broadcast error:', diffErr);
+    }
 
     setExpertProfile(finalProfile);
     const expertKey = isAdminPortal ? "admin_logged_in_expert" : "current_logged_in_expert";

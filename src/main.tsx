@@ -2,6 +2,7 @@ import React, { StrictMode, Component, ErrorInfo, ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
+import { DomainsProvider } from './context/DomainsContext'
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -108,7 +109,9 @@ window.addEventListener('error', (event) => {
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <RootErrorBoundary>
-      <App />
+      <DomainsProvider>
+        <App />
+      </DomainsProvider>
     </RootErrorBoundary>
   </StrictMode>,
 )

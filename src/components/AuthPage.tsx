@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import type { AuthUser, UserRole, DomainCategory } from '../types';
-import { expertiseService } from '../services/expertiseService';
+import { useDomains } from '../context/DomainsContext';
+import { supabase } from '../supabaseClient';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Sparkles, 
@@ -16,7 +17,9 @@ import {
   Layers,
   ChevronRight,
   Eye,
-  EyeOff
+  EyeOff,
+  Phone,
+  AlertCircle
 } from 'lucide-react';
 
 
@@ -31,35 +34,45 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess }) => {
   // Form inputs
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
+  const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [exCompany, setExCompany] = useState('');
   const [yearsExp, setYearsExp] = useState(28);
-  const [availableDomains, setAvailableDomains] = useState<string[]>(() => expertiseService.getAll());
-  const [domain, setDomain] = useState<DomainCategory>(() => {
-    const list = expertiseService.getAll();
-    return (list[0] || 'Finance & Taxation') as DomainCategory;
-  });
+  const { domains } = useDomains();
+  const availableDomains = useMemo(() => domains.filter(d => d.is_active !== false).map(d => d.name), [domains]);
+  const [domain, setDomain] = useState<DomainCategory>(() => (availableDomains[0] || 'Finance & Taxation') as DomainCategory);
   const [hourlyRate, setHourlyRate] = useState(799);
 
   useEffect(() => {
-    return expertiseService.subscribe((fields) => {
-      setAvailableDomains(fields);
-      if (fields.length > 0 && !fields.includes(domain)) {
-        setDomain(fields[0]);
-      }
-    });
-  }, [domain]);
+    if (availableDomains.length > 0 && !availableDomains.includes(domain)) {
+      setDomain(availableDomains[0] as DomainCategory);
+    }
+  }, [availableDomains, domain]);
 
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [infoMessage, setInfoMessage] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage('');
+    setInfoMessage('');
+
     if (!email.trim() || !password.trim()) {
-      alert('Please fill in email and password.');
+      setErrorMessage('Please fill in both email and password.');
       return;
+    }
+
+    if (authMode === 'signup') {
+      if (!name.trim()) {
+        setErrorMessage('Please enter your full legal name.');
+        return;
+      }
+      if (phone && phone.replace(/\D/g, '').length < 8) {
+        setErrorMessage('Please enter a valid phone number with at least 8 digits.');
+        return;
+      }
     }
 
     setIsLoading(true);
@@ -68,13 +81,14 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess }) => {
         const payload = {
           email: email.trim().toLowerCase(),
           password,
-          fullName: name || (selectedRole === 'client' ? 'Startup Founder & CEO' : 'Dr. Rameshwar Sharma'),
+          fullName: name.trim() || (selectedRole === 'client' ? 'Startup Founder & CEO' : 'Dr. Rameshwar Sharma'),
           role: selectedRole === 'professional' ? 'expert' : selectedRole,
-          phone: '+91 98765 43210',
+          phone: phone.trim() || '',
           company: exCompany || (selectedRole === 'client' ? 'Client Enterprise' : 'TATA Motors & L&T'),
           field: domain,
           years: yearsExp,
           baseRate: hourlyRate,
+          projectRate: 1000,
           bio: selectedRole === 'client' ? 'Seeking strategic advisory.' : 'Senior industry professional.'
         };
 
@@ -85,8 +99,15 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess }) => {
         });
         const data = await res.json();
 
+        if (res.status === 409 || (!data.success && data.error === 'User already exists')) {
+          setErrorMessage(data.message || 'An account with this email/phone already exists. Please sign in with your password.');
+          setAuthMode('login');
+          setIsLoading(false);
+          return;
+        }
+
         if (!data.success && res.status >= 400) {
-          alert(`❌ Registration error: ${data.message || data.error || 'Failed to register'}`);
+          setErrorMessage(`❌ Registration error: ${data.message || data.error || 'Failed to register'}`);
           setIsLoading(false);
           return;
         }
@@ -100,6 +121,70 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess }) => {
           id: userRecord.id || `user-${Date.now()}`,
           name: userRecord.name || userRecord.full_name || name,
           email: userRecord.email || email,
+          phone: userRecord.phone || phone,
+          role: returnedRole,
+          avatarUrl: returnedRole === 'professional'
+            ? 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=400&q=80'
+            : 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80',
+          exCompany: userRecord.company || exCompany,
+          yearsOfExperience: userRecord.years || yearsExp,
+          domain: (userRecord.field || domain) as DomainCategory,
+          hourlyRate: userRecord.baseRate || hourlyRate,
+          isVerified: userRecord.is_verified ?? false
+        };
+
+        if (data.token) {
+          localStorage.setItem('admin_token', data.token);
+          sessionStorage.setItem('admin_token', data.token);
+        }
+
+        // Live Realtime Broadcast to Admin "Document Audit & KYC" Desk
+        try {
+          const kycChannel = supabase.channel('admin-kyc-desk');
+          kycChannel.send({
+            type: 'broadcast',
+            event: 'expert_registered',
+            payload: {
+              ...authUser,
+              status: 'Registered / Documents Pending',
+              verificationStatus: 'pending_verification',
+              submittedAt: new Date().toISOString()
+            }
+          });
+        } catch {}
+
+        window.dispatchEvent(new Event('mongo_db_updated'));
+
+        if (data.alreadyRegistered) {
+          setInfoMessage('Account already registered. Automatically launching your portal...');
+        }
+
+        // Automatically open Expert Portal immediately
+        onLoginSuccess(authUser);
+      } else {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: email.trim().toLowerCase(), password })
+        });
+        const data = await res.json();
+
+        if (!data.success) {
+          setErrorMessage(`⚠️ Login Failed: ${data.message || data.error || 'Invalid credentials'}`);
+          setIsLoading(false);
+          return;
+        }
+
+        const userRecord = data.user || {};
+        const returnedRole: UserRole = (userRecord.role === 'expert' || userRecord.role === 'professional') 
+          ? 'professional' 
+          : (userRecord.role === 'admin' ? 'admin' : 'client');
+
+        const authUser: AuthUser = {
+          id: userRecord.id || `user-${Date.now()}`,
+          name: userRecord.name || userRecord.full_name || name,
+          email: userRecord.email || email,
+          phone: userRecord.phone || '',
           role: returnedRole,
           avatarUrl: returnedRole === 'professional'
             ? 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=400&q=80'
@@ -116,52 +201,10 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess }) => {
           sessionStorage.setItem('admin_token', data.token);
         }
 
-        alert(`✅ ${data.message || 'Account registered successfully!'}`);
-        onLoginSuccess(authUser);
-      } else {
-        const res = await fetch('/api/auth/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: email.trim().toLowerCase(), password })
-        });
-        const data = await res.json();
-
-        if (!data.success) {
-          alert(`⚠️ Login Failed: ${data.message || data.error || 'Invalid credentials'}`);
-          setIsLoading(false);
-          return;
-        }
-
-        const userRecord = data.user || {};
-        const returnedRole: UserRole = (userRecord.role === 'expert' || userRecord.role === 'professional') 
-          ? 'professional' 
-          : (userRecord.role === 'admin' ? 'admin' : 'client');
-
-        const authUser: AuthUser = {
-          id: userRecord.id || `user-${Date.now()}`,
-          name: userRecord.name || userRecord.full_name || 'User',
-          email: userRecord.email || email,
-          role: returnedRole,
-          avatarUrl: returnedRole === 'professional'
-            ? 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=400&q=80'
-            : 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80',
-          exCompany: userRecord.company || '',
-          yearsOfExperience: userRecord.years || 25,
-          domain: (userRecord.field || 'Finance & Taxation') as DomainCategory,
-          hourlyRate: userRecord.baseRate || 799,
-          isVerified: userRecord.is_verified ?? true
-        };
-
-        if (data.token) {
-          localStorage.setItem('admin_token', data.token);
-          sessionStorage.setItem('admin_token', data.token);
-        }
-
-        alert(`✅ Welcome Back! Signed in successfully.`);
         onLoginSuccess(authUser);
       }
     } catch (err: any) {
-      alert(`❌ Connection error: ${err.message || 'Network error'}`);
+      setErrorMessage(`Network error: ${err?.message || 'Failed to authenticate. Please check connection.'}`);
     } finally {
       setIsLoading(false);
     }
@@ -301,9 +344,23 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess }) => {
           {/* Form */}
           <form onSubmit={handleSubmit} className="space-y-4">
             
+            {errorMessage && (
+              <div className="p-3.5 bg-rose-500/15 border border-rose-500/40 rounded-xl text-rose-300 text-xs flex items-start gap-2.5 animate-fadeIn">
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                <span>{errorMessage}</span>
+              </div>
+            )}
+
+            {infoMessage && (
+              <div className="p-3.5 bg-amber-500/15 border border-amber-500/40 rounded-xl text-amber-300 text-xs flex items-start gap-2.5 animate-fadeIn">
+                <CheckCircle2 className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <span>{infoMessage}</span>
+              </div>
+            )}
+
             {authMode === 'signup' && (
               <div>
-                <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Full Name</label>
+                <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Full Legal Name</label>
                 <div className="relative">
                   <User className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
                   <input
@@ -332,6 +389,23 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess }) => {
                 />
               </div>
             </div>
+
+            {authMode === 'signup' && (
+              <div>
+                <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Phone Number (Required for KYC & Advisory)</label>
+                <div className="relative">
+                  <Phone className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                  <input
+                    type="tel"
+                    required
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                    placeholder="+91 98765 43210"
+                    className="w-full pl-10 pr-4 py-3.5 bg-slate-950 border border-white/10 rounded-xl text-white text-xs font-medium focus:outline-none focus:ring-2 focus:ring-amber-500"
+                  />
+                </div>
+              </div>
+            )}
 
             <div>
               <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Password</label>

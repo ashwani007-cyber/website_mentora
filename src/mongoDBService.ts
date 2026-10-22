@@ -9,6 +9,7 @@ export interface ExpertDoc {
   id: string;
   name: string;
   field: string;
+  domain_id?: string;
   years?: number | string;
   company?: string;
   baseRate?: number;
@@ -108,8 +109,28 @@ export const mongoDB = {
     }
   },
 
-  async getPendingVerifications(): Promise<any[]> {
-    return readStored<any[]>('pending_verifications', []);
+  async getPendingVerifications(status?: string): Promise<any[]> {
+    // Try to get from Supabase API (new KYC system)
+    try {
+      const url = status ? `/api/admin/pending-verifications?status=${status}` : '/api/admin/pending-verifications';
+      console.log('[AUDIT] Fetching from API:', url);
+      const response = await fetch(url);
+      const data = await response.json();
+
+      console.log('[AUDIT] API response:', data);
+
+      if (Array.isArray(data)) {
+        console.log('[AUDIT] Fetched pending verifications from Supabase:', data.length);
+        return data;
+      }
+    } catch (err) {
+      console.error('[AUDIT] Error fetching pending verifications from API:', err);
+    }
+
+    // Fallback to localStorage (old system)
+    const fallback = readStored<any[]>('pending_verifications', []);
+    console.log('[AUDIT] Fallback to localStorage:', fallback.length);
+    return fallback;
   },
 
   async getAuditStatus(id: string): Promise<any> {
@@ -171,10 +192,29 @@ export const mongoDB = {
 
   async approvePendingVerification(item: any): Promise<any> {
     const id = item?.id ?? item?.expertId;
-    if (id) await this.updateExpertProfile(id, { verified: true });
-    const pending = await this.getPendingVerifications();
-    writeStored('pending_verifications', pending.filter((entry: any) => entry.id !== id));
-    return { success: true };
+    const adminId = localStorage.getItem('admin_token') || localStorage.getItem('admin_session_token') || 'admin';
+
+    try {
+      const response = await fetch('/api/admin/approve-expert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expertId: id, adminId, comments: item.comments || '' })
+      });
+      const result = await response.json();
+
+      if (result.success) {
+        console.log('[AUDIT] Expert approved:', id);
+        return { success: true, experts: await this.getExperts(), pendingVerifications: await this.getPendingVerifications() };
+      }
+      throw new Error(result.error || 'Approval failed');
+    } catch (err) {
+      console.error('Error approving expert:', err);
+      // Fallback to old method
+      if (id) await this.updateExpertProfile(id, { verified: true });
+      const pending = await this.getPendingVerifications();
+      writeStored('pending_verifications', pending.filter((entry: any) => entry.id !== id));
+      return { success: true };
+    }
   },
 
   async rejectPendingVerification(id: string): Promise<any> {

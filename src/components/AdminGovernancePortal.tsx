@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { supabase } from '../supabaseClient';
 import {
   ShieldCheck,
   Briefcase,
@@ -35,7 +36,8 @@ import {
   Copy,
   Play,
   AlertCircle,
-  BookOpen
+  BookOpen,
+  Edit3
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -52,7 +54,8 @@ import confetti from 'canvas-confetti';
 import { ExpertDoc, mongoDB, getDocFile } from '../mongoDBService';
 import { DocumentViewerModal, DocumentViewerItem } from './DocumentViewerModal';
 import { notificationService } from '../services/notificationService';
-import { expertiseService } from '../services/expertiseService';
+import { useDomains } from '../context/DomainsContext';
+import type { DomainItem } from '../types/domain';
 import { NotificationCenter } from './NotificationCenter';
 import { NotificationManagementDesk } from './NotificationManagementDesk';
 import { ExpertAvailabilityManager } from './ExpertAvailabilityManager';
@@ -117,7 +120,7 @@ interface AdminGovernancePortalProps {
 export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
   setPage,
   experts: propExperts = [],
-  pendingVerifications = [],
+  pendingVerifications: propPendingVerifications = [],
   onUpdateExpertMarkup,
   onOpenMongoModal,
   onToggleFeatured,
@@ -133,6 +136,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
   onLogout,
 }) => {
   const experts = Array.isArray(propExperts) ? propExperts : [];
+  const pendingVerifications = Array.isArray(propPendingVerifications) ? propPendingVerifications : [];
   // Navigation Desks State
   const [activeDesk, setActiveDesk] = useState<"kpi" | "kyc" | "pricing" | "spotlight" | "reviews" | "sessions" | "broadcast" | "diagnostics" | "expertise" | "availability" | "project_reviews" | "blogs">("kpi");
   const [adminInspectingReviewId, setAdminInspectingReviewId] = useState<string | null>(null);
@@ -144,48 +148,500 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
   const [adminExpertSearch, setAdminExpertSearch] = useState<string>("");
   const [adminAvailabilityTabFilter, setAdminAvailabilityTabFilter] = useState<"all" | "has_slots" | "no_slots">("all");
 
-  // Expertise Fields Taxonomy State
-  const [expertiseFields, setExpertiseFields] = useState<string[]>(() => expertiseService.getAll());
+  // Auto-refresh state
+  const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [localPendingVerifications, setLocalPendingVerifications] = useState<any[]>(pendingVerifications);
+
+  // Realtime Sync & Action State for Document Audit & KYC
+  const [realtimeSyncStatus, setRealtimeSyncStatus] = useState<'connected' | 'reconnecting' | 'offline'>('connected');
+  const [recentLiveChanges, setRecentLiveChanges] = useState<Record<string, { fieldName: string; oldValue: string; newValue: string; timestamp: string }>>({});
+  const [rejectModalItem, setRejectModalItem] = useState<any | null>(null);
+  const [rejectReasonText, setRejectReasonText] = useState("");
+  const [isSubmittingAction, setIsSubmittingAction] = useState(false);
+  const reconnectTimeoutRef = useRef<any>(null);
+
+  // Sync local state with prop changes while avoiding overwrite of live realtime additions
+  useEffect(() => {
+    if (Array.isArray(pendingVerifications) && pendingVerifications.length > 0) {
+      setLocalPendingVerifications(prev => {
+        const merged = [...prev];
+        pendingVerifications.forEach(item => {
+          const idx = merged.findIndex(m => m.id === item.id || (item.email && m.email?.toLowerCase() === item.email?.toLowerCase()));
+          if (idx >= 0) {
+            merged[idx] = { ...merged[idx], ...item };
+          } else {
+            merged.push(item);
+          }
+        });
+        return merged;
+      });
+    }
+  }, [pendingVerifications]);
+
+  // Supabase Realtime Subscription for Document Audit & KYC Desk
+  useEffect(() => {
+    if (activeDesk !== 'kyc') return;
+
+    // 1. Initial live fetch
+    handleRefresh();
+
+    // 2. Setup Supabase Realtime channel
+    const channelName = 'admin-kyc-desk';
+    console.log('[REALTIME] Subscribing to Supabase channel:', channelName);
+
+    const channel = supabase.channel(channelName, {
+      config: { broadcast: { self: false } }
+    });
+
+    // Handle incoming postgres_changes on expert_profiles
+    channel
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'expert_profiles' }, (payload) => {
+        const newExp = payload.new;
+        console.log('[REALTIME] New expert registered (INSERT):', newExp);
+        if (newExp && !newExp.is_removed) {
+          setLocalPendingVerifications(prev => {
+            if (prev.some(p => p.id === newExp.id || (newExp.email && p.email?.toLowerCase() === newExp.email?.toLowerCase()))) {
+              return prev;
+            }
+            const mapped = {
+              id: newExp.id,
+              expertId: newExp.id,
+              name: newExp.full_name || 'Senior Professional',
+              email: newExp.email || '',
+              phone: newExp.phone || '',
+              field: newExp.field || 'Strategic Leadership',
+              company: newExp.company || 'Enterprise Firm',
+              years: newExp.years || 0,
+              baseRate: newExp.base_rate || 799,
+              projectRate: newExp.project_rate || 1000,
+              bio: newExp.bio || '',
+              status: 'Registered / Documents Pending',
+              verificationStatus: newExp.status || 'pending_verification',
+              submittedAt: newExp.created_at || new Date().toISOString(),
+              documents: {},
+              recentChanges: []
+            };
+            return [mapped, ...prev];
+          });
+          confetti({ particleCount: 30, spread: 45, origin: { y: 0.4 } });
+        }
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'expert_profiles' }, (payload) => {
+        const updated = payload.new as any;
+        console.log('[REALTIME] Expert updated (UPDATE):', updated);
+        if (!updated) return;
+
+        // If marked removed or approved, remove from KYC queue immediately
+        if (updated.is_removed || updated.status === 'approved' || updated.status === 'removed') {
+          setLocalPendingVerifications(prev => prev.filter(p => p.id !== updated.id));
+        } else {
+          setLocalPendingVerifications(prev => prev.map(p => {
+            if (p.id === updated.id) {
+              return {
+                ...p,
+                name: updated.full_name || p.name,
+                email: updated.email || p.email,
+                phone: updated.phone || p.phone,
+                field: updated.field || p.field,
+                company: updated.company || p.company,
+                years: updated.years ?? p.years,
+                baseRate: updated.base_rate ?? p.baseRate,
+                projectRate: updated.project_rate ?? p.projectRate,
+                bio: updated.bio || p.bio,
+                status: updated.status === 'pending_verification' ? 'Pending Audit' : updated.status,
+                verificationStatus: updated.status,
+                rejectionReason: updated.rejection_reason
+              };
+            }
+            return p;
+          }));
+        }
+      })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'expert_profiles' }, (payload) => {
+        const oldId = (payload.old as any)?.id;
+        console.log('[REALTIME] Expert deleted (DELETE):', oldId);
+        if (oldId) {
+          setLocalPendingVerifications(prev => prev.filter(p => p.id !== oldId));
+        }
+      })
+      // Handle incoming postgres_changes on documents
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'documents' }, (payload) => {
+        const doc = payload.new as any;
+        console.log('[REALTIME] Document change (documents):', doc);
+        if (doc && doc.expert_id) {
+          setLocalPendingVerifications(prev => prev.map(p => {
+            if (p.id === doc.expert_id) {
+              const updatedDocs = { ...(p.documents || {}) };
+              updatedDocs[doc.document_type] = doc;
+              return {
+                ...p,
+                status: 'Pending Audit',
+                verificationStatus: 'pending_verification',
+                documents: updatedDocs
+              };
+            }
+            return p;
+          }));
+        }
+      })
+      // Handle incoming postgres_changes on expert_profile_changes
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'expert_profile_changes' }, (payload) => {
+        const change = payload.new as any;
+        console.log('[REALTIME] Profile change detected:', change);
+        if (change && change.expert_id) {
+          setRecentLiveChanges(prev => ({
+            ...prev,
+            [change.expert_id]: {
+              fieldName: change.field_name,
+              oldValue: change.old_value,
+              newValue: change.new_value,
+              timestamp: change.changed_at
+            }
+          }));
+        }
+      })
+      // Direct Realtime Broadcast Events for Zero-Latency Cross-Browser Sync
+      .on('broadcast', { event: 'expert_registered' }, (e) => {
+        const p = e.payload;
+        console.log('[REALTIME BROADCAST] Expert registered:', p);
+        if (p) {
+          setLocalPendingVerifications(prev => {
+            if (prev.some(item => item.id === p.id || (p.email && item.email?.toLowerCase() === p.email?.toLowerCase()))) {
+              return prev;
+            }
+            return [{
+              id: p.id,
+              expertId: p.id,
+              name: p.name || p.fullName || 'Senior Professional',
+              email: p.email || '',
+              phone: p.phone || '',
+              field: p.domain || p.field || 'Strategic Leadership',
+              company: p.exCompany || p.company || 'Enterprise Firm',
+              years: p.yearsOfExperience || p.years || 0,
+              baseRate: p.hourlyRate || p.baseRate || 799,
+              projectRate: p.projectRate || 1000,
+              bio: p.bio || '',
+              status: 'Registered / Documents Pending',
+              verificationStatus: 'pending_verification',
+              submittedAt: new Date().toISOString(),
+              documents: {},
+              recentChanges: []
+            }, ...prev];
+          });
+          confetti({ particleCount: 30, spread: 45, origin: { y: 0.4 } });
+        }
+      })
+      .on('broadcast', { event: 'expert_profile_updated' }, (e) => {
+        const p = e.payload;
+        console.log('[REALTIME BROADCAST] Profile updated:', p);
+        if (p && p.expertId) {
+          setRecentLiveChanges(prev => ({
+            ...prev,
+            [p.expertId]: {
+              fieldName: p.fieldName,
+              oldValue: p.oldValue,
+              newValue: p.newValue,
+              timestamp: p.timestamp || new Date().toISOString()
+            }
+          }));
+          setLocalPendingVerifications(prev => prev.map(item => {
+            if (item.id === p.expertId) {
+              const numVal = Number(String(p.newValue).replace(/\D/g, ''));
+              return {
+                ...item,
+                baseRate: p.fieldName.toLowerCase().includes('hourly') && numVal ? numVal : item.baseRate,
+                projectRate: p.fieldName.toLowerCase().includes('project') && numVal ? numVal : item.projectRate,
+              };
+            }
+            return item;
+          }));
+        }
+      })
+      .on('broadcast', { event: 'document_uploaded' }, (e) => {
+        const p = e.payload;
+        console.log('[REALTIME BROADCAST] Document uploaded:', p);
+        if (p && p.expertId) {
+          if (p.documentType && p.document) {
+            setLocalPendingVerifications(prev => prev.map(item => {
+              if (item.id === p.expertId) {
+                const updatedDocs = { ...(item.documents || {}) };
+                updatedDocs[p.documentType] = p.document;
+                return {
+                  ...item,
+                  status: 'Pending Audit',
+                  documents: updatedDocs
+                };
+              }
+              return item;
+            }));
+          }
+          handleRefresh();
+        }
+      })
+      .subscribe((status) => {
+        console.log('[REALTIME] Subscription status:', status);
+        if (status === 'SUBSCRIBED') {
+          setRealtimeSyncStatus('connected');
+        } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          setRealtimeSyncStatus('reconnecting');
+          clearTimeout(reconnectTimeoutRef.current);
+          reconnectTimeoutRef.current = setTimeout(() => {
+            handleRefresh();
+          }, 3000);
+        } else if (status === 'CLOSED') {
+          setRealtimeSyncStatus('offline');
+        }
+      });
+
+    return () => {
+      console.log('[REALTIME] Cleaning up channel on unmount:', channelName);
+      clearTimeout(reconnectTimeoutRef.current);
+      supabase.removeChannel(channel);
+    };
+  }, [activeDesk]);
+
+  // Live Domains Taxonomy via useDomains (Single Source of Truth)
+  const {
+    domains: taxonomyDomains,
+    loading: domainsLoading,
+    addDomain,
+    renameDomain,
+    deleteDomain,
+    resetDefaults
+  } = useDomains();
+
   const [newFieldName, setNewFieldName] = useState("");
   const [fieldSearch, setFieldSearch] = useState("");
+  const [editingDomainId, setEditingDomainId] = useState<string | null>(null);
+  const [editingDomainName, setEditingDomainName] = useState("");
+  const [isDomainSubmitting, setIsDomainSubmitting] = useState(false);
+  const [domainToast, setDomainToast] = useState<{ show: boolean; message: string; type: 'success' | 'error' | 'info' } | null>(null);
 
+  const [deleteModal, setDeleteModal] = useState<{
+    isOpen: boolean;
+    domain: DomainItem;
+    assignedExperts: any[];
+    reassignToId: string;
+    loading?: boolean;
+  } | null>(null);
+
+  const [resetModalOpen, setResetModalOpen] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
+
+  const showDomainToast = (message: string, type: 'success' | 'error' | 'info' = 'success') => {
+    setDomainToast({ show: true, message, type });
+    setTimeout(() => {
+      setDomainToast(null);
+    }, 3800);
+  };
+
+  const expertiseFields = useMemo(
+    () => taxonomyDomains.filter(d => d.is_active !== false).map(d => d.name),
+    [taxonomyDomains]
+  );
+
+  // Auto-refresh pending verifications every 30 seconds
   useEffect(() => {
-    return expertiseService.subscribe((updated) => {
-      setExpertiseFields(updated);
-    });
-  }, []);
+    const interval = setInterval(() => {
+      if (activeDesk === 'kyc') {
+        console.log('[ADMIN] Auto-refreshing pending verifications');
+        window.dispatchEvent(new Event('mongo_db_updated'));
+        setLastRefresh(new Date());
+      }
+    }, 30000); // 30 seconds
 
-  const handleAddField = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newFieldName.trim()) return;
-    const res = expertiseService.add(newFieldName.trim());
-    if (!res.success) {
-      alert(res.message);
+    return () => clearInterval(interval);
+  }, [activeDesk]);
+
+  // Manual refresh handler
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    console.log('[ADMIN] Manual refresh triggered');
+
+    // Directly fetch fresh data from API
+    try {
+      const url = statusFilter && statusFilter !== 'all'
+        ? `/api/admin/pending-verifications?status=${statusFilter}`
+        : '/api/admin/pending-verifications';
+
+      console.log('[ADMIN] Fetching fresh data from:', url);
+      const response = await fetch(url);
+      const data = await response.json();
+
+      console.log('[ADMIN] Fresh data received:', data);
+
+      if (Array.isArray(data)) {
+        // Update local state immediately
+        setLocalPendingVerifications(data);
+        console.log('[ADMIN] Updated local state with', data.length, 'items');
+
+        // Also trigger parent refresh for consistency
+        window.dispatchEvent(new Event('mongo_db_updated'));
+        console.log('[ADMIN] Dispatched mongo_db_updated event');
+      }
+    } catch (err) {
+      console.error('[ADMIN] Error fetching fresh data:', err);
+    }
+
+    setLastRefresh(new Date());
+    setTimeout(() => setIsRefreshing(false), 1000);
+  };
+
+  const handleAddField = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const trimmed = newFieldName.trim();
+    if (!trimmed) {
+      showDomainToast("Please enter an expertise field name", "error");
       return;
     }
-    setNewFieldName("");
-    confetti({ particleCount: 50, spread: 60, origin: { y: 0.5 } });
-  };
-
-  const handleDeleteField = (fieldName: string) => {
-    const assignedExperts = experts.filter(e => e.field && e.field.toLowerCase() === fieldName.toLowerCase());
-    let promptMsg = `Are you sure you want to delete the expertise field "${fieldName}"?`;
-    if (assignedExperts.length > 0) {
-      promptMsg += `\n\n⚠️ Caution: ${assignedExperts.length} expert(s) are currently tagged in this field (${assignedExperts.map(e => e.name).slice(0, 3).join(", ")}${assignedExperts.length > 3 ? "..." : ""}).`;
+    const duplicate = taxonomyDomains.some(
+      (d) => d.name.toLowerCase() === trimmed.toLowerCase()
+    );
+    if (duplicate) {
+      showDomainToast(`Domain "${trimmed}" already exists`, "error");
+      return;
     }
-    if (window.confirm(promptMsg)) {
-      const res = expertiseService.delete(fieldName);
+
+    setIsDomainSubmitting(true);
+    try {
+      const res = await addDomain(trimmed);
       if (!res.success) {
-        alert(res.message);
+        showDomainToast(res.error || "Failed to add domain", "error");
+        return;
       }
+      setNewFieldName("");
+      showDomainToast(res.message || `Domain "${trimmed}" added successfully`, "success");
+      confetti({ particleCount: 50, spread: 60, origin: { y: 0.5 } });
+    } catch (err: any) {
+      showDomainToast(err.message || "Failed to add domain", "error");
+    } finally {
+      setIsDomainSubmitting(false);
     }
   };
 
-  const handleResetFields = () => {
-    if (window.confirm("Restore standard canonical expertise fields? This will revert any custom additions and deletions.")) {
-      expertiseService.reset();
+  const handleQuickAdd = async (tag: string) => {
+    setIsDomainSubmitting(true);
+    try {
+      const res = await addDomain(tag);
+      if (!res.success) {
+        showDomainToast(res.error || `Could not add "${tag}"`, "error");
+        return;
+      }
+      showDomainToast(`Added domain "${tag}"`, "success");
       confetti({ particleCount: 30, spread: 40 });
-      alert("✅ Restored default expertise domain fields.");
+    } catch (err: any) {
+      showDomainToast(err.message || "Failed to add suggestion", "error");
+    } finally {
+      setIsDomainSubmitting(false);
+    }
+  };
+
+  const handleStartRename = (domain: DomainItem) => {
+    setEditingDomainId(domain.id);
+    setEditingDomainName(domain.name);
+  };
+
+  const handleCancelRename = () => {
+    setEditingDomainId(null);
+    setEditingDomainName("");
+  };
+
+  const handleSaveRename = async (domain: DomainItem) => {
+    const trimmed = editingDomainName.trim();
+    if (!trimmed) {
+      showDomainToast("Domain name cannot be empty", "error");
+      return;
+    }
+    if (trimmed.toLowerCase() === domain.name.toLowerCase()) {
+      handleCancelRename();
+      return;
+    }
+
+    const duplicate = taxonomyDomains.some(
+      (d) => d.id !== domain.id && d.name.toLowerCase() === trimmed.toLowerCase()
+    );
+    if (duplicate) {
+      showDomainToast(`Another domain named "${trimmed}" already exists`, "error");
+      return;
+    }
+
+    setIsDomainSubmitting(true);
+    try {
+      const res = await renameDomain(domain.id, trimmed);
+      if (!res.success) {
+        showDomainToast(res.error || "Failed to rename domain", "error");
+        return;
+      }
+      handleCancelRename();
+      showDomainToast(res.message || `Renamed to "${trimmed}"`, "success");
+      confetti({ particleCount: 40, spread: 50 });
+    } catch (err: any) {
+      showDomainToast(err.message || "Failed to rename domain", "error");
+    } finally {
+      setIsDomainSubmitting(false);
+    }
+  };
+
+  const handleOpenDeleteModal = (domain: DomainItem) => {
+    const assigned = experts.filter(
+      (e) =>
+        (e.domain_id && e.domain_id === domain.id) ||
+        (e.field && e.field.trim().toLowerCase() === domain.name.trim().toLowerCase())
+    );
+    const otherDomains = taxonomyDomains.filter((d) => d.id !== domain.id && d.is_active !== false);
+
+    setDeleteModal({
+      isOpen: true,
+      domain,
+      assignedExperts: assigned,
+      reassignToId: otherDomains[0]?.id || ""
+    });
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deleteModal) return;
+    const { domain, assignedExperts, reassignToId } = deleteModal;
+
+    if (assignedExperts.length > 0 && !reassignToId) {
+      showDomainToast("Please select a domain to reassign tagged experts to", "error");
+      return;
+    }
+
+    setDeleteModal((prev) => prev ? { ...prev, loading: true } : null);
+    try {
+      const res = await deleteDomain(domain.id, assignedExperts.length > 0 ? reassignToId : undefined);
+      if (!res.success) {
+        showDomainToast(res.error || "Failed to delete domain", "error");
+        setDeleteModal((prev) => prev ? { ...prev, loading: false } : null);
+        return;
+      }
+
+      setDeleteModal(null);
+      showDomainToast(res.message || `Deleted domain "${domain.name}"`, "success");
+      confetti({ particleCount: 40, spread: 50 });
+    } catch (err: any) {
+      showDomainToast(err.message || "Failed to delete domain", "error");
+      setDeleteModal((prev) => prev ? { ...prev, loading: false } : null);
+    }
+  };
+
+  const handleConfirmReset = async () => {
+    setIsResetting(true);
+    try {
+      const res = await resetDefaults();
+      if (!res.success) {
+        showDomainToast(res.error || "Failed to restore defaults", "error");
+        return;
+      }
+      setResetModalOpen(false);
+      showDomainToast("Restored canonical 8 default domains", "success");
+      confetti({ particleCount: 40, spread: 60 });
+    } catch (err: any) {
+      showDomainToast(err.message || "Failed to restore defaults", "error");
+    } finally {
+      setIsResetting(false);
     }
   };
 
@@ -1258,10 +1714,136 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
   };
 
   const handleApprove = async (id: string) => {
-    const item = pendingVerifications.find((v) => v.id === id);
-    if (item && onApproveVerification) {
-      await onApproveVerification(item);
+    setIsSubmittingAction(true);
+    try {
+      const item = localPendingVerifications.find((v) => v.id === id) || pendingVerifications.find((v) => v.id === id);
+      // 1. Call approve-document API endpoint on Supabase backend
+      await fetch('/api/admin/approve-document', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expertId: id, adminId: 'admin' })
+      });
+
+      // 2. Broadcast realtime status update to Expert Portal
+      try {
+        const ch = supabase.channel('admin-kyc-desk');
+        ch.send({
+          type: 'broadcast',
+          event: 'expert_status_changed',
+          payload: { expertId: id, email: item?.email, status: 'approved' }
+        });
+      } catch {}
+
+      // 3. Move applicant into "Expert Rates & Markups" (Desk 03)
+      if (item && onApproveVerification) {
+        await onApproveVerification(item);
+      }
+
+      // Remove from KYC queue immediately
+      setLocalPendingVerifications(prev => prev.filter(p => p.id !== id));
       confetti({ particleCount: 50, spread: 50, origin: { y: 0.5 } });
+    } catch (err: any) {
+      alert(`Approval error: ${err?.message || 'Failed to approve'}`);
+    } finally {
+      setIsSubmittingAction(false);
+    }
+  };
+
+  const handleOpenRejectModal = (item: any) => {
+    setRejectModalItem(item);
+    setRejectReasonText(item?.rejectionReason || "");
+  };
+
+  const handleConfirmReject = async () => {
+    if (!rejectModalItem) return;
+    if (!rejectReasonText.trim()) {
+      alert("⚠️ Mandatory rejection reason is required.");
+      return;
+    }
+    setIsSubmittingAction(true);
+    try {
+      const cleanReason = rejectReasonText.trim();
+      const res = await fetch('/api/admin/reject-document', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          expertId: rejectModalItem.id,
+          reason: cleanReason,
+          adminId: 'admin'
+        })
+      });
+      const data = await res.json();
+      if (!data.success) {
+        throw new Error(data.error || 'Failed to reject applicant');
+      }
+
+      // Broadcast realtime event
+      try {
+        const ch = supabase.channel('admin-kyc-desk');
+        ch.send({
+          type: 'broadcast',
+          event: 'expert_status_changed',
+          payload: {
+            expertId: rejectModalItem.id,
+            email: rejectModalItem.email,
+            status: 'changes_requested',
+            rejectionReason: cleanReason
+          }
+        });
+      } catch {}
+
+      // Update local state to show rejection reason / status
+      setLocalPendingVerifications(prev => prev.map(p => {
+        if (p.id === rejectModalItem.id) {
+          return {
+            ...p,
+            status: 'Changes Requested',
+            verificationStatus: 'changes_requested',
+            rejectionReason: cleanReason
+          };
+        }
+        return p;
+      }));
+
+      setRejectModalItem(null);
+      setRejectReasonText("");
+      alert("✅ Rejection reason saved and transmitted to Expert Portal in real time!");
+    } catch (err: any) {
+      alert(`Rejection error: ${err?.message || 'Failed to reject applicant'}`);
+    } finally {
+      setIsSubmittingAction(false);
+    }
+  };
+
+  const handleRemoveExpert = async (id: string, name: string) => {
+    if (!window.confirm(`Are you sure you want to remove applicant "${name}" from the verification queue? (Soft Delete)`)) {
+      return;
+    }
+    setIsSubmittingAction(true);
+    try {
+      await fetch('/api/admin/remove-expert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expertId: id, adminId: 'admin' })
+      });
+
+      // Broadcast realtime removal
+      try {
+        const ch = supabase.channel('admin-kyc-desk');
+        ch.send({
+          type: 'broadcast',
+          event: 'expert_status_changed',
+          payload: { expertId: id, status: 'removed' }
+        });
+      } catch {}
+
+      // Remove from local list immediately
+      setLocalPendingVerifications(prev => prev.filter(p => p.id !== id));
+      if (onDeleteExpert) onDeleteExpert(id);
+    } catch (err: any) {
+      alert(`Removal error: ${err?.message || 'Failed to remove expert'}`);
+    } finally {
+      setIsSubmittingAction(false);
     }
   };
 
@@ -1518,9 +2100,9 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
               <ShieldCheck size={16} />
               <span>Document Audit & KYC</span>
             </div>
-            {pendingVerifications.length > 0 && (
+            {localPendingVerifications.length > 0 && (
               <span className="text-[10px] px-1.5 py-0.5 rounded-full font-bold bg-amber-500 text-slate-950">
-                {pendingVerifications.length}
+                {localPendingVerifications.length}
               </span>
             )}
           </button>
@@ -1800,7 +2382,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
                     {experts.filter(e => e.verified).length} Pros
                   </p>
                   <p className={`text-[11px] font-medium ${isLight ? "text-amber-800" : "text-amber-300/80"}`}>
-                    {pendingVerifications.length} applicants in KYC audit queue
+                    {localPendingVerifications.length} applicants in KYC audit queue
                   </p>
                 </div>
 
@@ -1924,38 +2506,82 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
             <div className="space-y-6 animate-fadeIn">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
-                  <span className="text-xs uppercase font-bold tracking-widest text-amber-500">Desk 02 • Document Governance</span>
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs uppercase font-bold tracking-widest text-amber-500">Desk 02 • Document Governance</span>
+                    {/* Live Sync Status Pill */}
+                    <div className={`px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold border flex items-center gap-1.5 ${
+                      realtimeSyncStatus === 'connected'
+                        ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+                        : realtimeSyncStatus === 'reconnecting'
+                        ? 'bg-amber-500/10 border-amber-500/30 text-amber-300 animate-pulse'
+                        : 'bg-slate-500/10 border-slate-500/30 text-slate-400'
+                    }`}>
+                      <span className={`w-1.5 h-1.5 rounded-full ${
+                        realtimeSyncStatus === 'connected' ? 'bg-emerald-500 animate-pulse' : realtimeSyncStatus === 'reconnecting' ? 'bg-amber-500' : 'bg-slate-500'
+                      }`} />
+                      {realtimeSyncStatus === 'connected' ? 'Realtime Sync Active' : realtimeSyncStatus === 'reconnecting' ? 'Reconnecting to Supabase...' : 'Sync Offline'}
+                    </div>
+                  </div>
                   <h1 className={`text-2xl sm:text-3xl font-serif font-bold mt-1 ${isLight ? "text-slate-900" : "text-white"}`}>
-                    Senior Professional KYC Verification Queue ({pendingVerifications.length})
+                    Senior Professional KYC Verification Queue ({localPendingVerifications.length})
                   </h1>
                   <p className={`text-xs sm:text-sm mt-1 ${isLight ? "text-slate-600" : "text-slate-400"}`}>
-                    Inspect uploaded work certificates, relieving letters, and CV documents before publishing profiles to client search.
+                    Real-time synchronized audit queue. Inspect uploaded work certificates, relieving letters, and CV documents before publishing profiles.
                   </p>
                 </div>
 
-                {onResetPendingQueue && (
-                  <button
-                    onClick={async () => {
-                      await onResetPendingQueue();
-                      confetti({ particleCount: 40, spread: 50 });
-                    }}
-                    className={`self-start sm:self-auto text-xs px-3.5 py-2 rounded-lg font-semibold border transition-all flex items-center gap-1.5 cursor-pointer shadow-md ${
-                      isLight 
-                        ? "bg-white hover:bg-slate-100 text-amber-800 border-slate-300" 
-                        : "bg-slate-800 hover:bg-slate-700 text-amber-300 border-slate-700"
+                <div className="flex items-center gap-2">
+                  {/* Status Filter */}
+                  <select
+                    value={statusFilter}
+                    onChange={(e) => setStatusFilter(e.target.value)}
+                    className={`px-3 py-2 rounded-lg text-sm ${
+                      isLight ? 'bg-white border-gray-300 text-slate-900' : 'bg-gray-800 border-gray-700 text-white'
                     }`}
                   >
-                    <Plus size={14} /> Add Sample Applicants
+                    <option value="all">All Status</option>
+                    <option value="pending_verification">Pending Verification</option>
+                    <option value="submitted">Submitted</option>
+                    <option value="under_review">Under Review</option>
+                    <option value="changes_requested">Changes Requested</option>
+                    <option value="rejected">Rejected</option>
+                  </select>
+
+                  {/* Refresh Button */}
+                  <button
+                    onClick={handleRefresh}
+                    disabled={isRefreshing}
+                    className={`px-3 py-2 rounded-lg text-sm flex items-center gap-2 ${
+                      isLight ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-blue-600 hover:bg-blue-700 text-white'
+                    } disabled:opacity-50`}
+                  >
+                    {isRefreshing ? 'Refreshing...' : '🔄 Refresh'}
                   </button>
-                )}
+
+                  {onResetPendingQueue && (
+                    <button
+                      onClick={async () => {
+                        await onResetPendingQueue();
+                        confetti({ particleCount: 40, spread: 50 });
+                      }}
+                      className={`self-start sm:self-auto text-xs px-3.5 py-2 rounded-lg font-semibold border transition-all flex items-center gap-1.5 cursor-pointer shadow-md ${
+                        isLight
+                          ? "bg-white hover:bg-slate-100 text-amber-800 border-slate-300"
+                          : "bg-slate-800 hover:bg-slate-700 text-amber-300 border-slate-700"
+                      }`}
+                    >
+                      <Plus size={14} /> Add Sample Applicants
+                    </button>
+                  )}
+                </div>
               </div>
 
-              {pendingVerifications.length === 0 ? (
+              {localPendingVerifications.length === 0 ? (
                 <div className="p-12 rounded-2xl border text-center space-y-3" style={{ background: T.cardBg, borderColor: T.lineInk }}>
                   <CheckCircle2 className={`w-12 h-12 mx-auto ${isLight ? "text-emerald-600" : "text-emerald-400"}`} />
                   <h3 className={`text-lg font-bold ${isLight ? "text-slate-900" : "text-white"}`}>KYC Verification Queue is Clear</h3>
                   <p className={`text-xs max-w-md mx-auto ${isLight ? "text-slate-600" : "text-slate-400"}`}>
-                    All senior professionals who registered and submitted documents have been audited and verified.
+                    All senior professionals who registered and submitted documents have been audited and verified. Newly registered experts will appear here instantly.
                   </p>
                   {onResetPendingQueue && (
                     <button
@@ -1968,89 +2594,192 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
                 </div>
               ) : (
                 <div className="space-y-4">
-                  {pendingVerifications.map((p) => (
-                    <div
-                      key={p.id}
-                      className="p-5 rounded-2xl border shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-4 transition-all hover:border-amber-500/50"
-                      style={{ background: T.cardBg, borderColor: T.lineInk }}
-                    >
-                      <div className="space-y-2">
-                        <div className="flex items-center gap-2.5 flex-wrap">
-                          <span className={`text-base font-bold ${isLight ? "text-slate-900" : "text-white"}`}>{p.name}</span>
-                          {p.email && (
-                            <span className={`text-xs font-mono font-medium px-2 py-0.5 rounded border ${
-                              isLight ? "bg-slate-100 text-slate-700 border-slate-300" : "bg-white/5 text-amber-300/90 border-white/10"
-                            }`}>
-                              {p.email}
-                            </span>
-                          )}
-                          <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${
-                            isLight 
-                              ? "bg-amber-100 text-amber-900 border-amber-300" 
-                              : "bg-amber-950/80 text-amber-300 border-amber-800/80"
-                          }`}>
-                            Awaiting Audit
-                          </span>
-                        </div>
-                        <p className={`text-xs ${isLight ? "text-slate-700" : "text-slate-300"}`}>
-                          {p.field} · {p.years} years experience · Ex-{p.company || "Fortune 500"}
-                        </p>
+                  {localPendingVerifications
+                    .filter((item, idx, arr) => arr.findIndex(x => x.id === item.id || (item.email && x.email?.toLowerCase() === item.email?.toLowerCase())) === idx)
+                    .map((p) => {
+                      const docCount = p.documents ? Object.keys(p.documents).length : 0;
+                      const isPendingDocs = p.status === 'Registered / Documents Pending' || (docCount === 0 && p.verificationStatus !== 'approved');
+                      const liveChange = recentLiveChanges[p.id];
 
-                        <div className="flex flex-wrap gap-2 pt-1">
-                          <span className={`text-[11px] px-2.5 py-1 rounded font-mono border flex items-center gap-1 ${
-                            isLight ? "bg-slate-100 border-slate-300 text-slate-800" : "bg-slate-900 border-slate-700 text-amber-300"
-                          }`}>
-                            <FileText size={12} /> Work Cert PDF
-                          </span>
-                          <span className={`text-[11px] px-2.5 py-1 rounded font-mono border flex items-center gap-1 ${
-                            isLight ? "bg-emerald-50 border-emerald-300 text-emerald-800" : "bg-slate-900 border-slate-700 text-emerald-300"
-                          }`}>
-                            <FileCheck size={12} /> Relieving Letter PDF
-                          </span>
-                          <span className={`text-[11px] px-2.5 py-1 rounded font-mono border flex items-center gap-1 ${
-                            isLight ? "bg-sky-50 border-sky-300 text-sky-800" : "bg-slate-900 border-slate-700 text-sky-300"
-                          }`}>
-                            <FileText size={12} /> Executive CV Dossier
-                          </span>
-                        </div>
-                      </div>
+                      return (
+                        <div
+                          key={p.id}
+                          className="p-5 rounded-2xl border shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-4 transition-all hover:border-amber-500/50 space-y-3 md:space-y-0"
+                          style={{ background: T.cardBg, borderColor: T.lineInk }}
+                        >
+                          <div className="space-y-2 flex-1 min-w-0">
+                            <div className="flex items-center gap-2.5 flex-wrap">
+                              <span className={`text-base font-bold ${isLight ? "text-slate-900" : "text-white"}`}>{p.name}</span>
+                              {p.email && (
+                                <span className={`text-xs font-mono font-medium px-2 py-0.5 rounded border ${
+                                  isLight ? "bg-slate-100 text-slate-700 border-slate-300" : "bg-white/5 text-amber-300/90 border-white/10"
+                                }`}>
+                                  {p.email}
+                                </span>
+                              )}
+                              {p.phone && (
+                                <span className={`text-xs font-mono font-medium px-2 py-0.5 rounded border ${
+                                  isLight ? "bg-slate-100 text-slate-700 border-slate-300" : "bg-white/5 text-sky-300/90 border-white/10"
+                                }`}>
+                                  {p.phone}
+                                </span>
+                              )}
+                              <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${
+                                isPendingDocs
+                                  ? isLight ? "bg-amber-50 text-amber-800 border-amber-300" : "bg-amber-950/60 text-amber-300 border-amber-700"
+                                  : p.verificationStatus === 'changes_requested' || p.status === 'Changes Requested'
+                                  ? isLight ? "bg-rose-50 text-rose-800 border-rose-300" : "bg-rose-950/80 text-rose-300 border-rose-800"
+                                  : isLight ? "bg-amber-100 text-amber-900 border-amber-300" : "bg-amber-950/80 text-amber-300 border-amber-800/80"
+                              }`}>
+                                {isPendingDocs ? "Registered / Documents Pending" : p.status || "Awaiting Audit"}
+                              </span>
+                            </div>
 
-                      <div className="flex flex-wrap items-center gap-2 pt-2 md:pt-0 shrink-0">
-                        <button
-                          onClick={() => setSelectedAuditItem(p)}
-                          className={`px-3.5 py-2 text-xs rounded-lg font-bold border transition-all flex items-center gap-1.5 cursor-pointer ${
-                            isLight 
-                              ? "bg-white text-slate-800 hover:bg-slate-100 border-slate-300 shadow-sm" 
-                              : "bg-slate-800 text-slate-200 hover:bg-slate-700 border-slate-700"
-                          }`}
-                          title="View Documents"
-                        >
-                          <Eye size={13} /> View Documents
-                        </button>
-                        <button
-                          onClick={() => handleApprove(p.id)}
-                          className="px-4 py-2 text-xs rounded-lg font-bold bg-emerald-600 hover:bg-emerald-500 text-white transition-all flex items-center gap-1.5 cursor-pointer shadow-lg"
-                        >
-                          <Check size={14} /> Approve & Publish
-                        </button>
-                        <button
-                          onClick={() => {
-                            if (window.confirm(`Reject and remove applicant "${p.name}" from verification queue?`)) {
-                              if (onDeleteExpert) onDeleteExpert(p.id);
-                            }
-                          }}
-                          className={`px-3 py-2 text-xs rounded-lg font-bold border transition-all cursor-pointer flex items-center gap-1 ${
-                            isLight 
-                              ? "bg-rose-50 text-rose-800 hover:bg-rose-100 border-rose-300" 
-                              : "bg-rose-950/80 text-rose-300 hover:bg-rose-900 border-rose-800"
-                          }`}
-                          title="Reject & Delete Applicant"
-                        >
-                          <UserX size={13} /> Reject
-                        </button>
-                      </div>
+                            <p className={`text-xs ${isLight ? "text-slate-700" : "text-slate-300"}`}>
+                              {p.field} · {p.years} years experience · Ex-{p.company || "Fortune 500"} · Base Rate: ₹{p.baseRate || 799}/hr · Project Rate: ₹{p.projectRate || 1000}
+                            </p>
+
+                            {/* Highlight Live Change banner if expert recently updated profile */}
+                            {liveChange && (
+                              <div className="p-2.5 rounded-xl border bg-amber-500/10 border-amber-500/30 text-amber-300 text-xs flex items-center gap-2 animate-fadeIn">
+                                <Sparkles size={14} className="text-amber-400 shrink-0" />
+                                <span>
+                                  <strong>⚡ Live Change Detected:</strong> Field &quot;{liveChange.fieldName}&quot; changed from <em>{liveChange.oldValue}</em> to <strong>{liveChange.newValue}</strong>
+                                </span>
+                              </div>
+                            )}
+
+                            {/* Rejection Reason display if rejected */}
+                            {p.rejectionReason && (
+                              <div className="p-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
+                                <AlertCircle size={13} className="text-rose-400 shrink-0" />
+                                <span><strong>Rejection Reason Sent:</strong> {p.rejectionReason}</span>
+                              </div>
+                            )}
+
+                            <div className="flex flex-wrap gap-2 pt-1">
+                              <span className={`text-[11px] px-2.5 py-1 rounded font-mono border flex items-center gap-1 ${
+                                p.documents?.expCert
+                                  ? isLight ? "bg-emerald-50 border-emerald-300 text-emerald-800" : "bg-slate-900 border-emerald-700 text-emerald-300"
+                                  : isLight ? "bg-slate-100 border-slate-300 text-slate-500" : "bg-slate-900 border-slate-700 text-slate-500"
+                              }`}>
+                                <FileText size={12} /> Work Cert PDF {p.documents?.expCert ? "✓" : "(Missing)"}
+                              </span>
+                              <span className={`text-[11px] px-2.5 py-1 rounded font-mono border flex items-center gap-1 ${
+                                p.documents?.offerLetter
+                                  ? isLight ? "bg-emerald-50 border-emerald-300 text-emerald-800" : "bg-slate-900 border-emerald-700 text-emerald-300"
+                                  : isLight ? "bg-slate-100 border-slate-300 text-slate-500" : "bg-slate-900 border-slate-700 text-slate-500"
+                              }`}>
+                                <FileCheck size={12} /> Relieving Letter PDF {p.documents?.offerLetter ? "✓" : "(Missing)"}
+                              </span>
+                              <span className={`text-[11px] px-2.5 py-1 rounded font-mono border flex items-center gap-1 ${
+                                p.documents?.resume
+                                  ? isLight ? "bg-emerald-50 border-emerald-300 text-emerald-800" : "bg-slate-900 border-emerald-700 text-emerald-300"
+                                  : isLight ? "bg-slate-100 border-slate-300 text-slate-500" : "bg-slate-900 border-slate-700 text-slate-500"
+                              }`}>
+                                <FileText size={12} /> Executive CV Dossier {p.documents?.resume ? "✓" : "(Missing)"}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-2 pt-2 md:pt-0 shrink-0">
+                            <button
+                              onClick={() => setSelectedAuditItem(p)}
+                              className={`px-3.5 py-2 text-xs rounded-lg font-bold border transition-all flex items-center gap-1.5 cursor-pointer ${
+                                isLight 
+                                  ? "bg-white text-slate-800 hover:bg-slate-100 border-slate-300 shadow-sm" 
+                                  : "bg-slate-800 text-slate-200 hover:bg-slate-700 border-slate-700"
+                              }`}
+                              title="View Documents"
+                            >
+                              <Eye size={13} /> View Documents
+                            </button>
+                            <button
+                              onClick={() => handleApprove(p.id)}
+                              disabled={isSubmittingAction}
+                              className="px-4 py-2 text-xs rounded-lg font-bold bg-emerald-600 hover:bg-emerald-500 text-white transition-all flex items-center gap-1.5 cursor-pointer shadow-lg disabled:opacity-50"
+                              title="Approve & Move to Expert Rates & Markups"
+                            >
+                              <Check size={14} /> Accept
+                            </button>
+                            <button
+                              onClick={() => handleOpenRejectModal(p)}
+                              disabled={isSubmittingAction}
+                              className={`px-3 py-2 text-xs rounded-lg font-bold border transition-all cursor-pointer flex items-center gap-1 ${
+                                isLight 
+                                  ? "bg-amber-50 text-amber-800 hover:bg-amber-100 border-amber-300" 
+                                  : "bg-amber-950/80 text-amber-300 hover:bg-amber-900 border-amber-800"
+                              }`}
+                              title="Reject with mandatory reason"
+                            >
+                              <AlertCircle size={13} /> Reject
+                            </button>
+                            <button
+                              onClick={() => handleRemoveExpert(p.id, p.name)}
+                              disabled={isSubmittingAction}
+                              className={`px-2.5 py-2 text-xs rounded-lg font-bold border transition-all cursor-pointer flex items-center gap-1 ${
+                                isLight 
+                                  ? "bg-rose-50 text-rose-800 hover:bg-rose-100 border-rose-300" 
+                                  : "bg-rose-950/80 text-rose-300 hover:bg-rose-900 border-rose-800"
+                              }`}
+                              title="Remove from queue (soft delete)"
+                            >
+                              <Trash2 size={13} /> Remove
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
+              )}
+
+              {/* Mandatory Rejection Reason Modal */}
+              {rejectModalItem && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fadeIn">
+                  <div className={`w-full max-w-md p-6 rounded-2xl border shadow-2xl space-y-4 ${isLight ? "bg-white text-slate-900 border-slate-300" : "bg-[#0E1520] text-slate-100 border-amber-500/30"}`}>
+                    <div className="flex items-center justify-between pb-3 border-b border-white/10">
+                      <h3 className="text-base font-bold text-rose-400 flex items-center gap-2">
+                        <AlertCircle size={18} />
+                        Reject Documents: {rejectModalItem.name}
+                      </h3>
+                      <button onClick={() => setRejectModalItem(null)} className="p-1 hover:text-white cursor-pointer">
+                        <X size={16} />
+                      </button>
                     </div>
-                  ))}
+                    <p className="text-xs text-slate-400 leading-relaxed">
+                      Please enter a mandatory rejection reason. The expert will see this reason in their portal and will be allowed to re-upload their credentials for re-audit.
+                    </p>
+                    <div>
+                      <label className="block text-xs font-bold uppercase tracking-wider mb-1.5 text-slate-300">
+                        Mandatory Rejection Reason *
+                      </label>
+                      <textarea
+                        required
+                        rows={4}
+                        value={rejectReasonText}
+                        onChange={(e) => setRejectReasonText(e.target.value)}
+                        placeholder="e.g. Document image is expired or blurry. Please upload a clear valid copy of your work tenure certificate."
+                        className="w-full p-3 rounded-xl border bg-slate-950 border-white/10 text-xs text-white focus:outline-none focus:ring-2 focus:ring-rose-500"
+                      />
+                    </div>
+                    <div className="flex items-center justify-end gap-2 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => setRejectModalItem(null)}
+                        className="px-4 py-2 text-xs rounded-lg font-semibold border border-slate-700 hover:bg-slate-800 text-slate-300 cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!rejectReasonText.trim() || isSubmittingAction}
+                        onClick={handleConfirmReject}
+                        className="px-4 py-2 text-xs rounded-lg font-bold bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white flex items-center gap-1.5 shadow-lg cursor-pointer"
+                      >
+                        <UserX size={14} /> Submit Rejection & Notify Expert
+                      </button>
+                    </div>
+                  </div>
                 </div>
               )}
             </div>
@@ -3330,255 +4059,591 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
           {/* ==========================================================
               DESK 8: EXPERTISE FIELDS & DOMAIN TAXONOMY MANAGER
           ========================================================== */}
-          {activeDesk === "expertise" && (
-            <div className="space-y-6 animate-fadeIn">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <div>
-                  <span className="text-xs uppercase font-bold tracking-widest text-amber-500">Desk 08 • Advisory Taxonomy</span>
-                  <h1 className={`text-2xl sm:text-3xl font-serif font-bold mt-1 ${isLight ? "text-slate-900" : "text-white"}`}>
-                    Expertise Fields & Domain Taxonomy
-                  </h1>
-                  <p className={`text-xs sm:text-sm mt-1 ${isLight ? "text-slate-600" : "text-slate-400"}`}>
-                    Add and delete senior expert advisory domains. Changes synchronize automatically across registration, search filters, and profile modals.
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={handleResetFields}
-                    className={`text-xs px-3.5 py-2 rounded-xl font-bold border transition-all cursor-pointer flex items-center gap-1.5 ${
-                      isLight 
-                        ? "bg-white hover:bg-slate-100 text-slate-700 border-slate-300 shadow-sm" 
-                        : "bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700"
-                    }`}
-                    title="Restore default canonical domains"
-                  >
-                    <RefreshCw size={13} /> Reset Defaults
-                  </button>
-                </div>
-              </div>
+          {activeDesk === "expertise" && (() => {
+            const activeDomains = taxonomyDomains.filter((d) => d.is_active !== false);
+            const filteredDomains = activeDomains.filter((d) =>
+              !fieldSearch.trim() || d.name.toLowerCase().includes(fieldSearch.toLowerCase())
+            );
 
-              {/* Taxonomy High-Level Stats */}
-              <div className="grid sm:grid-cols-3 gap-4">
-                <div className="p-5 rounded-2xl border shadow-xl space-y-1.5" style={{ background: T.cardBg, borderColor: T.lineInk }}>
-                  <span className={`text-xs font-bold uppercase ${isLight ? "text-slate-500" : "text-slate-400"}`}>Active Domains</span>
-                  <p className={`text-3xl font-serif font-bold ${isLight ? "text-amber-800" : "text-amber-300"}`}>{expertiseFields.length} Categories</p>
-                  <p className={`text-[11px] ${isLight ? "text-slate-600" : "text-slate-400"}`}>Available for expert onboarding & client discovery</p>
-                </div>
+            const categorizedExpertsCount = experts.filter((exp) => {
+              return activeDomains.some(
+                (dom) =>
+                  (exp.domain_id && exp.domain_id === dom.id) ||
+                  (exp.field && exp.field.trim().toLowerCase() === dom.name.trim().toLowerCase())
+              );
+            }).length;
 
-                <div className="p-5 rounded-2xl border shadow-xl space-y-1.5" style={{ background: T.cardBg, borderColor: T.lineInk }}>
-                  <span className={`text-xs font-bold uppercase ${isLight ? "text-slate-500" : "text-slate-400"}`}>Categorized Experts</span>
-                  <p className={`text-3xl font-serif font-bold ${isLight ? "text-emerald-700" : "text-emerald-300"}`}>
-                    {experts.filter(e => e.field).length} Advisors
-                  </p>
-                  <p className={`text-[11px] ${isLight ? "text-slate-600" : "text-slate-400"}`}>Active verified profiles mapped to domains</p>
-                </div>
+            const sortedByCount = [...activeDomains].sort(
+              (a, b) => (b.expert_count || 0) - (a.expert_count || 0)
+            );
+            const leadingField = sortedByCount[0] || { name: "General Advisory", expert_count: 0 };
 
-                <div className="p-5 rounded-2xl border shadow-xl space-y-1.5" style={{ background: T.cardBg, borderColor: T.lineInk }}>
-                  <span className={`text-xs font-bold uppercase ${isLight ? "text-slate-500" : "text-slate-400"}`}>Leading Field</span>
-                  {(() => {
-                    const counts: Record<string, number> = {};
-                    experts.forEach(e => {
-                      if (e.field) counts[e.field] = (counts[e.field] || 0) + 1;
-                    });
-                    const topEntry = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
-                    return (
-                      <>
-                        <p className={`text-xl font-serif font-bold truncate ${isLight ? "text-sky-700" : "text-sky-300"}`}>
-                          {topEntry ? topEntry[0] : (expertiseFields[0] || "General")}
-                        </p>
-                        <p className={`text-[11px] ${isLight ? "text-slate-600" : "text-slate-400"}`}>
-                          {topEntry ? `${topEntry[1]} expert(s) registered` : "No experts assigned"}
-                        </p>
-                      </>
-                    );
-                  })()}
-                </div>
-              </div>
-
-              {/* Add New Expertise Field Form Card */}
-              <div className="p-6 rounded-2xl border shadow-xl space-y-4" style={{ background: T.cardBg, borderColor: T.lineInk }}>
-                <div className="flex items-center gap-2 border-b pb-3" style={{ borderColor: T.lineInk }}>
-                  <Plus className="w-5 h-5 text-amber-500" />
-                  <h3 className={`text-base font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
-                    Add New Expertise Field / Domain
-                  </h3>
-                </div>
-
-                <form onSubmit={handleAddField} className="flex flex-col sm:flex-row gap-3">
-                  <div className="flex-1 relative">
-                    <input
-                      type="text"
-                      value={newFieldName}
-                      onChange={(e) => setNewFieldName(e.target.value)}
-                      placeholder="Enter new expertise field (e.g. Artificial Intelligence & ML, HealthTech, Supply Chain...)"
-                      className={`w-full px-4 py-2.5 text-xs rounded-xl outline-none border transition-colors ${
-                        isLight 
-                          ? "bg-slate-50 border-slate-300 text-slate-900 focus:bg-white focus:border-amber-500 shadow-inner" 
-                          : "bg-[#070C14] border-white/15 text-white placeholder-slate-500 focus:border-amber-500/80 shadow-inner"
-                      }`}
-                    />
-                  </div>
-                  <button
-                    type="submit"
-                    disabled={!newFieldName.trim()}
-                    className="px-5 py-2.5 rounded-xl font-bold text-xs cursor-pointer transition-all flex items-center justify-center gap-2 shrink-0 disabled:opacity-50 disabled:cursor-not-allowed shadow-md hover:brightness-110"
-                    style={{
-                      background: T.goldGradient,
-                      color: "#05080E"
-                    }}
-                  >
-                    <Plus size={15} /> Add Expertise Field
-                  </button>
-                </form>
-
-                {/* Suggested Quick Add Tags */}
-                <div className="pt-2 flex flex-wrap items-center gap-2 text-xs">
-                  <span className={`text-[11px] font-semibold ${isLight ? "text-slate-500" : "text-slate-400"}`}>Quick Add Suggestions:</span>
-                  {[
-                    "Artificial Intelligence & ML",
-                    "Cybersecurity & Data Privacy",
-                    "Healthcare & Biotech",
-                    "Renewable Energy & ESG",
-                    "Real Estate & Urban Planning"
-                  ].filter(tag => !expertiseFields.some(f => f.toLowerCase() === tag.toLowerCase())).map(tag => (
-                    <button
-                      key={tag}
-                      type="button"
-                      onClick={() => {
-                        expertiseService.add(tag);
-                        confetti({ particleCount: 30, spread: 40 });
-                      }}
-                      className={`text-[11px] px-2.5 py-1 rounded-lg border transition-all cursor-pointer flex items-center gap-1 ${
-                        isLight
-                          ? "bg-amber-50/60 border-amber-200 text-amber-800 hover:bg-amber-100"
-                          : "bg-amber-500/10 border-amber-500/25 text-amber-300 hover:bg-amber-500/20"
+            return (
+              <div className="space-y-6 animate-fadeIn relative">
+                {/* Floating In-App Toast Notification */}
+                {domainToast && domainToast.show && (
+                  <div className="fixed top-6 right-6 z-50 animate-bounce-in shadow-2xl">
+                    <div
+                      className={`flex items-center gap-3 px-4 py-3 rounded-2xl border text-xs font-bold backdrop-blur-xl ${
+                        domainToast.type === "error"
+                          ? "bg-rose-950/95 border-rose-500 text-rose-200 shadow-rose-950/50"
+                          : domainToast.type === "info"
+                          ? "bg-sky-950/95 border-sky-500 text-sky-200 shadow-sky-950/50"
+                          : "bg-emerald-950/95 border-emerald-500 text-emerald-200 shadow-emerald-950/50"
                       }`}
                     >
-                      <Plus size={11} /> {tag}
-                    </button>
-                  ))}
-                </div>
-              </div>
+                      {domainToast.type === "error" ? (
+                        <AlertCircle size={16} className="text-rose-400 shrink-0" />
+                      ) : (
+                        <CheckCircle2 size={16} className="text-emerald-400 shrink-0" />
+                      )}
+                      <span>{domainToast.message}</span>
+                      <button
+                        onClick={() => setDomainToast(null)}
+                        className="ml-2 text-white/60 hover:text-white cursor-pointer"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  </div>
+                )}
 
-              {/* Active Expertise Fields Table & Management */}
-              <div className="p-6 rounded-2xl border shadow-xl space-y-4" style={{ background: T.cardBg, borderColor: T.lineInk }}>
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b pb-3" style={{ borderColor: T.lineInk }}>
+                {/* Desk Header */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div>
+                    <span className="text-xs uppercase font-bold tracking-widest text-amber-500">
+                      Desk 08 • Advisory Taxonomy
+                    </span>
+                    <h1 className={`text-2xl sm:text-3xl font-serif font-bold mt-1 ${isLight ? "text-slate-900" : "text-white"}`}>
+                      Expertise Fields & Domain Taxonomy
+                    </h1>
+                    <p className={`text-xs sm:text-sm mt-1 ${isLight ? "text-slate-600" : "text-slate-400"}`}>
+                      Add, rename, and delete senior expert advisory domains. Changes synchronize automatically across registration, search filters, and profile modals.
+                    </p>
+                  </div>
                   <div className="flex items-center gap-2">
-                    <Layers className="w-5 h-5 text-amber-500" />
-                    <div>
-                      <h3 className={`text-base font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
-                        Active Expertise Taxonomy ({expertiseFields.length})
-                      </h3>
-                      <p className={`text-[11px] ${isLight ? "text-slate-500" : "text-slate-400"}`}>
-                        Delete or review domains currently live in all platform dropdowns and filter bars.
-                      </p>
+                    <button
+                      onClick={() => setResetModalOpen(true)}
+                      className={`text-xs px-3.5 py-2 rounded-xl font-bold border transition-all cursor-pointer flex items-center gap-1.5 ${
+                        isLight 
+                          ? "bg-white hover:bg-slate-100 text-slate-700 border-slate-300 shadow-sm" 
+                          : "bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700"
+                      }`}
+                      title="Restore default canonical domains"
+                    >
+                      <RefreshCw size={13} /> Reset Defaults
+                    </button>
+                  </div>
+                </div>
+
+                {/* Taxonomy High-Level Stats */}
+                <div className="grid sm:grid-cols-3 gap-4">
+                  <div className="p-5 rounded-2xl border shadow-xl space-y-1.5" style={{ background: T.cardBg, borderColor: T.lineInk }}>
+                    <span className={`text-xs font-bold uppercase ${isLight ? "text-slate-500" : "text-slate-400"}`}>
+                      Active Domains
+                    </span>
+                    <p className={`text-3xl font-serif font-bold ${isLight ? "text-amber-800" : "text-amber-300"}`}>
+                      {activeDomains.length} Categories
+                    </p>
+                    <p className={`text-[11px] ${isLight ? "text-slate-600" : "text-slate-400"}`}>
+                      Available for expert onboarding & client discovery
+                    </p>
+                  </div>
+
+                  <div className="p-5 rounded-2xl border shadow-xl space-y-1.5" style={{ background: T.cardBg, borderColor: T.lineInk }}>
+                    <span className={`text-xs font-bold uppercase ${isLight ? "text-slate-500" : "text-slate-400"}`}>
+                      Categorized Experts
+                    </span>
+                    <p className={`text-3xl font-serif font-bold ${isLight ? "text-emerald-700" : "text-emerald-300"}`}>
+                      {categorizedExpertsCount} Advisors
+                    </p>
+                    <p className={`text-[11px] ${isLight ? "text-slate-600" : "text-slate-400"}`}>
+                      Active verified profiles mapped to domains
+                    </p>
+                  </div>
+
+                  <div className="p-5 rounded-2xl border shadow-xl space-y-1.5" style={{ background: T.cardBg, borderColor: T.lineInk }}>
+                    <span className={`text-xs font-bold uppercase ${isLight ? "text-slate-500" : "text-slate-400"}`}>
+                      Leading Field
+                    </span>
+                    <p className={`text-xl font-serif font-bold truncate ${isLight ? "text-sky-700" : "text-sky-300"}`}>
+                      {leadingField.name}
+                    </p>
+                    <p className={`text-[11px] ${isLight ? "text-slate-600" : "text-slate-400"}`}>
+                      {leadingField.expert_count} expert(s) registered
+                    </p>
+                  </div>
+                </div>
+
+                {/* Add New Expertise Field Form Card */}
+                <div className="p-6 rounded-2xl border shadow-xl space-y-4" style={{ background: T.cardBg, borderColor: T.lineInk }}>
+                  <div className="flex items-center gap-2 border-b pb-3" style={{ borderColor: T.lineInk }}>
+                    <Plus className="w-5 h-5 text-amber-500" />
+                    <h3 className={`text-base font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
+                      Add New Expertise Field / Domain
+                    </h3>
+                  </div>
+
+                  <form onSubmit={handleAddField} className="flex flex-col sm:flex-row gap-3">
+                    <div className="flex-1 relative">
+                      <input
+                        type="text"
+                        value={newFieldName}
+                        onChange={(e) => setNewFieldName(e.target.value)}
+                        placeholder="Enter new expertise field (e.g. Artificial Intelligence & ML, HealthTech, Supply Chain...)"
+                        disabled={isDomainSubmitting}
+                        className={`w-full px-4 py-2.5 text-xs rounded-xl outline-none border transition-colors ${
+                          isLight 
+                            ? "bg-slate-50 border-slate-300 text-slate-900 focus:bg-white focus:border-amber-500 shadow-inner" 
+                            : "bg-[#070C14] border-white/15 text-white placeholder-slate-500 focus:border-amber-500/80 shadow-inner"
+                        }`}
+                      />
+                    </div>
+                    <button
+                      type="submit"
+                      disabled={!newFieldName.trim() || isDomainSubmitting}
+                      className="px-5 py-2.5 rounded-xl font-bold text-xs cursor-pointer transition-all flex items-center justify-center gap-2 shrink-0 disabled:opacity-50 disabled:cursor-not-allowed shadow-md hover:brightness-110"
+                      style={{
+                        background: T.goldGradient,
+                        color: "#05080E"
+                      }}
+                    >
+                      {isDomainSubmitting ? (
+                        <>
+                          <RefreshCw size={14} className="animate-spin" /> Adding...
+                        </>
+                      ) : (
+                        <>
+                          <Plus size={15} /> Add Expertise Field
+                        </>
+                      )}
+                    </button>
+                  </form>
+
+                  {/* Suggested Quick Add Tags */}
+                  <div className="pt-2 flex flex-wrap items-center gap-2 text-xs">
+                    <span className={`text-[11px] font-semibold ${isLight ? "text-slate-500" : "text-slate-400"}`}>
+                      Quick Add Suggestions:
+                    </span>
+                    {[
+                      "Artificial Intelligence & ML",
+                      "Cybersecurity & Data Privacy",
+                      "Healthcare & Biotech",
+                      "Renewable Energy & ESG",
+                      "Real Estate & Urban Planning"
+                    ]
+                      .filter((tag) => !activeDomains.some((f) => f.name.toLowerCase() === tag.toLowerCase()))
+                      .map((tag) => (
+                        <button
+                          key={tag}
+                          type="button"
+                          disabled={isDomainSubmitting}
+                          onClick={() => handleQuickAdd(tag)}
+                          className={`text-[11px] px-2.5 py-1 rounded-lg border transition-all cursor-pointer flex items-center gap-1 disabled:opacity-50 ${
+                            isLight
+                              ? "bg-amber-50/60 border-amber-200 text-amber-800 hover:bg-amber-100"
+                              : "bg-amber-500/10 border-amber-500/25 text-amber-300 hover:bg-amber-500/20"
+                          }`}
+                        >
+                          <Plus size={11} /> {tag}
+                        </button>
+                      ))}
+                  </div>
+                </div>
+
+                {/* Active Expertise Fields Table & Management */}
+                <div className="p-6 rounded-2xl border shadow-xl space-y-4" style={{ background: T.cardBg, borderColor: T.lineInk }}>
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b pb-3" style={{ borderColor: T.lineInk }}>
+                    <div className="flex items-center gap-2">
+                      <Layers className="w-5 h-5 text-amber-500" />
+                      <div>
+                        <h3 className={`text-base font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
+                          Active Expertise Taxonomy ({activeDomains.length})
+                        </h3>
+                        <p className={`text-[11px] ${isLight ? "text-slate-500" : "text-slate-400"}`}>
+                          Delete, rename, or review domains currently live in all platform dropdowns and filter bars.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs ${isLight ? "bg-slate-50 border-slate-300" : "bg-slate-950/60 border-white/10"}`}>
+                      <Search size={13} className="text-slate-400" />
+                      <input
+                        type="text"
+                        value={fieldSearch}
+                        onChange={(e) => setFieldSearch(e.target.value)}
+                        placeholder="Filter fields..."
+                        className={`bg-transparent outline-none text-xs w-36 ${isLight ? "text-slate-900" : "text-white"}`}
+                      />
+                      {fieldSearch && (
+                        <button onClick={() => setFieldSearch("")} className="text-slate-400 hover:text-white cursor-pointer">
+                          <X size={12} />
+                        </button>
+                      )}
                     </div>
                   </div>
 
-                  <div className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs ${isLight ? "bg-slate-50 border-slate-300" : "bg-slate-950/60 border-white/10"}`}>
-                    <Search size={13} className="text-slate-400" />
-                    <input
-                      type="text"
-                      value={fieldSearch}
-                      onChange={(e) => setFieldSearch(e.target.value)}
-                      placeholder="Filter fields..."
-                      className={`bg-transparent outline-none text-xs w-36 ${isLight ? "text-slate-900" : "text-white"}`}
-                    />
-                    {fieldSearch && (
-                      <button onClick={() => setFieldSearch("")} className="text-slate-400 hover:text-white cursor-pointer">
-                        <X size={12} />
-                      </button>
-                    )}
-                  </div>
-                </div>
+                  <div className="overflow-y-auto max-h-[min(520px,65vh)] pr-1.5 scrollbar-thin select-text">
+                    <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
+                      {filteredDomains.map((dom, idx) => {
+                        const isEditingThis = editingDomainId === dom.id;
+                        const assigned = experts.filter(
+                          (e) =>
+                            (e.domain_id && e.domain_id === dom.id) ||
+                            (e.field && e.field.trim().toLowerCase() === dom.name.trim().toLowerCase())
+                        );
+                        const count = dom.expert_count !== undefined ? dom.expert_count : assigned.length;
 
-                <div className="overflow-y-auto max-h-[min(520px,65vh)] pr-1.5 scrollbar-thin select-text">
-                  <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
-                  {expertiseFields
-                    .filter(f => !fieldSearch.trim() || f.toLowerCase().includes(fieldSearch.toLowerCase()))
-                    .map((f, idx) => {
-                      const assigned = experts.filter(e => e.field && (e.field.toLowerCase() === f.toLowerCase() || e.field.toLowerCase().includes(f.toLowerCase())));
-                      return (
-                        <div
-                          key={f}
-                          className={`p-4 rounded-xl border transition-all flex flex-col justify-between space-y-3 group ${
-                            isLight
-                              ? "bg-white border-slate-200 hover:border-amber-400 hover:shadow-md"
-                              : "bg-[#0B111A]/90 border-white/10 hover:border-amber-500/40 hover:bg-[#0E1622]"
-                          }`}
-                        >
-                          <div className="flex items-start justify-between gap-2">
-                            <div className="flex items-center gap-2.5">
-                              <span className={`w-7 h-7 rounded-lg flex items-center justify-center font-mono font-bold text-xs shrink-0 ${
-                                isLight ? "bg-amber-100 text-amber-800" : "bg-amber-500/15 text-amber-400 border border-amber-500/30"
-                              }`}>
-                                {String(idx + 1).padStart(2, "0")}
-                              </span>
-                              <div>
-                                <h4 className={`text-sm font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
-                                  {f}
-                                </h4>
-                                <span className={`text-[10px] font-medium flex items-center gap-1 mt-0.5 ${
-                                  assigned.length > 0
-                                    ? isLight ? "text-emerald-700" : "text-emerald-400"
-                                    : isLight ? "text-slate-500" : "text-slate-400"
-                                }`}>
-                                  <Users size={11} /> {assigned.length} {assigned.length === 1 ? "Expert" : "Experts"} Tagged
+                        return (
+                          <div
+                            key={dom.id}
+                            className={`p-4 rounded-xl border transition-all flex flex-col justify-between space-y-3 group ${
+                              isLight
+                                ? "bg-white border-slate-200 hover:border-amber-400 hover:shadow-md"
+                                : "bg-[#0B111A]/90 border-white/10 hover:border-amber-500/40 hover:bg-[#0E1622]"
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="flex items-center gap-2.5 flex-1 min-w-0">
+                                <span
+                                  className={`w-7 h-7 rounded-lg flex items-center justify-center font-mono font-bold text-xs shrink-0 ${
+                                    isLight
+                                      ? "bg-amber-100 text-amber-800"
+                                      : "bg-amber-500/15 text-amber-400 border border-amber-500/30"
+                                  }`}
+                                >
+                                  {String(idx + 1).padStart(2, "0")}
+                                </span>
+                                <div className="flex-1 min-w-0">
+                                  {isEditingThis ? (
+                                    <div className="flex items-center gap-1.5 mt-0.5">
+                                      <input
+                                        type="text"
+                                        autoFocus
+                                        value={editingDomainName}
+                                        onChange={(e) => setEditingDomainName(e.target.value)}
+                                        onKeyDown={(e) => {
+                                          if (e.key === "Enter") handleSaveRename(dom);
+                                          if (e.key === "Escape") handleCancelRename();
+                                        }}
+                                        className={`px-2 py-1 text-xs rounded-lg border outline-none font-bold w-full ${
+                                          isLight
+                                            ? "bg-white border-amber-500 text-slate-900"
+                                            : "bg-[#05080E] border-amber-500 text-white"
+                                        }`}
+                                      />
+                                      <button
+                                        type="button"
+                                        onClick={() => handleSaveRename(dom)}
+                                        className="p-1 rounded bg-emerald-500 text-slate-950 hover:bg-emerald-400 cursor-pointer"
+                                        title="Save name"
+                                      >
+                                        <Check size={13} />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={handleCancelRename}
+                                        className="p-1 rounded bg-slate-700 text-slate-200 hover:bg-slate-600 cursor-pointer"
+                                        title="Cancel"
+                                      >
+                                        <X size={13} />
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <div className="flex items-center gap-1.5">
+                                      <h4 className={`text-sm font-bold truncate ${isLight ? "text-slate-900" : "text-white"}`}>
+                                        {dom.name}
+                                      </h4>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleStartRename(dom)}
+                                        className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-amber-400 transition-opacity p-0.5 cursor-pointer"
+                                        title="Rename domain"
+                                      >
+                                        <Edit3 size={12} />
+                                      </button>
+                                    </div>
+                                  )}
+                                  <span
+                                    className={`text-[10px] font-medium flex items-center gap-1 mt-0.5 ${
+                                      count > 0
+                                        ? isLight ? "text-emerald-700" : "text-emerald-400"
+                                        : isLight ? "text-slate-500" : "text-slate-400"
+                                    }`}
+                                  >
+                                    <Users size={11} /> {count} {count === 1 ? "Expert" : "Experts"} Tagged
+                                  </span>
+                                </div>
+                              </div>
+
+                              {!isEditingThis && (
+                                <div className="flex items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleStartRename(dom)}
+                                    className={`p-1.5 rounded-lg border transition-all cursor-pointer opacity-70 group-hover:opacity-100 ${
+                                      isLight
+                                        ? "border-slate-200 text-slate-600 hover:bg-slate-100"
+                                        : "border-white/10 text-slate-400 hover:bg-white/10 hover:text-white"
+                                    }`}
+                                    title={`Rename domain "${dom.name}"`}
+                                  >
+                                    <Edit3 size={13} />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenDeleteModal(dom)}
+                                    className={`p-1.5 rounded-lg border transition-all cursor-pointer opacity-70 group-hover:opacity-100 ${
+                                      isLight
+                                        ? "border-rose-200 text-rose-600 hover:bg-rose-50 hover:border-rose-400"
+                                        : "border-rose-500/30 text-rose-400 hover:bg-rose-500/20 hover:border-rose-500"
+                                    }`}
+                                    title={`Delete domain "${dom.name}"`}
+                                  >
+                                    <Trash2 size={13} />
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+
+                            {count > 0 ? (
+                              <div
+                                className={`pt-2 border-t text-[11px] flex items-center justify-between ${
+                                  isLight ? "border-slate-100 text-slate-500" : "border-white/5 text-slate-400"
+                                }`}
+                              >
+                                <span className="truncate max-w-[180px]">
+                                  {assigned.map((e) => e.name).slice(0, 2).join(", ")}
+                                  {assigned.length > 2 ? ` +${assigned.length - 2} more` : ""}
+                                </span>
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-500 font-bold shrink-0">
+                                  Active
                                 </span>
                               </div>
-                            </div>
+                            ) : (
+                              <div
+                                className={`pt-2 border-t text-[11px] flex items-center justify-between ${
+                                  isLight ? "border-slate-100 text-slate-400" : "border-white/5 text-slate-500"
+                                }`}
+                              >
+                                <span className="italic">Ready for new signups</span>
+                                <span
+                                  className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
+                                    isLight ? "bg-slate-100 text-slate-500" : "bg-white/5 text-slate-400"
+                                  }`}
+                                >
+                                  Unassigned
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
 
-                            <button
-                              onClick={() => handleDeleteField(f)}
-                              className={`p-1.5 rounded-lg border transition-all cursor-pointer opacity-70 group-hover:opacity-100 ${
-                                isLight
-                                  ? "border-rose-200 text-rose-600 hover:bg-rose-50 hover:border-rose-400"
-                                  : "border-rose-500/30 text-rose-400 hover:bg-rose-500/20 hover:border-rose-500"
-                              }`}
-                              title={`Delete expertise field "${f}"`}
-                            >
-                              <Trash2 size={14} />
-                            </button>
+                  <div
+                    className={`p-3 rounded-xl border flex items-center justify-between text-xs mt-4 ${
+                      isLight ? "bg-amber-50/70 border-amber-200 text-amber-900" : "bg-amber-500/10 border-amber-500/20 text-amber-300"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <Sparkles size={14} className="shrink-0" />
+                      <span>
+                        Any domain added, renamed, or deleted here broadcasts instantly to <strong>Client Portal</strong>, <strong>Expert Registration</strong>, and <strong>Registry Landing Page</strong>.
+                      </span>
+                    </div>
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full font-bold bg-amber-500/20 shrink-0">
+                      Live Realtime ⚡
+                    </span>
+                  </div>
+                </div>
+
+                {/* DELETE CONFIRMATION & REASSIGNMENT MODAL */}
+                {deleteModal && deleteModal.isOpen && (
+                  <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xl animate-fadeIn">
+                    <div
+                      className={`w-full max-w-md p-6 rounded-2xl shadow-2xl border space-y-4 ${
+                        isLight ? "bg-white border-slate-200 text-slate-900" : "bg-[#0B111A] border-white/15 text-white"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between border-b pb-3" style={{ borderColor: isLight ? "#E2E8F0" : "rgba(255,255,255,0.1)" }}>
+                        <div className="flex items-center gap-2 text-rose-500">
+                          <Trash2 size={18} />
+                          <h3 className="font-bold text-base">Delete Domain Taxonomy</h3>
+                        </div>
+                        <button
+                          onClick={() => setDeleteModal(null)}
+                          className="text-slate-400 hover:text-white p-1 rounded-lg cursor-pointer"
+                        >
+                          <X size={16} />
+                        </button>
+                      </div>
+
+                      {deleteModal.assignedExperts.length > 0 ? (
+                        <div className="space-y-3">
+                          <div className={`p-3.5 rounded-xl border text-xs space-y-1.5 ${
+                            isLight ? "bg-amber-50 border-amber-200 text-amber-900" : "bg-amber-500/10 border-amber-500/30 text-amber-300"
+                          }`}>
+                            <p className="font-bold flex items-center gap-1.5">
+                              <AlertCircle size={14} /> Tagged Experts Detected
+                            </p>
+                            <p>
+                              <strong>{deleteModal.assignedExperts.length} expert(s)</strong> are currently tagged in <strong>"{deleteModal.domain.name}"</strong> ({deleteModal.assignedExperts.map(e => e.name).slice(0, 3).join(", ")}{deleteModal.assignedExperts.length > 3 ? "..." : ""}).
+                            </p>
+                            <p className="text-[11px] opacity-90">
+                              To prevent orphaned profiles, Mentora enforces reassigning these experts to an active domain before deletion.
+                            </p>
                           </div>
 
-                          {assigned.length > 0 ? (
-                            <div className={`pt-2 border-t text-[11px] flex items-center justify-between ${isLight ? "border-slate-100 text-slate-500" : "border-white/5 text-slate-400"}`}>
-                              <span className="truncate max-w-[180px]">
-                                {assigned.map(e => e.name).slice(0, 2).join(", ")}
-                                {assigned.length > 2 ? ` +${assigned.length - 2} more` : ""}
-                              </span>
-                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-500 font-bold shrink-0">
-                                Active
-                              </span>
-                            </div>
-                          ) : (
-                            <div className={`pt-2 border-t text-[11px] flex items-center justify-between ${isLight ? "border-slate-100 text-slate-400" : "border-white/5 text-slate-500"}`}>
-                              <span className="italic">Ready for new signups</span>
-                              <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${isLight ? "bg-slate-100 text-slate-500" : "bg-white/5 text-slate-400"}`}>
-                                Unassigned
-                              </span>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
+                          <div>
+                            <label className={`text-xs font-bold block mb-1.5 ${isLight ? "text-slate-700" : "text-slate-300"}`}>
+                              Reassign Tagged Experts To:
+                            </label>
+                            <select
+                              value={deleteModal.reassignToId}
+                              onChange={(e) => setDeleteModal({ ...deleteModal, reassignToId: e.target.value })}
+                              className={`w-full px-3 py-2 text-xs rounded-xl border outline-none font-semibold cursor-pointer ${
+                                isLight
+                                  ? "bg-slate-50 border-slate-300 text-slate-900"
+                                  : "bg-[#05080E] border-white/20 text-white"
+                              }`}
+                            >
+                              {activeDomains
+                                .filter((d) => d.id !== deleteModal.domain.id)
+                                .map((d) => (
+                                  <option key={d.id} value={d.id}>
+                                    {d.name} ({d.expert_count || 0} experts)
+                                  </option>
+                                ))}
+                            </select>
+                          </div>
 
-                <div className={`p-3 rounded-xl border flex items-center justify-between text-xs mt-4 ${
-                  isLight ? "bg-amber-50/70 border-amber-200 text-amber-900" : "bg-amber-500/10 border-amber-500/20 text-amber-300"
-                }`}>
-                  <div className="flex items-center gap-2">
-                    <Sparkles size={14} className="shrink-0" />
-                    <span>Any field added or deleted here broadcasts instantly to <strong>Client Portal</strong>, <strong>Expert Onboarding</strong>, and <strong>Registry Landing Page</strong>.</span>
+                          <div className="flex items-center justify-end gap-2 pt-2">
+                            <button
+                              type="button"
+                              onClick={() => setDeleteModal(null)}
+                              className={`px-4 py-2 text-xs font-bold rounded-xl border cursor-pointer transition-colors ${
+                                isLight ? "bg-slate-100 text-slate-700 border-slate-300 hover:bg-slate-200" : "bg-white/10 text-slate-300 border-white/10 hover:bg-white/20"
+                              }`}
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              disabled={deleteModal.loading || !deleteModal.reassignToId}
+                              onClick={handleConfirmDelete}
+                              className="px-4 py-2 text-xs font-bold rounded-xl bg-rose-600 text-white hover:bg-rose-500 cursor-pointer shadow-lg disabled:opacity-50 transition-colors flex items-center gap-1.5"
+                            >
+                              {deleteModal.loading ? (
+                                <>
+                                  <RefreshCw size={13} className="animate-spin" /> Reassigning & Deleting...
+                                </>
+                              ) : (
+                                <>
+                                  <Trash2 size={13} /> Reassign & Delete
+                                </>
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="space-y-4">
+                          <p className={`text-xs ${isLight ? "text-slate-600" : "text-slate-300"}`}>
+                            Are you sure you want to delete the domain <strong>"{deleteModal.domain.name}"</strong>? No experts are tagged with this domain. This action will immediately remove it from all platform filter bars and registration forms.
+                          </p>
+
+                          <div className="flex items-center justify-end gap-2 pt-2">
+                            <button
+                              type="button"
+                              onClick={() => setDeleteModal(null)}
+                              className={`px-4 py-2 text-xs font-bold rounded-xl border cursor-pointer transition-colors ${
+                                isLight ? "bg-slate-100 text-slate-700 border-slate-300 hover:bg-slate-200" : "bg-white/10 text-slate-300 border-white/10 hover:bg-white/20"
+                              }`}
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              disabled={deleteModal.loading}
+                              onClick={handleConfirmDelete}
+                              className="px-4 py-2 text-xs font-bold rounded-xl bg-rose-600 text-white hover:bg-rose-500 cursor-pointer shadow-lg disabled:opacity-50 transition-colors flex items-center gap-1.5"
+                            >
+                              {deleteModal.loading ? (
+                                <>
+                                  <RefreshCw size={13} className="animate-spin" /> Deleting...
+                                </>
+                              ) : (
+                                <>
+                                  <Trash2 size={13} /> Delete Domain
+                                </>
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full font-bold bg-amber-500/20 shrink-0">
-                    Live Sync ⚡
-                  </span>
-                </div>
+                )}
+
+                {/* RESET DEFAULTS CONFIRMATION MODAL */}
+                {resetModalOpen && (
+                  <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xl animate-fadeIn">
+                    <div
+                      className={`w-full max-w-md p-6 rounded-2xl shadow-2xl border space-y-4 ${
+                        isLight ? "bg-white border-slate-200 text-slate-900" : "bg-[#0B111A] border-white/15 text-white"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between border-b pb-3" style={{ borderColor: isLight ? "#E2E8F0" : "rgba(255,255,255,0.1)" }}>
+                        <div className="flex items-center gap-2 text-amber-500">
+                          <RefreshCw size={18} />
+                          <h3 className="font-bold text-base">Restore Canonical Taxonomy</h3>
+                        </div>
+                        <button
+                          onClick={() => setResetModalOpen(false)}
+                          className="text-slate-400 hover:text-white p-1 rounded-lg cursor-pointer"
+                        >
+                          <X size={16} />
+                        </button>
+                      </div>
+
+                      <p className={`text-xs ${isLight ? "text-slate-600" : "text-slate-300"}`}>
+                        This will restore the <strong>8 canonical default advisory domains</strong> (Finance & Taxation, HR & Talent, Tech & Digital, Legal & Compliance, Marketing Strategy, Operations & Logistics, School Mathematics, Teaching & Academia).
+                      </p>
+
+                      <div className="flex items-center justify-end gap-2 pt-2">
+                        <button
+                          type="button"
+                          onClick={() => setResetModalOpen(false)}
+                          className={`px-4 py-2 text-xs font-bold rounded-xl border cursor-pointer transition-colors ${
+                            isLight ? "bg-slate-100 text-slate-700 border-slate-300 hover:bg-slate-200" : "bg-white/10 text-slate-300 border-white/10 hover:bg-white/20"
+                          }`}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isResetting}
+                          onClick={handleConfirmReset}
+                          className="px-4 py-2 text-xs font-bold rounded-xl bg-amber-500 text-slate-950 hover:bg-amber-400 cursor-pointer shadow-lg disabled:opacity-50 transition-colors flex items-center gap-1.5"
+                        >
+                          {isResetting ? (
+                            <>
+                              <RefreshCw size={13} className="animate-spin" /> Restoring...
+                            </>
+                          ) : (
+                            <>
+                              <RefreshCw size={13} /> Reset to Defaults
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* ==============================================================
               EXPERT AVAILABILITY GOVERNANCE DESK
@@ -3998,16 +5063,19 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
                 return undefined;
               };
 
-              const expCertFileName = auditDocsRecord?.docs?.expCert?.fileName || pendingItems?.expCert?.fileName || selectedAuditItem.documents?.expCert || `${selectedAuditItem.name.replace(/\s+/g, "_")}_Work_Experience.pdf`;
+              const expCertDocMeta = typeof selectedAuditItem.documents?.expCert === 'object' ? selectedAuditItem.documents.expCert : null;
+              const expCertFileName = auditDocsRecord?.docs?.expCert?.fileName || pendingItems?.expCert?.fileName || expCertDocMeta?.file_name || expCertDocMeta?.fileName || (typeof selectedAuditItem.documents?.expCert === 'string' ? selectedAuditItem.documents?.expCert : undefined) || `${selectedAuditItem.name.replace(/\s+/g, "_")}_Work_Experience.pdf`;
               const expCertFileData = auditDocsRecord?.docs?.expCert?.fileData || pendingItems?.expCert?.fileData || findDirectBinary(expCertFileName, "expCert");
+              const expCertFilePath = expCertDocMeta?.file_path || expCertDocMeta?.filePath || auditDocsRecord?.docs?.expCert?.filePath;
 
               const expCertDoc = {
                 id: auditDocsRecord?.docs?.expCert?.id || pendingItems?.expCert?.id || `doc-${selectedAuditItem.id}-1`,
                 type: "expCert" as const,
                 title: "Work Experience & Tenure Certificate",
                 fileName: expCertFileName,
-                fileSize: auditDocsRecord?.docs?.expCert?.fileSize || pendingItems?.expCert?.fileSize || "1.8 MB",
-                uploadedAt: auditDocsRecord?.docs?.expCert?.uploadedAt || auditDocsRecord?.updatedAt || selectedAuditItem.applied || "Recently submitted",
+                filePath: expCertFilePath,
+                fileSize: auditDocsRecord?.docs?.expCert?.fileSize || pendingItems?.expCert?.fileSize || expCertDocMeta?.file_size || "1.8 MB",
+                uploadedAt: auditDocsRecord?.docs?.expCert?.uploadedAt || expCertDocMeta?.uploaded_at || auditDocsRecord?.updatedAt || selectedAuditItem.applied || "Recently submitted",
                 fileData: expCertFileData,
                 expertId: selectedAuditItem.id,
                 expertName: selectedAuditItem.name,
@@ -4015,16 +5083,19 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
                 status: "Pending Audit" as const
               };
 
-              const offerLetterFileName = auditDocsRecord?.docs?.offerLetter?.fileName || pendingItems?.offerLetter?.fileName || selectedAuditItem.documents?.offerLetter || `${selectedAuditItem.name.replace(/\s+/g, "_")}_Relieving_Letter.pdf`;
+              const offerLetterDocMeta = typeof selectedAuditItem.documents?.offerLetter === 'object' ? selectedAuditItem.documents.offerLetter : null;
+              const offerLetterFileName = auditDocsRecord?.docs?.offerLetter?.fileName || pendingItems?.offerLetter?.fileName || offerLetterDocMeta?.file_name || offerLetterDocMeta?.fileName || (typeof selectedAuditItem.documents?.offerLetter === 'string' ? selectedAuditItem.documents?.offerLetter : undefined) || `${selectedAuditItem.name.replace(/\s+/g, "_")}_Relieving_Letter.pdf`;
               const offerLetterFileData = auditDocsRecord?.docs?.offerLetter?.fileData || pendingItems?.offerLetter?.fileData || findDirectBinary(offerLetterFileName, "offerLetter");
+              const offerLetterFilePath = offerLetterDocMeta?.file_path || offerLetterDocMeta?.filePath || auditDocsRecord?.docs?.offerLetter?.filePath;
 
               const offerLetterDoc = {
                 id: auditDocsRecord?.docs?.offerLetter?.id || pendingItems?.offerLetter?.id || `doc-${selectedAuditItem.id}-2`,
                 type: "offerLetter" as const,
                 title: "Company Relieving / Promotion Letter",
                 fileName: offerLetterFileName,
-                fileSize: auditDocsRecord?.docs?.offerLetter?.fileSize || pendingItems?.offerLetter?.fileSize || "950 KB",
-                uploadedAt: auditDocsRecord?.docs?.offerLetter?.uploadedAt || auditDocsRecord?.updatedAt || selectedAuditItem.applied || "Recently submitted",
+                filePath: offerLetterFilePath,
+                fileSize: auditDocsRecord?.docs?.offerLetter?.fileSize || pendingItems?.offerLetter?.fileSize || offerLetterDocMeta?.file_size || "950 KB",
+                uploadedAt: auditDocsRecord?.docs?.offerLetter?.uploadedAt || offerLetterDocMeta?.uploaded_at || auditDocsRecord?.updatedAt || selectedAuditItem.applied || "Recently submitted",
                 fileData: offerLetterFileData,
                 expertId: selectedAuditItem.id,
                 expertName: selectedAuditItem.name,
@@ -4032,16 +5103,19 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
                 status: "Pending Audit" as const
               };
 
-              const resumeFileName = auditDocsRecord?.docs?.resume?.fileName || pendingItems?.resume?.fileName || selectedAuditItem.documents?.resume || `${selectedAuditItem.name.replace(/\s+/g, "_")}_Executive_CV.pdf`;
+              const resumeDocMeta = typeof selectedAuditItem.documents?.resume === 'object' ? selectedAuditItem.documents.resume : null;
+              const resumeFileName = auditDocsRecord?.docs?.resume?.fileName || pendingItems?.resume?.fileName || resumeDocMeta?.file_name || resumeDocMeta?.fileName || (typeof selectedAuditItem.documents?.resume === 'string' ? selectedAuditItem.documents?.resume : undefined) || `${selectedAuditItem.name.replace(/\s+/g, "_")}_Executive_CV.pdf`;
               const resumeFileData = auditDocsRecord?.docs?.resume?.fileData || pendingItems?.resume?.fileData || findDirectBinary(resumeFileName, "resume");
+              const resumeFilePath = resumeDocMeta?.file_path || resumeDocMeta?.filePath || auditDocsRecord?.docs?.resume?.filePath;
 
               const resumeDoc = {
                 id: auditDocsRecord?.docs?.resume?.id || pendingItems?.resume?.id || `doc-${selectedAuditItem.id}-3`,
                 type: "resume" as const,
                 title: "Executive Dossier & Bio Resume",
                 fileName: resumeFileName,
-                fileSize: auditDocsRecord?.docs?.resume?.fileSize || pendingItems?.resume?.fileSize || "2.4 MB",
-                uploadedAt: auditDocsRecord?.docs?.resume?.uploadedAt || auditDocsRecord?.updatedAt || selectedAuditItem.applied || "Recently submitted",
+                filePath: resumeFilePath,
+                fileSize: auditDocsRecord?.docs?.resume?.fileSize || pendingItems?.resume?.fileSize || resumeDocMeta?.file_size || "2.4 MB",
+                uploadedAt: auditDocsRecord?.docs?.resume?.uploadedAt || resumeDocMeta?.uploaded_at || auditDocsRecord?.updatedAt || selectedAuditItem.applied || "Recently submitted",
                 fileData: resumeFileData,
                 expertId: selectedAuditItem.id,
                 expertName: selectedAuditItem.name,
@@ -4059,8 +5133,24 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
 
               const openAdminPreview = async (doc: any, slotType: "expCert" | "offerLetter" | "resume") => {
                 let fileData = doc.fileData;
+                const filePath = doc.filePath || doc.file_path;
 
-                // Direct static server check (same authoritative file reference as Expert Portal)
+                // 1. Try Supabase Storage signed URL if filePath exists
+                if (filePath && (!fileData || (!fileData.startsWith("data:") && !fileData.startsWith("blob:") && !fileData.includes("supabase.co")))) {
+                  try {
+                    const sRes = await fetch(`/api/documents/signed-url?filePath=${encodeURIComponent(filePath)}`);
+                    if (sRes.ok) {
+                      const sData = await sRes.json();
+                      if (sData.signedUrl) {
+                        fileData = sData.signedUrl;
+                      }
+                    }
+                  } catch (e) {
+                    console.warn("Signed URL fetch failed:", e);
+                  }
+                }
+
+                // 2. Direct static server check (same authoritative file reference as Expert Portal)
                 if (doc.fileName && (!fileData || !fileData.startsWith("data:"))) {
                   try {
                     const staticUrl = `/uploaded_docs/${encodeURIComponent(doc.fileName)}`;

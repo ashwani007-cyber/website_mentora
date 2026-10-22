@@ -85,6 +85,18 @@ export const expertiseService = {
 
   async fetchFromBackend(): Promise<string[]> {
     try {
+      const res = await fetch('/api/domains');
+      if (res.ok) {
+        const domains = await res.json();
+        if (Array.isArray(domains) && domains.length > 0) {
+          const names = domains.filter((d: any) => d.is_active !== false).map((d: any) => d.name);
+          this.applyFields(names, false);
+          return names;
+        }
+      }
+    } catch {}
+
+    try {
       const serverData = await mongoDB.getKv(EXPERTISE_STORAGE_KEY);
       if (Array.isArray(serverData) && serverData.length > 0) {
         const current = this.getAll();
@@ -109,6 +121,13 @@ export const expertiseService = {
     }
     const updated = [...current, trimmed];
     this.save(updated);
+    try {
+      fetch('/api/domains', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: trimmed })
+      }).catch(() => {});
+    } catch {}
     return { success: true, message: `Expertise field "${trimmed}" added successfully`, fields: updated };
   },
 
@@ -120,10 +139,21 @@ export const expertiseService = {
       return { success: false, message: `Expertise field "${trimmed}" not found`, fields: current };
     }
     this.save(updated);
+    try {
+      fetch('/api/domains').then(r => r.json()).then(list => {
+        const target = list.find((d: any) => d.name.toLowerCase() === trimmed.toLowerCase());
+        if (target) {
+          fetch(`/api/domains/${target.id}`, { method: 'DELETE' }).catch(() => {});
+        }
+      }).catch(() => {});
+    } catch {}
     return { success: true, message: `Expertise field "${trimmed}" deleted successfully`, fields: updated };
   },
 
   reset(): string[] {
+    try {
+      fetch('/api/domains/reset', { method: 'POST' }).catch(() => {});
+    } catch {}
     return this.save(DEFAULT_EXPERTISE_FIELDS);
   },
 
