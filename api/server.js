@@ -141,6 +141,167 @@ app.get('/api/availability', async (req, res) => {
   }
 });
 
+// Create Availability Slot
+app.post('/api/availability', async (req, res) => {
+  try {
+    const slotData = req.body;
+    const dbPayload = {
+      id: slotData.id || `avail-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      expert_id: slotData.expert_id || slotData.expertId,
+      availability_date: slotData.availability_date || slotData.availabilityDate,
+      start_time: slotData.start_time || slotData.startTime,
+      end_time: slotData.end_time || slotData.endTime,
+      status: slotData.status || 'AVAILABLE',
+      booking_id: slotData.booking_id || slotData.bookingId || null,
+      client_id: slotData.client_id || slotData.clientId || null,
+      client_name: slotData.client_name || slotData.clientName || null
+    };
+
+    const { data: slot, error } = await supabase
+      .from('expert_availability')
+      .upsert(dbPayload)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json({ success: true, availability: slot });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Update Availability Slot
+app.put('/api/availability/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updateData = req.body;
+    const dbPayload = {
+      updated_at: new Date().toISOString()
+    };
+    if (updateData.expertId || updateData.expert_id) dbPayload.expert_id = updateData.expertId || updateData.expert_id;
+    if (updateData.availabilityDate || updateData.availability_date) dbPayload.availability_date = updateData.availabilityDate || updateData.availability_date;
+    if (updateData.startTime || updateData.start_time) dbPayload.start_time = updateData.startTime || updateData.start_time;
+    if (updateData.endTime || updateData.end_time) dbPayload.end_time = updateData.endTime || updateData.end_time;
+    if (updateData.status) dbPayload.status = updateData.status;
+
+    const { data: slot, error } = await supabase
+      .from('expert_availability')
+      .update(dbPayload)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json({ success: true, availability: slot });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Delete Availability Slot
+app.delete('/api/availability/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { error } = await supabase
+      .from('expert_availability')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Helper: Calculate average and count
+function calculateReviewAggregate(reviewsList) {
+  if (!Array.isArray(reviewsList) || reviewsList.length === 0) {
+    return { avgRating: 0.0, reviewCount: 0 };
+  }
+  const valid = reviewsList
+    .map(r => Number(r.rating))
+    .filter(val => !isNaN(val) && val >= 1 && val <= 5);
+  if (valid.length === 0) return { avgRating: 0.0, reviewCount: 0 };
+  const sum = valid.reduce((a, b) => a + b, 0);
+  const avg = Math.round((sum / valid.length) * 10) / 10;
+  return { avgRating: avg, reviewCount: valid.length };
+}
+
+// Get Reviews
+app.get('/api/reviews', async (req, res) => {
+  try {
+    const { expertId, expertEmail } = req.query;
+    let allReviews = [];
+    try {
+      let query = supabase.from('reviews').select('*');
+      if (expertId) query = query.or(`expert_id.eq.${expertId},expert_email.ilike.${expertEmail || expertId}`);
+      const { data } = await query;
+      if (Array.isArray(data)) allReviews = data;
+    } catch {}
+
+    const { avgRating, reviewCount } = calculateReviewAggregate(allReviews);
+    res.json({ success: true, reviews: allReviews, avgRating, reviewCount, completedConsultations: reviewCount });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Get Live Review Stats
+app.get('/api/reviews/stats', async (req, res) => {
+  try {
+    const { expertId, expertEmail } = req.query;
+    let allReviews = [];
+    try {
+      let query = supabase.from('reviews').select('*');
+      if (expertId) query = query.or(`expert_id.eq.${expertId},expert_email.ilike.${expertEmail || expertId}`);
+      const { data } = await query;
+      if (Array.isArray(data)) allReviews = data;
+    } catch {}
+
+    const { avgRating, reviewCount } = calculateReviewAggregate(allReviews);
+    res.json({ success: true, avgRating, reviewCount, completedConsultations: reviewCount });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Submit Review
+app.post('/api/reviews', async (req, res) => {
+  try {
+    const { expertId, expertEmail, expertName, clientId, clientEmail, clientName, sessionId, rating, comment } = req.body;
+    const numRating = Number(rating);
+    if (isNaN(numRating) || numRating < 1 || numRating > 5) {
+      return res.status(400).json({ success: false, error: 'Rating must be a number between 1 and 5' });
+    }
+    if (!sessionId) {
+      return res.status(400).json({ success: false, error: 'Session ID is required' });
+    }
+
+    const newRev = {
+      id: `rev-${Date.now()}`,
+      expert_id: expertId || '',
+      expert_email: expertEmail || '',
+      expert_name: expertName || '',
+      client_id: clientId || '',
+      client_email: clientEmail || '',
+      client_name: clientName || 'Corporate Client',
+      session_id: String(sessionId).trim(),
+      rating: Math.round(numRating),
+      comment: (comment || '').trim(),
+      created_at: new Date().toISOString()
+    };
+
+    try {
+      await supabase.from('reviews').insert(newRev);
+    } catch {}
+
+    res.json({ success: true, review: newRev, avgRating: numRating, reviewCount: 1, completedConsultations: 1 });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Get Project Reviews
 app.get('/api/project-reviews', async (req, res) => {
   try {

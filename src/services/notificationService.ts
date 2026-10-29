@@ -90,10 +90,10 @@ export const notificationService = {
     return INITIAL_NOTIFICATIONS;
   },
 
-  getAll(): AppNotification[] {
+  getAll(role?: string, recipientId?: string): AppNotification[] {
     const local = this.getLocal();
     if (!isFetching) {
-      this.syncWithBackend().catch(() => {});
+      this.syncWithBackend(role, recipientId).catch(() => {});
     }
     return local;
   },
@@ -135,7 +135,7 @@ export const notificationService = {
   },
 
   getForUser(role?: string, recipientId?: string): AppNotification[] {
-    const all = this.getAll();
+    const all = this.getAll(role, recipientId);
     const normalizedRole = (role || '').toLowerCase().trim();
     const normalizedRecipient = (recipientId || '').toLowerCase().trim();
 

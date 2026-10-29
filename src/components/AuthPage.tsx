@@ -113,7 +113,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess }) => {
         }
 
         const userRecord = data.user || {};
-        const returnedRole: UserRole = (userRecord.role === 'expert' || userRecord.role === 'professional') 
+        const returnedRole: UserRole = (userRecord.role === 'expert' || userRecord.role === 'professional' || userRecord.role === 'senior_expert' || userRecord.role === 'senior expert') 
           ? 'professional' 
           : (userRecord.role === 'admin' ? 'admin' : 'client');
 
@@ -176,7 +176,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess }) => {
         }
 
         const userRecord = data.user || {};
-        const returnedRole: UserRole = (userRecord.role === 'expert' || userRecord.role === 'professional') 
+        const returnedRole: UserRole = (userRecord.role === 'expert' || userRecord.role === 'professional' || userRecord.role === 'senior_expert' || userRecord.role === 'senior expert') 
           ? 'professional' 
           : (userRecord.role === 'admin' ? 'admin' : 'client');
 

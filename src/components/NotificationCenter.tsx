@@ -52,6 +52,15 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
 
   useEffect(() => {
     loadNotifications();
+    notificationService.syncWithBackend(role || undefined, recipientId).then(() => {
+      loadNotifications();
+    }).catch(() => {});
+
+    const pollInterval = setInterval(() => {
+      notificationService.syncWithBackend(role || undefined, recipientId).then(() => {
+        loadNotifications();
+      }).catch(() => {});
+    }, 8000);
 
     const handleNewNotification = (e: any) => {
       loadNotifications();
@@ -93,6 +102,7 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
     window.addEventListener(NOTIFICATION_EVENT_NAME, handleNewNotification);
     window.addEventListener(NOTIFICATION_ENGINE_UPDATED, handleEngineUpdate);
     return () => {
+      clearInterval(pollInterval);
       window.removeEventListener(NOTIFICATION_EVENT_NAME, handleNewNotification);
       window.removeEventListener(NOTIFICATION_ENGINE_UPDATED, handleEngineUpdate);
     };

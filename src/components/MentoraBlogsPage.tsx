@@ -543,26 +543,6 @@ export const MentoraBlogsPage: React.FC<MentoraBlogsPageProps> = ({
             </button>
 
             <button
-              onClick={() => setPage('client')}
-              className="transition-colors cursor-pointer"
-              style={{ color: palette.textMuted }}
-              onMouseEnter={(e) => (e.currentTarget.style.color = palette.primary)}
-              onMouseLeave={(e) => (e.currentTarget.style.color = palette.textMuted)}
-            >
-              Client Advisory
-            </button>
-
-            <button
-              onClick={() => setPage('expert')}
-              className="transition-colors cursor-pointer"
-              style={{ color: palette.textMuted }}
-              onMouseEnter={(e) => (e.currentTarget.style.color = palette.primary)}
-              onMouseLeave={(e) => (e.currentTarget.style.color = palette.textMuted)}
-            >
-              Senior Experts
-            </button>
-
-            <button
               onClick={() => setPage('about')}
               className="transition-colors cursor-pointer"
               style={{ color: palette.textMuted }}
@@ -719,30 +699,6 @@ export const MentoraBlogsPage: React.FC<MentoraBlogsPageProps> = ({
                 style={{ color: palette.textMuted }}
               >
                 <span>Stories</span>
-                <ChevronRight className="w-4 h-4 opacity-40" />
-              </button>
-
-              <button
-                onClick={() => {
-                  setMobileMenuOpen(false);
-                  setPage('client');
-                }}
-                className="py-2 text-left cursor-pointer flex items-center justify-between"
-                style={{ color: palette.textMuted }}
-              >
-                <span>Client Advisory</span>
-                <ChevronRight className="w-4 h-4 opacity-40" />
-              </button>
-
-              <button
-                onClick={() => {
-                  setMobileMenuOpen(false);
-                  setPage('expert');
-                }}
-                className="py-2 text-left cursor-pointer flex items-center justify-between"
-                style={{ color: palette.textMuted }}
-              >
-                <span>Senior Experts</span>
                 <ChevronRight className="w-4 h-4 opacity-40" />
               </button>
 

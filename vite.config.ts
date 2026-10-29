@@ -75,6 +75,38 @@ function isSlotInPast(dateStr: string, startTimeStr: string): boolean {
   return startMin <= currentMin
 }
 
+// UUID validation & safe PostgREST filters for Supabase
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function isUuid(val: any): boolean {
+  return typeof val === 'string' && UUID_REGEX.test(val.trim())
+}
+
+function getExpertFilter(expertId?: string | null, cleanEmail?: string | null): string {
+  const parts: string[] = []
+  if (expertId) {
+    parts.push(`id.eq.${expertId}`)
+    if (isUuid(expertId)) {
+      parts.push(`user_id.eq.${expertId}`)
+    }
+  }
+  if (cleanEmail) {
+    parts.push(`email.ilike.${cleanEmail}`)
+  }
+  return parts.join(',')
+}
+
+async function findSupabaseExpert(sbClient: any, expertId?: string | null, email?: string | null): Promise<any> {
+  const cleanEmail = (email || '').toLowerCase().trim()
+  const filter = getExpertFilter(expertId, cleanEmail)
+  if (!filter) return null
+  const { data, error } = await sbClient.from('experts').select('*').or(filter)
+  if (error) {
+    throw error
+  }
+  return Array.isArray(data) && data.length > 0 ? data[0] : null
+}
+
 function sharedDbPlugin(): Plugin {
   const DB_PATH = path.resolve(__dirname, 'db.json')
 
@@ -136,7 +168,7 @@ function sharedDbPlugin(): Plugin {
     }
   }
 
-  const handleMiddleware = (req: any, res: any, next: any) => {
+  const handleMiddleware = async (req: any, res: any, next: any) => {
     const url = req.url || ''
 
     // Endpoint: /api/auth (MongoDB Authenticated Sessions & Admin Flow)
@@ -199,6 +231,669 @@ function sharedDbPlugin(): Plugin {
             res.end(JSON.stringify({ success: false, error: err.message }))
           }
         })
+        return
+      }
+    }
+
+    // Endpoint: /api/admin/pending-verifications (Only Unverified Experts Waiting for Audit)
+    if (url.startsWith('/api/admin/pending-verifications') && req.method === 'GET') {
+      const authHeader = req.headers['authorization'] || ''
+      const adminToken = (req.headers['x-admin-token'] || req.headers['admin_token'] || '') as string
+      const adminId = (req.headers['x-admin-id'] || '') as string
+      const role = (req.headers['x-user-role'] || '') as string
+      const isAuthAdmin = adminId === 'admin' || role === 'admin' || adminToken === 'admin-session-token' || (typeof adminToken === 'string' && adminToken.length > 5) || (authHeader.startsWith('Bearer ') && authHeader.length > 10)
+
+      if (!isAuthAdmin) {
+        res.statusCode = 403
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify({ success: false, error: 'Unauthorized: Admin privileges required' }))
+        return
+      }
+
+      const parsedUrl = new URL(url, 'http://localhost')
+      const statusFilter = parsedUrl.searchParams.get('status')
+      const db = readDb()
+
+      let supaList: any[] = []
+      try {
+        const { supabase: sClient } = await import(pathToFileURL(path.resolve(__dirname, 'server/supabaseClient.js')).href)
+        const { data: supaAll } = await sClient.from('experts').select('*')
+        if (Array.isArray(supaAll)) supaList = supaAll
+      } catch {}
+
+      const dbExperts = Array.isArray(db.experts) ? db.experts : []
+      const dbPending = Array.isArray(db.pendingVerifications) ? db.pendingVerifications : []
+
+      const allCandidates: any[] = []
+      const seenMap = new Set<string>()
+
+      const addCandidate = (e: any) => {
+        if (!e) return
+        if (e.verified === true || e.verificationStatus === 'approved' || e.status === 'Approved') return
+        const key = `${e.id || ''}::${(e.email || '').toLowerCase()}`
+        if (seenMap.has(key)) return
+        seenMap.add(key)
+        allCandidates.push(e)
+      }
+
+      supaList.forEach(addCandidate)
+      dbExperts.forEach(addCandidate)
+      dbPending.forEach(addCandidate)
+
+      const resultList = allCandidates.map((exp: any) => {
+        const dbDocs = (db?.expertDocuments && (db.expertDocuments[exp.id] || db.expertDocuments[exp.user_id])) || {}
+        const expDocs = exp.documents || {}
+        const items = expDocs.items || {}
+
+        const workCert = dbDocs.work_experience_cert || expDocs.work_experience_cert || items.work_experience_cert || items.expCert || (typeof expDocs.expCert === 'object' ? expDocs.expCert : (expDocs.expCert ? { file_name: expDocs.expCert, fileName: expDocs.expCert } : null))
+        const offerLetter = dbDocs.offer_relieving_letter || expDocs.offer_relieving_letter || items.offer_relieving_letter || items.offerLetter || (typeof expDocs.offerLetter === 'object' ? expDocs.offerLetter : (expDocs.offerLetter ? { file_name: expDocs.offerLetter, fileName: expDocs.offerLetter } : null))
+        const execCv = dbDocs.executive_cv || expDocs.executive_cv || items.executive_cv || items.resume || (typeof expDocs.resume === 'object' ? expDocs.resume : (expDocs.resume ? { file_name: expDocs.resume, fileName: expDocs.resume } : null))
+
+        const docCount = (workCert ? 1 : 0) + (offerLetter ? 1 : 0) + (execCv ? 1 : 0)
+        const kycStatus = expDocs.kyc_status || exp.kyc_status
+        const verStatus = exp.verificationStatus || expDocs.verificationStatus || exp.status
+
+        let computedStatus = 'Registered / Documents Pending'
+        let finalVerStatus = 'pending_docs'
+
+        if (verStatus === 'rejected' || exp.status === 'Rejected' || kycStatus === 'Rejected' || exp.rejected === true) {
+          computedStatus = 'Rejected'
+          finalVerStatus = 'rejected'
+        } else if (verStatus === 'pending_resubmitted' || exp.status === 'Pending Review (Re-submitted)' || kycStatus === 'Pending Review (Re-submitted)') {
+          computedStatus = 'Pending Review (Re-submitted)'
+          finalVerStatus = 'pending_resubmitted'
+        } else if (docCount === 3 || exp.status === 'Pending Review' || kycStatus === 'Pending Review') {
+          computedStatus = 'Pending Review'
+          finalVerStatus = 'pending'
+        }
+
+        return {
+          id: exp.id,
+          expertId: exp.id,
+          user_id: exp.user_id || null,
+          name: exp.name || exp.full_name || 'Senior Professional',
+          email: exp.email || '',
+          phone: exp.phone || '',
+          field: exp.field || 'Strategic Leadership',
+          company: exp.company || expDocs.company || 'Enterprise Firm',
+          years: exp.years ?? exp.years_of_experience ?? 0,
+          baseRate: exp.baseRate ?? exp.base_rate ?? 600,
+          projectRate: exp.projectRate ?? exp.project_rate ?? 1000,
+          bio: exp.bio || '',
+          verified: false,
+          status: computedStatus,
+          verificationStatus: finalVerStatus,
+          rejectionReason: exp.rejectionReason || expDocs.rejectionReason || null,
+          submittedAt: exp.created_at || exp.submittedAt || new Date().toISOString(),
+          documents: {
+            work_experience_cert: workCert || null,
+            offer_relieving_letter: offerLetter || null,
+            executive_cv: execCv || null,
+            expCert: workCert?.file_name || workCert?.fileName || (typeof expDocs.expCert === 'string' ? expDocs.expCert : null),
+            offerLetter: offerLetter?.file_name || offerLetter?.fileName || (typeof expDocs.offerLetter === 'string' ? expDocs.offerLetter : null),
+            resume: execCv?.file_name || execCv?.fileName || (typeof expDocs.resume === 'string' ? expDocs.resume : null),
+            items: {
+              work_experience_cert: workCert || null,
+              offer_relieving_letter: offerLetter || null,
+              executive_cv: execCv || null
+            }
+          }
+        }
+      })
+
+      let filtered = resultList
+      if (statusFilter && statusFilter !== 'all') {
+        filtered = resultList.filter((item: any) => {
+          if (statusFilter === 'rejected') return item.status === 'Rejected'
+          if (statusFilter === 'pending') return item.status === 'Pending Review' || item.status === 'Pending Review (Re-submitted)'
+          if (statusFilter === 'missing_docs') return item.status === 'Registered / Documents Pending'
+          return item.status.toLowerCase() === statusFilter.toLowerCase()
+        })
+      }
+
+      res.setHeader('Content-Type', 'application/json')
+      res.end(JSON.stringify(filtered))
+      return
+    }
+
+    // Endpoint: /api/admin/approve-expert or /api/admin/approve-document (Admin Verifies Expert)
+    if ((url.startsWith('/api/admin/approve-expert') || url.startsWith('/api/admin/approve-document')) && req.method === 'POST') {
+      let body = ''
+      req.on('data', (chunk: any) => { body += chunk })
+      req.on('end', async () => {
+        try {
+          const authHeader = req.headers['authorization'] || ''
+          const adminToken = (req.headers['x-admin-token'] || req.headers['admin_token'] || '') as string
+          const adminId = (req.headers['x-admin-id'] || '') as string
+          const role = (req.headers['x-user-role'] || '') as string
+          const isAuthAdmin = adminId === 'admin' || role === 'admin' || adminToken === 'admin-session-token' || (typeof adminToken === 'string' && adminToken.length > 5) || (authHeader.startsWith('Bearer ') && authHeader.length > 10)
+
+          if (!isAuthAdmin) {
+            res.statusCode = 403
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ success: false, error: 'Unauthorized: Admin privileges required' }))
+            return
+          }
+
+          const payload = JSON.parse(body || '{}')
+          const expertId = payload.expertId
+          const cleanEmail = (payload.email || '').toLowerCase().trim()
+
+          const { supabase: sClient } = await import(pathToFileURL(path.resolve(__dirname, 'server/supabaseClient.js')).href)
+          const matchedRow = await findSupabaseExpert(sClient, expertId, cleanEmail)
+          if (!matchedRow) {
+            res.statusCode = 400
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ success: false, error: `Expert "${expertId || cleanEmail}" not found in Supabase` }))
+            return
+          }
+
+          const targetExpertId = matchedRow.id
+          const targetUserId = matchedRow.user_id
+
+          const updatedDocs = {
+            ...(matchedRow.documents || {}),
+            kyc_status: 'Verified',
+            status: 'Approved',
+            verificationStatus: 'approved',
+            rejectionReason: null,
+            reviewedAt: new Date().toISOString(),
+            reviewedBy: payload.adminId || 'admin'
+          }
+
+          const { data: updatedRows, error: updateErr } = await sClient.from('experts').update({
+            verified: true,
+            documents: updatedDocs,
+            updated_at: new Date().toISOString()
+          }).eq('id', targetExpertId).select()
+
+          if (updateErr) {
+            throw new Error(`Supabase approve failed: ${updateErr.message}`)
+          }
+          if (!updatedRows || updatedRows.length === 0) {
+            throw new Error('Supabase approve affected 0 rows')
+          }
+
+          const userFilters: string[] = []
+          if (targetUserId && isUuid(targetUserId)) {
+            userFilters.push(`id.eq.${targetUserId}`)
+          } else if (expertId && isUuid(expertId)) {
+            userFilters.push(`id.eq.${expertId}`)
+          }
+          if (cleanEmail) {
+            userFilters.push(`email.ilike.${cleanEmail}`)
+          }
+          if (userFilters.length > 0) {
+            try {
+              await sClient.from('users').update({
+                is_verified: true,
+                updated_at: new Date().toISOString()
+              }).or(userFilters.join(','))
+            } catch {}
+          }
+
+          const notifMsg = 'Your documents have been audited and your account has been verified by Admin. Your profile is now live and you are ready to take work.'
+          try {
+            await sClient.from('notifications').insert({
+              user_id: targetUserId || targetExpertId,
+              title: 'Credentials Approved & Profile Verified!',
+              message: notifMsg,
+              type: 'verification',
+              is_read: false,
+              created_at: new Date().toISOString()
+            })
+          } catch {}
+
+          const ch = sClient.channel('admin-kyc-desk')
+          await ch.send({
+            type: 'broadcast',
+            event: 'expert_status_changed',
+            payload: {
+              expertId: targetExpertId,
+              email: cleanEmail,
+              status: 'approved',
+              verified: true,
+              timestamp: new Date().toISOString()
+            }
+          }).catch(() => {})
+
+          // Update db.json only after Supabase succeeds
+          const current = readDb()
+          if (Array.isArray(current.experts)) {
+            current.experts = current.experts.map((e: any) => {
+              if (e.id === expertId || e.id === targetExpertId || (cleanEmail && e.email?.toLowerCase() === cleanEmail)) {
+                const curDocs = e.documents || {}
+                return {
+                  ...e,
+                  verified: true,
+                  verificationStatus: 'approved',
+                  status: 'Approved',
+                  rejected: false,
+                  rejectionReason: null,
+                  documents: {
+                    ...curDocs,
+                    kyc_status: 'Verified',
+                    status: 'Approved',
+                    verificationStatus: 'approved',
+                    rejectionReason: null
+                  }
+                }
+              }
+              return e
+            })
+          }
+
+          if (Array.isArray(current.users)) {
+            current.users = current.users.map((u: any) => {
+              if (u.id === expertId || u.id === targetUserId || (cleanEmail && u.email?.toLowerCase() === cleanEmail)) {
+                return { ...u, verified: true, is_verified: true, verificationStatus: 'approved', rejected: false }
+              }
+              return u
+            })
+          }
+
+          if (Array.isArray(current.pendingVerifications)) {
+            current.pendingVerifications = current.pendingVerifications.filter((p: any) => 
+              p.id !== expertId && p.id !== targetExpertId && (!cleanEmail || p.email?.toLowerCase() !== cleanEmail)
+            )
+          }
+
+          if (!Array.isArray(current.notifications)) current.notifications = []
+          current.notifications.push({
+            id: `notif-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+            recipientId: cleanEmail || targetExpertId,
+            user_id: targetUserId || targetExpertId,
+            target: 'expert',
+            type: 'verification',
+            title: 'Credentials Approved & Profile Verified!',
+            message: notifMsg,
+            is_read: false,
+            read: false,
+            actionLink: 'expert',
+            createdAt: new Date().toISOString()
+          })
+
+          writeDb(current)
+
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ success: true, message: 'Expert verified and approved successfully', status: 'Approved' }))
+        } catch (err: any) {
+          res.statusCode = 500
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ success: false, error: err.message }))
+        }
+      })
+      return
+    }
+
+    // Endpoint: /api/admin/reject-expert or /api/admin/reject-document
+    if ((url.startsWith('/api/admin/reject-expert') || url.startsWith('/api/admin/reject-document')) && req.method === 'POST') {
+      let body = ''
+      req.on('data', (chunk: any) => { body += chunk })
+      req.on('end', async () => {
+        try {
+          const authHeader = req.headers['authorization'] || ''
+          const adminToken = (req.headers['x-admin-token'] || req.headers['admin_token'] || '') as string
+          const adminId = (req.headers['x-admin-id'] || '') as string
+          const role = (req.headers['x-user-role'] || '') as string
+          const isAuthAdmin = adminId === 'admin' || role === 'admin' || adminToken === 'admin-session-token' || (typeof adminToken === 'string' && adminToken.length > 5) || (authHeader.startsWith('Bearer ') && authHeader.length > 10)
+
+          if (!isAuthAdmin) {
+            res.statusCode = 403
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ success: false, error: 'Unauthorized: Admin privileges required' }))
+            return
+          }
+
+          const payload = JSON.parse(body || '{}')
+          const expertId = payload.expertId
+          const cleanEmail = (payload.email || '').toLowerCase().trim()
+          const cleanReason = (payload.reason && payload.reason.trim()) || 'Your submission has been rejected because the uploaded documents were not valid. Please upload valid documents and re-apply.'
+
+          const { supabase: sClient } = await import(pathToFileURL(path.resolve(__dirname, 'server/supabaseClient.js')).href)
+          const matchedRow = await findSupabaseExpert(sClient, expertId, cleanEmail)
+          if (!matchedRow) {
+            res.statusCode = 400
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ success: false, error: `Expert "${expertId || cleanEmail}" not found in Supabase` }))
+            return
+          }
+
+          const targetExpertId = matchedRow.id
+          const targetUserId = matchedRow.user_id
+
+          const updatedDocs = {
+            ...(matchedRow.documents || {}),
+            kyc_status: 'Rejected',
+            status: 'Rejected',
+            verificationStatus: 'rejected',
+            rejectionReason: cleanReason,
+            reviewedAt: new Date().toISOString(),
+            reviewedBy: payload.adminId || 'admin'
+          }
+
+          const { data: updatedRows, error: updateErr } = await sClient.from('experts').update({
+            verified: false,
+            documents: updatedDocs,
+            updated_at: new Date().toISOString()
+          }).eq('id', targetExpertId).select()
+
+          if (updateErr) {
+            throw new Error(`Supabase reject failed: ${updateErr.message}`)
+          }
+          if (!updatedRows || updatedRows.length === 0) {
+            throw new Error('Supabase reject affected 0 rows')
+          }
+
+          const userFilters: string[] = []
+          if (targetUserId && isUuid(targetUserId)) {
+            userFilters.push(`id.eq.${targetUserId}`)
+          } else if (expertId && isUuid(expertId)) {
+            userFilters.push(`id.eq.${expertId}`)
+          }
+          if (cleanEmail) {
+            userFilters.push(`email.ilike.${cleanEmail}`)
+          }
+          if (userFilters.length > 0) {
+            try {
+              await sClient.from('users').update({
+                is_verified: false,
+                updated_at: new Date().toISOString()
+              }).or(userFilters.join(','))
+            } catch {}
+          }
+
+          const notifMsg = 'Your submission has been rejected because the uploaded documents were not valid. Please upload valid documents and re-apply.'
+          try {
+            await sClient.from('notifications').insert({
+              user_id: targetUserId || targetExpertId,
+              title: 'Document Verification Notice',
+              message: notifMsg,
+              type: 'verification',
+              is_read: false,
+              created_at: new Date().toISOString()
+            })
+          } catch {}
+
+          const ch = sClient.channel('admin-kyc-desk')
+          await ch.send({
+            type: 'broadcast',
+            event: 'expert_status_changed',
+            payload: {
+              expertId: targetExpertId,
+              email: cleanEmail,
+              status: 'rejected',
+              rejectionReason: cleanReason,
+              timestamp: new Date().toISOString()
+            }
+          }).catch(() => {})
+
+          // Update db.json only after Supabase succeeds
+          const current = readDb()
+          if (Array.isArray(current.experts)) {
+            current.experts = current.experts.map((e: any) => {
+              if (e.id === expertId || e.id === targetExpertId || (cleanEmail && e.email?.toLowerCase() === cleanEmail)) {
+                const curDocs = e.documents || {}
+                return {
+                  ...e,
+                  verified: false,
+                  verificationStatus: 'rejected',
+                  status: 'Rejected',
+                  rejected: true,
+                  rejectionReason: cleanReason,
+                  documents: {
+                    ...curDocs,
+                    kyc_status: 'Rejected',
+                    status: 'Rejected',
+                    verificationStatus: 'rejected',
+                    rejectionReason: cleanReason
+                  }
+                }
+              }
+              return e
+            })
+          }
+
+          if (Array.isArray(current.pendingVerifications)) {
+            current.pendingVerifications = current.pendingVerifications.map((p: any) => {
+              if (p.id === expertId || p.id === targetExpertId || (cleanEmail && p.email?.toLowerCase() === cleanEmail)) {
+                return {
+                  ...p,
+                  status: 'Rejected',
+                  verificationStatus: 'rejected',
+                  rejectionReason: cleanReason
+                }
+              }
+              return p
+            })
+          }
+
+          if (!Array.isArray(current.notifications)) current.notifications = []
+          current.notifications.push({
+            id: `notif-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+            recipientId: cleanEmail || targetExpertId,
+            user_id: targetUserId || targetExpertId,
+            target: 'expert',
+            type: 'verification',
+            title: 'Document Verification Notice',
+            message: notifMsg,
+            is_read: false,
+            read: false,
+            rejectionReason: cleanReason,
+            actionLink: 'expert',
+            createdAt: new Date().toISOString()
+          })
+
+          writeDb(current)
+
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ success: true, message: 'Expert submission rejected', status: 'Rejected', rejectionReason: cleanReason }))
+        } catch (err: any) {
+          res.statusCode = 500
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ success: false, error: err.message }))
+        }
+      })
+      return
+    }
+
+    // Endpoint: /api/admin/remove-expert or /api/admin/delete-expert (Permanent Deletion)
+    if ((url.startsWith('/api/admin/remove-expert') || url.startsWith('/api/admin/delete-expert')) && req.method === 'POST') {
+      let body = ''
+      req.on('data', (chunk: any) => { body += chunk })
+      req.on('end', async () => {
+        try {
+          const authHeader = req.headers['authorization'] || ''
+          const adminToken = (req.headers['x-admin-token'] || req.headers['admin_token'] || '') as string
+          const adminId = (req.headers['x-admin-id'] || '') as string
+          const role = (req.headers['x-user-role'] || '') as string
+          const isAuthAdmin = adminId === 'admin' || role === 'admin' || adminToken === 'admin-session-token' || (typeof adminToken === 'string' && adminToken.length > 5) || (authHeader.startsWith('Bearer ') && authHeader.length > 10)
+
+          if (!isAuthAdmin) {
+            res.statusCode = 403
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ success: false, error: 'Unauthorized: Admin privileges required' }))
+            return
+          }
+
+          const payload = JSON.parse(body || '{}')
+          const expertId = payload.expertId || payload.id
+          const cleanEmail = (payload.email || '').toLowerCase().trim()
+
+          const { supabase: sClient } = await import(pathToFileURL(path.resolve(__dirname, 'server/supabaseClient.js')).href)
+          const matchedRow = await findSupabaseExpert(sClient, expertId, cleanEmail)
+          if (!matchedRow) {
+            res.statusCode = 400
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ success: false, error: `Expert "${expertId || cleanEmail}" not found in Supabase` }))
+            return
+          }
+
+          const targetExpertId = matchedRow.id
+          const targetUserId = matchedRow.user_id
+          const targetEmail = (matchedRow.email || cleanEmail).toLowerCase().trim()
+
+          // Remove files from storage
+          const directPaths = new Set<string>()
+          const folderNames = new Set<string>([targetExpertId, expertId, targetUserId].filter(Boolean))
+
+          if (matchedRow.documents && typeof matchedRow.documents === 'object') {
+            const items = matchedRow.documents.items || {}
+            for (const item of Object.values(items) as any[]) {
+              if (item && typeof item === 'object') {
+                const p = item.filePath || item.file_path
+                if (typeof p === 'string' && p.trim()) {
+                  directPaths.add(p.trim())
+                  const folderPart = p.trim().split('/')[0]
+                  if (folderPart) folderNames.add(folderPart)
+                }
+                if (item.expert_id) folderNames.add(item.expert_id)
+              }
+            }
+          }
+
+          if (directPaths.size > 0) {
+            try {
+              await sClient.storage.from('expert-documents').remove(Array.from(directPaths))
+            } catch {}
+          }
+
+          for (const folder of folderNames) {
+            try {
+              const { data: subItems } = await sClient.storage.from('expert-documents').list(folder)
+              if (Array.isArray(subItems) && subItems.length > 0) {
+                const rootPaths = subItems.filter((f: any) => f.name).map((f: any) => `${folder}/${f.name}`)
+                if (rootPaths.length > 0) {
+                  await sClient.storage.from('expert-documents').remove(rootPaths)
+                }
+              }
+              for (const sub of ['work_experience_cert', 'offer_relieving_letter', 'executive_cv']) {
+                const { data: files } = await sClient.storage.from('expert-documents').list(`${folder}/${sub}`)
+                if (Array.isArray(files) && files.length > 0) {
+                  const pathsToRemove = files.filter((f: any) => f.name).map((f: any) => `${folder}/${sub}/${f.name}`)
+                  if (pathsToRemove.length > 0) {
+                    await sClient.storage.from('expert-documents').remove(pathsToRemove)
+                  }
+                }
+              }
+            } catch {}
+          }
+
+          // Delete from expert_documents table if present (expert_id is text)
+          try {
+            const docFilters = [`expert_id.eq.${targetExpertId}`]
+            if (expertId && expertId !== targetExpertId) docFilters.push(`expert_id.eq.${expertId}`)
+            if (targetUserId) docFilters.push(`expert_id.eq.${targetUserId}`)
+            await sClient.from('expert_documents').delete().or(docFilters.join(','))
+          } catch {}
+
+          // Delete from expert_availability (expert_id is text)
+          try {
+            const availFilters = [`expert_id.eq.${targetExpertId}`]
+            if (expertId && expertId !== targetExpertId) availFilters.push(`expert_id.eq.${expertId}`)
+            await sClient.from('expert_availability').delete().or(availFilters.join(','))
+          } catch {}
+
+          // Delete expert record from Supabase 'experts' table
+          const { data: deletedRows, error: delErr } = await sClient
+            .from('experts')
+            .delete()
+            .eq('id', targetExpertId)
+            .select()
+
+          if (delErr) {
+            throw new Error(`Supabase delete failed: ${delErr.message}`)
+          }
+          if (!deletedRows || deletedRows.length === 0) {
+            throw new Error('Supabase delete affected 0 rows')
+          }
+
+          // Delete user and auth user safely
+          if (targetUserId && isUuid(targetUserId)) {
+            try {
+              await sClient.from('users').delete().eq('id', targetUserId)
+            } catch {}
+            try {
+              await sClient.auth.admin.deleteUser(targetUserId)
+            } catch {}
+          } else if (targetEmail) {
+            try {
+              await sClient.from('users').delete().ilike('email', targetEmail)
+            } catch {}
+            try {
+              const { data: { users } } = await sClient.auth.admin.listUsers()
+              const authUser = (users || []).find((u: any) => targetEmail && u.email?.toLowerCase() === targetEmail.toLowerCase())
+              if (authUser?.id) {
+                await sClient.auth.admin.deleteUser(authUser.id)
+              }
+            } catch {}
+          }
+
+          // Delete notifications
+          const notifTargets = [targetExpertId, expertId, targetUserId, targetEmail].filter(Boolean)
+          const notifFilters = notifTargets.map(t => `user_id.eq.${t}`).join(',')
+          if (notifFilters) {
+            try {
+              await sClient.from('notifications').delete().or(notifFilters)
+            } catch {}
+          }
+
+          const ch = sClient.channel('admin-kyc-desk')
+          await ch.send({
+            type: 'broadcast',
+            event: 'expert_deleted',
+            payload: {
+              expertId: targetExpertId,
+              email: targetEmail,
+              timestamp: new Date().toISOString()
+            }
+          }).catch(() => {})
+
+          // Update db.json only after Supabase succeeds
+          const current = readDb()
+          if (Array.isArray(current.experts)) {
+            current.experts = current.experts.filter((e: any) =>
+              e.id !== expertId && e.id !== targetExpertId && (!targetEmail || e.email?.toLowerCase() !== targetEmail.toLowerCase())
+            )
+          }
+          if (Array.isArray(current.pendingVerifications)) {
+            current.pendingVerifications = current.pendingVerifications.filter((p: any) =>
+              p.id !== expertId && p.id !== targetExpertId && (!targetEmail || p.email?.toLowerCase() !== targetEmail.toLowerCase())
+            )
+          }
+          if (Array.isArray(current.users)) {
+            current.users = current.users.filter((u: any) =>
+              u.id !== expertId && u.id !== targetUserId && (!targetEmail || u.email?.toLowerCase() !== targetEmail.toLowerCase())
+            )
+          }
+          if (current.expertDocuments) {
+            delete current.expertDocuments[expertId]
+            delete current.expertDocuments[targetExpertId]
+            if (targetUserId) delete current.expertDocuments[targetUserId]
+          }
+          if (Array.isArray(current.availabilities)) {
+            current.availabilities = current.availabilities.filter((a: any) => a.expertId !== expertId && a.expertId !== targetExpertId)
+          }
+
+          writeDb(current)
+
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ success: true, message: 'Profile permanently deleted' }))
+        } catch (err: any) {
+          res.statusCode = 500
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ success: false, error: err.message }))
+        }
+      })
+      return
+    }
+
+    // Endpoint: /api/experts
+    if (url === '/api/experts' || url.startsWith('/api/experts?')) {
+      if (req.method === 'GET') {
+        const db = readDb()
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify(db.experts || []))
         return
       }
     }
@@ -447,6 +1142,58 @@ function sharedDbPlugin(): Plugin {
         return
       }
 
+      // POST /api/availability/release (Undo lock on failed booking)
+      if (req.method === 'POST' && pathname === '/api/availability/release') {
+        let body = ''
+        req.on('data', (chunk: any) => { body += chunk })
+        req.on('end', async () => {
+          try {
+            const payload = JSON.parse(body || '{}')
+            const { slotId, bookingId } = payload
+            if (!slotId) {
+              res.statusCode = 400
+              res.end(JSON.stringify({ success: false, error: 'slotId is required' }))
+              return
+            }
+
+            const current = readDb()
+            const list: any[] = current.availabilities || []
+            const slot = list.find((a: any) => a.id === slotId)
+            if (slot) {
+              slot.status = 'AVAILABLE'
+              slot.bookingId = null
+              slot.clientId = null
+              slot.clientName = null
+              slot.updatedAt = new Date().toISOString()
+              writeDb(current)
+            }
+
+            try {
+              const { createClient } = await import('@supabase/supabase-js')
+              const sbUrl = process.env.VITE_SUPABASE_URL || 'https://oitxwcspkelduxbuczux.supabase.co'
+              const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9pdHh3Y3Nwa2VsZHV4YnVjenV4Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MjM5NjU2NCwiZXhwIjoyMTA3OTcyNTY0fQ.WGi0P4ENT5nhKPmp4zQN5VgmZ1twXLb4INXTSu1jxdw'
+              const sb = createClient(sbUrl, sbKey)
+              let q = sb.from('expert_availability').update({
+                status: 'AVAILABLE',
+                booking_id: null,
+                client_id: null,
+                client_name: null,
+                updated_at: new Date().toISOString()
+              }).eq('id', slotId)
+              if (bookingId) q = q.eq('booking_id', bookingId)
+              await q
+            } catch {}
+
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ success: true, availability: slot || { id: slotId, status: 'AVAILABLE' } }))
+          } catch (err: any) {
+            res.statusCode = 500
+            res.end(JSON.stringify({ success: false, error: err.message }))
+          }
+        })
+        return
+      }
+
       // POST /api/availability (single slot creation)
       if (req.method === 'POST' && pathname === '/api/availability') {
         let body = ''
@@ -515,8 +1262,9 @@ function sharedDbPlugin(): Plugin {
             }
 
             const nowIso = new Date().toISOString()
+            const existsWithId = payload.id && list.some(a => a.id === payload.id)
             const newSlot = {
-              id: payload.id || `avail-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+              id: (payload.id && !existsWithId) ? payload.id : `avail-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
               expertId,
               availabilityDate,
               startTime,
@@ -641,6 +1389,442 @@ function sharedDbPlugin(): Plugin {
 
         res.setHeader('Content-Type', 'application/json')
         res.end(JSON.stringify({ success: true }))
+        return
+      }
+    }
+
+    // Endpoint: /api/bookings (Protected Consultation Bookings API via Service Role)
+    if (url.startsWith('/api/bookings')) {
+      const parsedUrl = new URL(req.url, 'http://localhost:5173')
+      const pathname = parsedUrl.pathname
+
+      const getSbAdmin = async () => {
+        const { createClient } = await import('@supabase/supabase-js')
+        const sbUrl = process.env.VITE_SUPABASE_URL || 'https://oitxwcspkelduxbuczux.supabase.co'
+        const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9pdHh3Y3Nwa2VsZHV4YnVjenV4Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MjM5NjU2NCwiZXhwIjoyMTA3OTcyNTY0fQ.WGi0P4ENT5nhKPmp4zQN5VgmZ1twXLb4INXTSu1jxdw'
+        return createClient(sbUrl, sbKey)
+      }
+
+      // GET /api/bookings
+      if (req.method === 'GET' && pathname === '/api/bookings') {
+        try {
+          const clientId = parsedUrl.searchParams.get('clientId') || parsedUrl.searchParams.get('client_id') || ''
+          const clientEmail = (parsedUrl.searchParams.get('clientEmail') || parsedUrl.searchParams.get('client_email') || '').toLowerCase().trim()
+          const expertId = parsedUrl.searchParams.get('expertId') || parsedUrl.searchParams.get('expert_id') || ''
+          const expertEmail = (parsedUrl.searchParams.get('expertEmail') || parsedUrl.searchParams.get('expert_email') || '').toLowerCase().trim()
+          const status = parsedUrl.searchParams.get('status') || ''
+
+          const sb = await getSbAdmin()
+          let query = sb.from('bookings').select('*')
+
+          if (clientId && clientEmail) {
+            query = query.or(`client_id.eq.${clientId},client_email.ilike.${clientEmail}`)
+          } else if (clientId) {
+            query = query.eq('client_id', clientId)
+          } else if (clientEmail) {
+            query = query.ilike('client_email', clientEmail)
+          }
+
+          if (expertId && expertEmail) {
+            query = query.or(`expert_id.eq.${expertId},expert_email.ilike.${expertEmail}`)
+          } else if (expertId) {
+            query = query.eq('expert_id', expertId)
+          } else if (expertEmail) {
+            query = query.ilike('expert_email', expertEmail)
+          }
+
+          if (status) {
+            query = query.ilike('status', `%${status}%`)
+          }
+
+          query = query.order('created_at', { ascending: false })
+          const { data: bookings, error } = await query
+          if (error) throw error
+
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ success: true, data: bookings || [] }))
+          return
+        } catch (err: any) {
+          res.statusCode = 500
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ success: false, error: err.message }))
+          return
+        }
+      }
+
+      // POST /api/bookings
+      if (req.method === 'POST' && pathname === '/api/bookings') {
+        let body = ''
+        req.on('data', (chunk: any) => { body += chunk })
+        req.on('end', async () => {
+          try {
+            const bookingData = JSON.parse(body || '{}')
+            const userId = req.headers['x-user-id'] || bookingData.callerId || bookingData.clientId || ''
+            const userRole = (req.headers['x-user-role'] || bookingData.callerRole || bookingData.role || '').toLowerCase().trim()
+            const authHeader = req.headers['authorization'] || ''
+            const adminToken = req.headers['x-admin-token'] || req.headers['admin_token'] || ''
+            const isAdmin = userRole === 'admin' || (typeof authHeader === 'string' && authHeader.length > 10) || (typeof adminToken === 'string' && adminToken.length > 5)
+
+            // Security Check 1: User identity required
+            if (!isAdmin && !userId) {
+              res.statusCode = 401
+              res.setHeader('Content-Type', 'application/json')
+              res.end(JSON.stringify({ success: false, error: 'Unauthenticated: User identity is required to create a booking' }))
+              return
+            }
+
+            // Security Check 2: A client cannot insert with another client's id
+            if (!isAdmin && userId && bookingData.client_id && String(userId) !== String(bookingData.client_id)) {
+              res.statusCode = 403
+              res.setHeader('Content-Type', 'application/json')
+              res.end(JSON.stringify({ success: false, error: 'Forbidden: You cannot book on behalf of another client' }))
+              return
+            }
+
+            // Security Check 3: A client cannot set status 'accepted' on creation
+            if (!isAdmin && bookingData.status && ['accepted', 'Confirmed', 'Live', 'completed'].includes(bookingData.status)) {
+              res.statusCode = 400
+              res.setHeader('Content-Type', 'application/json')
+              res.end(JSON.stringify({ success: false, error: "Forbidden: New client consultations cannot be created with 'accepted' status" }))
+              return
+            }
+            bookingData.status = 'pending'
+
+            // FIX 3: NOT NULL check
+            if (!bookingData.topic || !bookingData.scheduled_date || !bookingData.scheduled_time || !bookingData.client_id || !bookingData.expert_id) {
+              res.statusCode = 400
+              res.setHeader('Content-Type', 'application/json')
+              res.end(JSON.stringify({ success: false, error: 'Missing required field: topic, scheduled_date, scheduled_time, client_id, and expert_id are required' }))
+              return
+            }
+
+            const sb = await getSbAdmin()
+
+            // FIX 6: Double-booking protection
+            const { data: existingActive } = await sb
+              .from('bookings')
+              .select('id, status')
+              .eq('expert_id', bookingData.expert_id)
+              .eq('scheduled_date', bookingData.scheduled_date)
+              .eq('scheduled_time', bookingData.scheduled_time)
+              .in('status', ['pending', 'accepted', 'Pending Expert Acceptance', 'Confirmed', 'Live'])
+
+            if (existingActive && existingActive.length > 0) {
+              res.statusCode = 409
+              res.setHeader('Content-Type', 'application/json')
+              res.end(JSON.stringify({
+                success: false,
+                code: '23505',
+                error: 'This slot was just booked, please choose another time'
+              }))
+              return
+            }
+
+            const { data: booking, error } = await sb
+              .from('bookings')
+              .insert(bookingData)
+              .select()
+              .single()
+
+            if (error) {
+              if (error.code === '23505' || String(error.message).includes('23505') || String(error.message).includes('unique constraint') || String(error.message).includes('idx_bookings_no_double_booking')) {
+                res.statusCode = 409
+                res.setHeader('Content-Type', 'application/json')
+                res.end(JSON.stringify({
+                  success: false,
+                  code: '23505',
+                  error: 'This slot was just booked, please choose another time'
+                }))
+                return
+              }
+              res.statusCode = 500
+              res.setHeader('Content-Type', 'application/json')
+              res.end(JSON.stringify({ success: false, error: error.message }))
+              return
+            }
+
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ success: true, booking }))
+          } catch (err: any) {
+            res.statusCode = 500
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ success: false, error: err.message }))
+          }
+        })
+        return
+      }
+
+      // PATCH /api/bookings/:id
+      if (req.method === 'PATCH' && pathname.startsWith('/api/bookings/')) {
+        const id = pathname.replace('/api/bookings/', '').trim()
+        let body = ''
+        req.on('data', (chunk: any) => { body += chunk })
+        req.on('end', async () => {
+          try {
+            const updatePayload = JSON.parse(body || '{}')
+            const userId = req.headers['x-user-id'] || updatePayload.callerId || ''
+            const userEmail = (req.headers['x-user-email'] || updatePayload.callerEmail || '').toLowerCase().trim()
+            const userRole = (req.headers['x-user-role'] || updatePayload.callerRole || updatePayload.role || '').toLowerCase().trim()
+            const authHeader = req.headers['authorization'] || ''
+            const adminToken = req.headers['x-admin-token'] || req.headers['admin_token'] || ''
+            const isAdmin = userRole === 'admin' || (typeof authHeader === 'string' && authHeader.length > 10) || (typeof adminToken === 'string' && adminToken.length > 5)
+
+            if (!isAdmin && !userId && !userEmail) {
+              res.statusCode = 401
+              res.setHeader('Content-Type', 'application/json')
+              res.end(JSON.stringify({ success: false, error: 'Unauthenticated: User identity is required to update booking' }))
+              return
+            }
+
+            const sb = await getSbAdmin()
+            const { data: existing, error: fetchErr } = await sb
+              .from('bookings')
+              .select('*')
+              .eq('id', id)
+              .maybeSingle()
+
+            if (fetchErr || !existing) {
+              res.statusCode = 404
+              res.setHeader('Content-Type', 'application/json')
+              res.end(JSON.stringify({ success: false, error: 'Booking not found' }))
+              return
+            }
+
+            if (!isAdmin) {
+              const isAssignedExpert = (userId && String(existing.expert_id) === String(userId)) ||
+                (userEmail && existing.expert_email && String(existing.expert_email).toLowerCase() === userEmail)
+
+              const isOwningClient = (userId && String(existing.client_id) === String(userId)) ||
+                (userEmail && existing.client_email && String(existing.client_email).toLowerCase() === userEmail)
+
+              if (userRole === 'expert' || isAssignedExpert) {
+                if (!isAssignedExpert) {
+                  res.statusCode = 403
+                  res.setHeader('Content-Type', 'application/json')
+                  res.end(JSON.stringify({ success: false, error: 'Forbidden: Experts can only update their own assigned consultations' }))
+                  return
+                }
+              } else if (userRole === 'client' || isOwningClient) {
+                if (!isOwningClient) {
+                  res.statusCode = 403
+                  res.setHeader('Content-Type', 'application/json')
+                  res.end(JSON.stringify({ success: false, error: "Forbidden: You cannot update another user's booking" }))
+                  return
+                }
+                if (updatePayload.status && ['accepted', 'completed', 'Confirmed', 'Live'].includes(updatePayload.status)) {
+                  res.statusCode = 403
+                  res.setHeader('Content-Type', 'application/json')
+                  res.end(JSON.stringify({ success: false, error: 'Forbidden: Clients cannot accept consultations' }))
+                  return
+                }
+              } else {
+                res.statusCode = 403
+                res.setHeader('Content-Type', 'application/json')
+                res.end(JSON.stringify({ success: false, error: 'Forbidden: Unauthorized to update this consultation' }))
+                return
+              }
+            }
+
+            const updateData = {
+              ...updatePayload,
+              updated_at: new Date().toISOString()
+            }
+
+            const { data: booking, error } = await sb
+              .from('bookings')
+              .update(updateData)
+              .eq('id', id)
+              .select()
+              .maybeSingle()
+
+            if (error) throw error
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ success: true, booking }))
+          } catch (err: any) {
+            res.statusCode = 500
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ success: false, error: err.message }))
+          }
+        })
+        return
+      }
+
+      // DELETE /api/bookings/:id
+      if (req.method === 'DELETE' && pathname.startsWith('/api/bookings/')) {
+        const id = pathname.replace('/api/bookings/', '').trim()
+        const userId = req.headers['x-user-id'] || ''
+        const userEmail = (req.headers['x-user-email'] || '').toLowerCase().trim()
+        const userRole = (req.headers['x-user-role'] || '').toLowerCase().trim()
+        const authHeader = req.headers['authorization'] || ''
+        const adminToken = req.headers['x-admin-token'] || req.headers['admin_token'] || ''
+        const isAdmin = userRole === 'admin' || (typeof authHeader === 'string' && authHeader.length > 10) || (typeof adminToken === 'string' && adminToken.length > 5)
+
+        if (!isAdmin && !userId && !userEmail) {
+          res.statusCode = 401
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ success: false, error: 'Unauthenticated: User identity is required to delete booking' }))
+          return
+        }
+
+        try {
+          const sb = await getSbAdmin()
+          if (!isAdmin) {
+            const { data: existing } = await sb.from('bookings').select('*').eq('id', id).maybeSingle()
+            if (!existing) {
+              res.statusCode = 404
+              res.setHeader('Content-Type', 'application/json')
+              res.end(JSON.stringify({ success: false, error: 'Booking not found' }))
+              return
+            }
+            const isOwningClient = (userId && String(existing.client_id) === String(userId)) ||
+              (userEmail && existing.client_email && String(existing.client_email).toLowerCase() === userEmail)
+            if (!isOwningClient) {
+              res.statusCode = 403
+              res.setHeader('Content-Type', 'application/json')
+              res.end(JSON.stringify({ success: false, error: 'Forbidden: Only admin or the booking client can delete this consultation' }))
+              return
+            }
+          }
+
+          const { error } = await sb.from('bookings').delete().eq('id', id)
+          if (error) throw error
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ success: true, message: 'Booking deleted successfully' }))
+        } catch (err: any) {
+          res.statusCode = 500
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ success: false, error: err.message }))
+        }
+        return
+      }
+    }
+
+    // Endpoint: /api/wallet (Authoritative Client Wallet Balance & Transactions)
+    if (url.startsWith('/api/wallet')) {
+      const parsedUrl = new URL(req.url, 'http://localhost:5173')
+      const pathname = parsedUrl.pathname
+
+      const getSbAdmin = async () => {
+        const { createClient } = await import('@supabase/supabase-js')
+        const sbUrl = process.env.VITE_SUPABASE_URL || 'https://oitxwcspkelduxbuczux.supabase.co'
+        const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9pdHh3Y3Nwa2VsZHV4YnVjenV4Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MjM5NjU2NCwiZXhwIjoyMTA3OTcyNTY0fQ.WGi0P4ENT5nhKPmp4zQN5VgmZ1twXLb4INXTSu1jxdw'
+        return createClient(sbUrl, sbKey)
+      }
+
+      if (req.method === 'GET' && pathname === '/api/wallet') {
+        const userId = parsedUrl.searchParams.get('userId') || ''
+        const userEmail = (parsedUrl.searchParams.get('userEmail') || '').toLowerCase().trim()
+
+        try {
+          const sb = await getSbAdmin()
+          let query = sb.from('wallet_transactions').select('*')
+          if (userEmail && userId && userEmail !== userId) {
+            query = query.or(`user_email.ilike.${userEmail},user_id.eq.${userId}`)
+          } else if (userEmail) {
+            query = query.ilike('user_email', userEmail)
+          } else if (userId) {
+            query = query.eq('user_id', userId)
+          }
+          query = query.order('created_at', { ascending: false })
+
+          const { data, error } = await query
+          if (error) throw error
+
+          let balance = 0
+          if (Array.isArray(data) && data.length > 0) {
+            data.forEach((tx: any) => {
+              const amt = Number(tx.amount) || 0
+              if ((tx.status || 'SUCCESS').toUpperCase() === 'SUCCESS') {
+                if (tx.type === 'CREDIT') balance += amt
+                else if (tx.type === 'DEBIT') balance -= amt
+              }
+            })
+            balance = Math.max(0, balance)
+          } else {
+            const db = readDb()
+            const kv = db.kv || {}
+            const kvBal = Number(kv[`client_wallet_${userEmail}`])
+            if (!isNaN(kvBal) && kvBal > 0) {
+              balance = kvBal
+            }
+          }
+
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ success: true, balance, transactions: data || [] }))
+          return
+        } catch (err: any) {
+          res.statusCode = 500
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ success: false, error: err.message }))
+          return
+        }
+      }
+
+      if (req.method === 'POST') {
+        let body = ''
+        req.on('data', (chunk: any) => { body += chunk })
+        req.on('end', async () => {
+          try {
+            const payload = JSON.parse(body || '{}')
+            const userId = payload.userId || payload.userEmail || ''
+            const userEmail = (payload.userEmail || '').toLowerCase().trim()
+            const userRole = payload.userRole || 'client'
+            const amount = Number(payload.amount) || 0
+            const type = pathname.includes('/deduct') ? 'DEBIT' : 'CREDIT'
+            const description = payload.description || (type === 'CREDIT' ? 'Wallet Top-up' : 'Consultation Booking Payment')
+
+            if (amount <= 0) {
+              res.statusCode = 400
+              res.setHeader('Content-Type', 'application/json')
+              res.end(JSON.stringify({ success: false, error: 'Amount must be greater than 0' }))
+              return
+            }
+
+            const sb = await getSbAdmin()
+            const txRecord = {
+              id: `tx-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+              user_id: userId,
+              user_email: userEmail,
+              user_role: userRole,
+              amount,
+              type,
+              status: 'SUCCESS',
+              description,
+              related_booking_id: payload.relatedBookingId || null,
+              related_project_review_id: payload.relatedProjectReviewId || null
+            }
+
+            const { data: inserted, error } = await sb.from('wallet_transactions').insert(txRecord).select().single()
+            if (error) throw error
+
+            const { data: allTx } = await sb.from('wallet_transactions').select('*').ilike('user_email', userEmail)
+            let newBal = 0
+            if (Array.isArray(allTx)) {
+              allTx.forEach((tx: any) => {
+                const a = Number(tx.amount) || 0
+                if ((tx.status || 'SUCCESS').toUpperCase() === 'SUCCESS') {
+                  if (tx.type === 'CREDIT') newBal += a
+                  else if (tx.type === 'DEBIT') newBal -= a
+                }
+              })
+              newBal = Math.max(0, newBal)
+            }
+
+            const db = readDb()
+            if (!db.kv) db.kv = {}
+            db.kv[`client_wallet_${userEmail}`] = String(newBal)
+            writeDb(db)
+
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ success: true, balance: newBal, transaction: inserted }))
+            return
+          } catch (err: any) {
+            res.statusCode = 500
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ success: false, error: err.message }))
+            return
+          }
+        })
         return
       }
     }
@@ -1858,8 +3042,8 @@ function sharedDbPlugin(): Plugin {
     }
 
 
-    // Endpoint: /api/documents (Upload, Retrieve, and Stream Documents)
-    if (url.startsWith('/api/documents')) {
+    // Endpoint: /api/documents and /api/expert-documents (Supabase Storage & DB Workflow)
+    if (url.startsWith('/api/documents') || url.startsWith('/api/expert-documents')) {
       const UPLOAD_DIR = path.resolve(__dirname, 'public', 'uploaded_docs')
       const SERVER_DIR = path.resolve(__dirname, 'server_docs')
       if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true })
@@ -1878,12 +3062,526 @@ function sharedDbPlugin(): Plugin {
         return 'application/octet-stream'
       }
 
+      const getSupabaseAdmin = async () => {
+        const { createClient } = await import('@supabase/supabase-js')
+        const sbUrl = process.env.VITE_SUPABASE_URL || 'https://oitxwcspkelduxbuczux.supabase.co'
+        const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9pdHh3Y3Nwa2VsZHV4YnVjenV4Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MjM5NjU2NCwiZXhwIjoyMTA3OTcyNTY0fQ.WGi0P4ENT5nhKPmp4zQN5VgmZ1twXLb4INXTSu1jxdw'
+        return createClient(sbUrl, sbKey)
+      }
+
+      const parsedUrl = new URL(req.url || '', 'http://localhost:5173')
+
+      // 1. GET /api/documents/signed-url or /api/expert-documents/signed-url
+      if (req.method === 'GET' && (parsedUrl.pathname === '/api/documents/signed-url' || parsedUrl.pathname === '/api/expert-documents/signed-url')) {
+        const filePath = parsedUrl.searchParams.get('filePath')
+        if (!filePath) {
+          res.statusCode = 400
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ success: false, error: 'filePath is required' }))
+          return
+        }
+        try {
+          const sb = await getSupabaseAdmin()
+          const { data, error } = await sb.storage.from('expert-documents').createSignedUrl(filePath, 3600)
+          if (!error && data?.signedUrl) {
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ success: true, signedUrl: data.signedUrl }))
+            return
+          }
+        } catch {}
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify({ success: true, signedUrl: `/uploaded_docs/${encodeURIComponent(path.basename(filePath))}` }))
+        return
+      }
+
+      // 2. GET /api/expert-documents
+      if (req.method === 'GET' && parsedUrl.pathname === '/api/expert-documents') {
+        const expertId = parsedUrl.searchParams.get('expertId')
+        if (!expertId) {
+          res.statusCode = 400
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ success: false, error: 'expertId is required' }))
+          return
+        }
+
+        let docsList: any[] = []
+        try {
+          const sb = await getSupabaseAdmin()
+          const { data, error } = await sb
+            .from('expert_documents')
+            .select('*')
+            .eq('expert_id', expertId)
+          if (!error && Array.isArray(data) && data.length > 0) {
+            docsList = data
+          }
+        } catch {}
+
+        if (docsList.length === 0) {
+          const db = readDb()
+          const fromDb = db.expertDocuments?.[expertId]
+          if (fromDb) {
+            docsList = Object.values(fromDb)
+          }
+        }
+
+        if (docsList.length === 0) {
+          try {
+            const sb = await getSupabaseAdmin()
+            const { data: exp } = await sb.from('experts').select('documents').or(getExpertFilter(expertId)).maybeSingle()
+            const items = exp?.documents?.items || {}
+            const typeMap: Record<string, string> = {
+              expCert: 'work_experience_cert',
+              offerLetter: 'offer_relieving_letter',
+              resume: 'executive_cv'
+            }
+            Object.entries(items).forEach(([legacyKey, item]: [string, any]) => {
+              if (item && (item.filePath || item.fileName)) {
+                const dt = typeMap[legacyKey] || legacyKey
+                docsList.push({
+                  id: item.id || `doc-${expertId}-${dt}`,
+                  expert_id: expertId,
+                  doc_type: dt,
+                  file_path: item.filePath || `${expertId}/${dt}/${item.fileName}`,
+                  file_name: item.fileName || `${dt}.pdf`,
+                  file_size: typeof item.fileSize === 'number' ? item.fileSize : 500000,
+                  mime_type: 'application/pdf',
+                  status: (item.status || 'pending').toLowerCase() === 'verified' ? 'verified' : (item.status || 'pending').toLowerCase() === 'rejected' ? 'rejected' : 'pending',
+                  admin_remark: item.adminRemark || item.rejectionReason || null,
+                  uploaded_at: item.uploadedAt || new Date().toISOString(),
+                  updated_at: item.updatedAt || new Date().toISOString()
+                })
+              }
+            })
+          } catch {}
+        }
+
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify({ success: true, documents: docsList }))
+        return
+      }
+
+      // 3. POST /api/expert-documents/upload or /api/documents/upload
+      if (req.method === 'POST' && (parsedUrl.pathname === '/api/expert-documents/upload' || parsedUrl.pathname === '/api/documents/upload')) {
+        const chunks: Buffer[] = []
+        req.on('data', (chunk: any) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+        req.on('end', async () => {
+          try {
+            const fullBuffer = Buffer.concat(chunks)
+            const sb = await getSupabaseAdmin()
+
+            let expertId = (req.headers['x-expert-id'] as string) || ''
+            let docType = (req.headers['x-doc-type'] as string) || ''
+            let fileName = req.headers['x-file-name'] ? decodeURIComponent(req.headers['x-file-name'] as string) : ''
+            let oldFilePath = req.headers['x-old-file-path'] ? decodeURIComponent(req.headers['x-old-file-path'] as string) : ''
+            let fileBuffer = fullBuffer
+
+            const contentType = req.headers['content-type'] || ''
+            if (contentType.includes('application/json')) {
+              try {
+                const jsonBody = JSON.parse(fullBuffer.toString('utf-8') || '{}')
+                expertId = jsonBody.expertId || expertId
+                docType = jsonBody.docType || jsonBody.documentType || docType
+                fileName = jsonBody.fileName || fileName
+                oldFilePath = jsonBody.oldFilePath || oldFilePath
+                if (jsonBody.fileData) {
+                  const base64Data = jsonBody.fileData.includes('base64,') ? jsonBody.fileData.split('base64,')[1] : jsonBody.fileData
+                  fileBuffer = Buffer.from(base64Data, 'base64')
+                }
+              } catch {}
+            }
+
+            if (!expertId || !docType || fileBuffer.length === 0) {
+              res.statusCode = 400
+              res.setHeader('Content-Type', 'application/json')
+              res.end(JSON.stringify({ success: false, error: 'expertId, docType, and valid PDF file data are required' }))
+              return
+            }
+
+            const timestamp = Date.now()
+            const sanitizedName = (fileName || `${docType}.pdf`)
+              .replace(/[^a-zA-Z0-9._-]/g, '_')
+              .replace(/\.pdf$/i, '')
+            const cleanFileName = `${sanitizedName}.pdf`
+            const storagePath = `${expertId}/${docType}/${timestamp}_${cleanFileName}`
+
+            // Remove old file if replacing
+            if (oldFilePath && oldFilePath !== storagePath) {
+              try {
+                await sb.storage.from('expert-documents').remove([oldFilePath])
+              } catch (rmErr) {
+                console.warn('[STORAGE] Note removing old file:', rmErr)
+              }
+            }
+
+            // Upload to Supabase Storage private bucket: expert-documents
+            console.log(`[STORAGE SERVICE] Uploading ${storagePath} (${fileBuffer.length} bytes)...`)
+            const { error: uploadErr } = await sb.storage
+              .from('expert-documents')
+              .upload(storagePath, fileBuffer, {
+                upsert: true,
+                contentType: 'application/pdf'
+              })
+
+            if (uploadErr) {
+              console.error('[STORAGE SERVICE] Supabase upload error:', uploadErr)
+              res.statusCode = 500
+              res.setHeader('Content-Type', 'application/json')
+              res.end(JSON.stringify({ success: false, error: uploadErr.message }))
+              return
+            }
+
+            // Generate signed URL
+            const { data: signedData } = await sb.storage
+              .from('expert-documents')
+              .createSignedUrl(storagePath, 3600)
+
+            // Upsert into expert_documents table
+            const docRecord: any = {
+              id: crypto.randomUUID(),
+              expert_id: expertId,
+              doc_type: docType,
+              file_path: storagePath,
+              file_name: fileName || `${docType}.pdf`,
+              file_size: fileBuffer.length,
+              mime_type: 'application/pdf',
+              status: 'pending',
+              admin_remark: null,
+              uploaded_at: new Date().toISOString(),
+              updated_at: new Date().toISOString()
+            }
+
+            try {
+              const { data: dbData } = await sb
+                .from('expert_documents')
+                .upsert(docRecord, { onConflict: 'expert_id,doc_type' })
+                .select()
+                .single()
+              if (dbData) Object.assign(docRecord, dbData)
+            } catch (dbErr) {
+              console.warn('[DB SERVICE] expert_documents upsert note:', dbErr)
+            }
+
+            // Update db.json
+            let isReSubmission = false
+            let newKycStatus = 'Pending Review'
+            let newVerStatus = 'pending'
+
+            try {
+              const db = readDb()
+              if (!db.expertDocuments) db.expertDocuments = {}
+              if (!db.expertDocuments[expertId]) db.expertDocuments[expertId] = {}
+              db.expertDocuments[expertId][docType] = docRecord
+
+              const existingExp = (db.experts || []).find((e: any) => e.id === expertId || e.user_id === expertId)
+              if (existingExp && (existingExp.status === 'Rejected' || existingExp.verificationStatus === 'rejected' || existingExp.rejected)) {
+                isReSubmission = true
+              }
+
+              newKycStatus = isReSubmission ? 'Pending Review (Re-submitted)' : 'Pending Review'
+              newVerStatus = isReSubmission ? 'pending_resubmitted' : 'pending'
+
+              if (Array.isArray(db.experts)) {
+                const exp = db.experts.find((e: any) => e.id === expertId || e.user_id === expertId)
+                if (exp) {
+                  if (!exp.documents) exp.documents = { items: {} }
+                  if (!exp.documents.items) exp.documents.items = {}
+                  const legacyKey = docType === 'work_experience_cert' ? 'expCert' : docType === 'offer_relieving_letter' ? 'offerLetter' : 'resume'
+                  exp.documents.items[legacyKey] = {
+                    id: docRecord.id,
+                    type: legacyKey,
+                    title: docRecord.file_name,
+                    status: 'pending',
+                    expertId,
+                    fileName: docRecord.file_name,
+                    fileSize: `${(fileBuffer.length / (1024 * 1024)).toFixed(1)} MB`,
+                    filePath: storagePath,
+                    uploadedAt: new Date().toISOString()
+                  }
+                  exp.documents[legacyKey] = docRecord.file_name
+                  exp.documents[docType] = docRecord
+                  exp.documents.items[docType] = docRecord
+                  exp.documents.kyc_status = newKycStatus
+                  exp.documents.status = newKycStatus
+                  exp.documents.verificationStatus = newVerStatus
+                  exp.documents.rejectionReason = null
+                  exp.verified = false
+                  exp.rejected = false
+                  exp.status = newKycStatus
+                  exp.verificationStatus = newVerStatus
+                  exp.rejectionReason = null
+                }
+              }
+
+              if (Array.isArray(db.pendingVerifications)) {
+                db.pendingVerifications = db.pendingVerifications.map((p: any) => {
+                  if (p.id === expertId || p.expertId === expertId) {
+                    return {
+                      ...p,
+                      status: newKycStatus,
+                      verificationStatus: newVerStatus,
+                      rejectionReason: null
+                    }
+                  }
+                  return p
+                })
+              }
+
+              writeDb(db)
+            } catch (jsonErr) {
+              console.warn('[DB_JSON] note:', jsonErr)
+            }
+
+            // Update Supabase experts table JSON documents
+            try {
+              const { data: expRow } = await sb.from('experts').select('id, documents, verificationStatus, status').or(getExpertFilter(expertId)).maybeSingle()
+              if (expRow) {
+                const curDocs = expRow.documents || {}
+                if (!curDocs.items) curDocs.items = {}
+                const legacyKey = docType === 'work_experience_cert' ? 'expCert' : docType === 'offer_relieving_letter' ? 'offerLetter' : 'resume'
+                curDocs.items[legacyKey] = {
+                  id: docRecord.id,
+                  type: legacyKey,
+                  title: docRecord.file_name,
+                  status: 'pending',
+                  expertId,
+                  fileName: docRecord.file_name,
+                  fileSize: fileBuffer.length,
+                  filePath: storagePath,
+                  uploadedAt: new Date().toISOString()
+                }
+                curDocs[legacyKey] = docRecord.file_name
+                curDocs[docType] = docRecord
+                curDocs.items[docType] = docRecord
+                curDocs.kyc_status = newKycStatus
+                curDocs.status = newKycStatus
+                curDocs.verificationStatus = newVerStatus
+                curDocs.rejectionReason = null
+
+                await sb.from('experts').update({
+                  documents: curDocs,
+                  verified: false,
+                  updated_at: new Date().toISOString()
+                }).eq('id', expRow.id)
+              }
+            } catch (expErr) {
+              console.warn('[SUPABASE] experts update note:', expErr)
+            }
+
+            // Broadcast realtime event to Admin queue
+            try {
+              const ch = sb.channel('admin-kyc-desk')
+              await ch.send({
+                type: 'broadcast',
+                event: 'document_uploaded',
+                payload: {
+                  expertId,
+                  docType,
+                  document: docRecord,
+                  fileName: docRecord.file_name,
+                  status: newKycStatus,
+                  timestamp: new Date().toISOString()
+                }
+              })
+            } catch {}
+
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({
+              success: true,
+              document: docRecord,
+              status: newKycStatus,
+              signedUrl: signedData?.signedUrl || null
+            }))
+          } catch (err: any) {
+            console.error('[STORAGE SERVICE] Upload exception:', err)
+            res.statusCode = 500
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ success: false, error: err.message }))
+          }
+        })
+        return
+      }
+
+      // 4. POST /api/expert-documents/delete
+      if (req.method === 'POST' && parsedUrl.pathname === '/api/expert-documents/delete') {
+        let body = ''
+        req.on('data', (chunk: any) => { body += chunk })
+        req.on('end', async () => {
+          try {
+            const payload = JSON.parse(body || '{}')
+            const { expertId, docType, filePath } = payload
+            const sb = await getSupabaseAdmin()
+
+            if (filePath) {
+              await sb.storage.from('expert-documents').remove([filePath]).catch(() => {})
+            }
+
+            try {
+              await sb.from('expert_documents').delete().match({ expert_id: expertId, doc_type: docType })
+            } catch {}
+
+            try {
+              const db = readDb()
+              if (db.expertDocuments?.[expertId]?.[docType]) {
+                delete db.expertDocuments[expertId][docType]
+              }
+              if (Array.isArray(db.experts)) {
+                db.experts = db.experts.map((e: any) => {
+                  if (e.id === expertId || e.user_id === expertId) {
+                    const curDocs = e.documents || {}
+                    const curItems = curDocs.items || {}
+                    delete curDocs[docType]
+                    delete curItems[docType]
+                    const legacyKey = docType === 'work_experience_cert' ? 'expCert' : docType === 'offer_relieving_letter' ? 'offerLetter' : 'resume'
+                    delete curDocs[legacyKey]
+                    delete curItems[legacyKey]
+                    return {
+                      ...e,
+                      status: 'Registered / Documents Pending',
+                      verificationStatus: 'pending_docs',
+                      documents: {
+                        ...curDocs,
+                        kyc_status: 'Registered / Documents Pending',
+                        status: 'Registered / Documents Pending',
+                        verificationStatus: 'pending_docs',
+                        items: curItems
+                      }
+                    }
+                  }
+                  return e
+                })
+              }
+              writeDb(db)
+            } catch {}
+
+            try {
+              const { data: expRow } = await sb.from('experts').select('id, documents').or(getExpertFilter(expertId)).maybeSingle()
+              if (expRow) {
+                const curDocs = expRow.documents || {}
+                const curItems = curDocs.items || {}
+                delete curDocs[docType]
+                delete curItems[docType]
+                const legacyKey = docType === 'work_experience_cert' ? 'expCert' : docType === 'offer_relieving_letter' ? 'offerLetter' : 'resume'
+                delete curDocs[legacyKey]
+                delete curItems[legacyKey]
+                await sb.from('experts').update({
+                  documents: {
+                    ...curDocs,
+                    kyc_status: 'Registered / Documents Pending',
+                    status: 'Registered / Documents Pending',
+                    verificationStatus: 'pending_docs',
+                    items: curItems
+                  },
+                  updated_at: new Date().toISOString()
+                }).eq('id', expRow.id)
+              }
+            } catch {}
+
+            try {
+              const ch = sb.channel('admin-kyc-desk')
+              await ch.send({
+                type: 'broadcast',
+                event: 'document_deleted',
+                payload: {
+                  expertId,
+                  docType,
+                  status: 'Registered / Documents Pending',
+                  timestamp: new Date().toISOString()
+                }
+              })
+            } catch {}
+
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ success: true, message: 'Document deleted successfully' }))
+          } catch (err: any) {
+            res.statusCode = 500
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ success: false, error: err.message }))
+          }
+        })
+        return
+      }
+
+      // 5. POST /api/expert-documents/update-status
+      if (req.method === 'POST' && parsedUrl.pathname === '/api/expert-documents/update-status') {
+        let body = ''
+        req.on('data', (chunk: any) => { body += chunk })
+        req.on('end', async () => {
+          try {
+            const payload = JSON.parse(body || '{}')
+            const { docId, expertId, docType, status, adminRemark } = payload
+            const sb = await getSupabaseAdmin()
+
+            let updatedDoc: any = null
+            try {
+              const { data } = await sb
+                .from('expert_documents')
+                .update({ status, admin_remark: adminRemark || null, updated_at: new Date().toISOString() })
+                .eq('id', docId)
+                .select()
+                .single()
+              if (data) updatedDoc = data
+            } catch {}
+
+            // Update db.json
+            try {
+              const db = readDb()
+              if (expertId && docType && db.expertDocuments?.[expertId]?.[docType]) {
+                db.expertDocuments[expertId][docType].status = status
+                db.expertDocuments[expertId][docType].admin_remark = adminRemark || null
+                db.expertDocuments[expertId][docType].updated_at = new Date().toISOString()
+                updatedDoc = db.expertDocuments[expertId][docType]
+                writeDb(db)
+              }
+            } catch {}
+
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ success: true, document: updatedDoc }))
+          } catch (err: any) {
+            res.statusCode = 500
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ success: false, error: err.message }))
+          }
+        })
+        return
+      }
+
+      // 6. POST /api/expert-documents/sync-record
+      if (req.method === 'POST' && parsedUrl.pathname === '/api/expert-documents/sync-record') {
+        let body = ''
+        req.on('data', (chunk: any) => { body += chunk })
+        req.on('end', async () => {
+          try {
+            const docRecord = JSON.parse(body || '{}')
+            const sb = await getSupabaseAdmin()
+            try {
+              await sb.from('expert_documents').upsert(docRecord, { onConflict: 'expert_id,doc_type' })
+            } catch {}
+
+            try {
+              const db = readDb()
+              if (!db.expertDocuments) db.expertDocuments = {}
+              if (!db.expertDocuments[docRecord.expert_id]) db.expertDocuments[docRecord.expert_id] = {}
+              db.expertDocuments[docRecord.expert_id][docRecord.doc_type] = docRecord
+              writeDb(db)
+            } catch {}
+
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ success: true, document: docRecord }))
+          } catch (err: any) {
+            res.statusCode = 500
+            res.setHeader('Content-Type', 'application/json')
+            res.end(JSON.stringify({ success: false, error: err.message }))
+          }
+        })
+        return
+      }
+
+      // 7. Legacy GET file fallback
       if (req.method === 'GET') {
-        const parsedUrl = new URL(req.url, 'http://localhost:5173')
         const key = parsedUrl.searchParams.get('key') || parsedUrl.searchParams.get('name') || parsedUrl.searchParams.get('id') || ''
         const raw = parsedUrl.searchParams.get('raw') === 'true'
         if (!key) {
-          const files = fs.readdirSync(UPLOAD_DIR)
+          const files = fs.existsSync(UPLOAD_DIR) ? fs.readdirSync(UPLOAD_DIR) : []
           res.setHeader('Content-Type', 'application/json')
           res.end(JSON.stringify({ success: true, files }))
           return
@@ -1926,50 +3624,6 @@ function sharedDbPlugin(): Plugin {
         res.statusCode = 404
         res.setHeader('Content-Type', 'application/json')
         res.end(JSON.stringify({ success: false, error: 'File not found' }))
-        return
-      }
-
-      if (req.method === 'POST') {
-        let body = ''
-        req.on('data', (chunk: any) => { body += chunk })
-        req.on('end', () => {
-          try {
-            const payload = JSON.parse(body || '{}')
-            const fileName = payload.fileName || payload.name || `doc_${Date.now()}.pdf`
-            const fileData = payload.fileData || payload.data || ''
-
-            if (fileData) {
-              let buffer: Buffer
-              if (fileData.startsWith('data:')) {
-                const base64Data = fileData.split(',')[1] || ''
-                buffer = Buffer.from(base64Data, 'base64')
-              } else {
-                buffer = Buffer.from(fileData, 'base64')
-              }
-
-              const safeName = path.basename(fileName)
-              fs.writeFileSync(path.join(UPLOAD_DIR, safeName), buffer)
-              fs.writeFileSync(path.join(SERVER_DIR, safeName), buffer)
-
-              if (payload.id) {
-                const ext = path.extname(safeName) || '.pdf'
-                const aliasName = `${path.basename(payload.id)}${ext}`
-                fs.writeFileSync(path.join(UPLOAD_DIR, aliasName), buffer)
-              }
-
-              const relativeUrl = `/uploaded_docs/${encodeURIComponent(safeName)}`
-              res.setHeader('Content-Type', 'application/json')
-              res.end(JSON.stringify({ success: true, fileName: safeName, url: relativeUrl }))
-              return
-            }
-
-            res.statusCode = 400
-            res.end(JSON.stringify({ success: false, error: 'Missing fileData' }))
-          } catch (err: any) {
-            res.statusCode = 500
-            res.end(JSON.stringify({ success: false, error: err.message }))
-          }
-        })
         return
       }
     }

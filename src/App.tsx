@@ -18,6 +18,19 @@ import confetti from "canvas-confetti";
 import { supabase } from "./supabaseClient";
 import { mongoDB, ExpertDoc, ExpertDocumentsRecord, ExpertDocumentItem, getDocFile } from "./mongoDBService";
 import { DocumentViewerModal, DocumentViewerItem } from "./components/DocumentViewerModal";
+import {
+  ExpertDocType,
+  ExpertDocumentItem as SupabaseExpertDoc,
+  REQUIRED_DOC_TYPES,
+  DOC_TYPE_META,
+  validateDocumentFile,
+  formatDocumentSize,
+  cleanupLegacyExpertDocsLocalStorage,
+  uploadSingleExpertDocument,
+  fetchExpertDocuments,
+  deleteExpertDocument,
+  getDocumentSignedUrl
+} from "./services/expertDocumentsService";
 import { processRazorpayPayment } from "./services/razorpayService";
 import { MetalButton } from "./components/ui/metal-button";
 import { NotificationCenter } from "./components/NotificationCenter";
@@ -35,10 +48,30 @@ import { MentoraBlogsPage } from "./components/MentoraBlogsPage";
 import { LandingBackgroundVideo } from "./components/LandingBackgroundVideo";
 import { Footer } from "./components/Footer";
 import { PremiumNavigationDock, NavItemConfig } from "./components/PremiumNavigationDock";
+import { fetchExpertDynamicStats } from "./services/reviewService";
 import { FlowWallpaper } from "./components/FlowWallpaper";
 import { ExpertBackgroundVideo } from "./components/ExpertBackgroundVideo";
 import { motion } from "framer-motion";
 import { GlobalButtonMagnification } from "./components/GlobalButtonMagnification";
+import {
+  createConsultationBooking,
+  fetchClientBookings,
+  fetchExpertBookings,
+  updateBookingStatus,
+  deleteBooking,
+  subscribeToBookingsRealtime,
+  normalizeBooking,
+  broadcastBookingDecision,
+  ConsultationBooking,
+  isClientRoleDeleted,
+  isExpertRoleDeleted,
+  recordRoleDeleted
+} from "./services/consultationBookingService";
+import {
+  fetchWalletBalance,
+  depositWallet,
+  deductWallet
+} from "./services/walletService";
 
 import mentoraLogoHorizontalLight from "./assets/mentora-logo-horizontal-light.png";
 import mentoraLogoHorizontalDark from "./assets/mentora-logo-horizontal-dark.png";
@@ -121,15 +154,24 @@ function handleImgError(e: React.SyntheticEvent<HTMLImageElement, Event>) {
 
 function sanitizeBookings(items: any[]): any[] {
   if (!Array.isArray(items)) return [];
-  return items.filter((b) => 
-    b && 
-    b.id !== "sess-1" && 
-    b.id !== "sess-2" && 
-    b.id !== "book-101" && 
-    b.id !== "book-102" &&
-    b.topic !== "GST filing review" && 
-    b.topic !== "Q3 marketing plan"
-  );
+  return items
+    .filter((b) => 
+      b && 
+      b.id !== "sess-1" && 
+      b.id !== "sess-2" && 
+      b.id !== "book-101" && 
+      b.id !== "book-102" &&
+      b.topic !== "GST filing review" && 
+      b.topic !== "Q3 marketing plan"
+    )
+    .map(b => {
+      // Eliminate any legacy/test fallback link so client never retains mock links
+      if (b && typeof b.meetUrl === "string" && b.meetUrl.includes("test-live-sync")) {
+        const { meetUrl, meet_link, meeting_link, meetCode, ...clean } = b;
+        return clean;
+      }
+      return b;
+    });
 }
 
 const INITIAL_UPCOMING_CLIENT: any[] = [];
@@ -320,12 +362,77 @@ function Pill({ children, tone = "brass" }: { children: React.ReactNode; tone?: 
   );
 }
 
-function Stars({ n }: { n: number }) {
+function Stars({ n, size = 12 }: { n: number; size?: number }) {
+  const safeRating = Math.max(0, Math.min(5, Number(n) || 0));
+  const isZero = safeRating === 0;
+
   return (
-    <span className="inline-flex items-center gap-0.5">
-      {Array.from({ length: 5 }).map((_, i) => (
-        <Star key={i} size={12} fill={i < Math.round(n) ? "#F59E0B" : "none"} stroke="#F59E0B" strokeWidth={1.5} className="drop-shadow-[0_0_4px_rgba(245,158,11,0.4)]" />
-      ))}
+    <span className="inline-flex items-center gap-0.5" title={`${safeRating.toFixed(1)} / 5.0`}>
+      {Array.from({ length: 5 }).map((_, i) => {
+        if (isZero) {
+          return (
+            <Star
+              key={i}
+              size={size}
+              fill="none"
+              stroke="#64748B"
+              strokeWidth={1.5}
+              className="text-slate-500 opacity-60"
+            />
+          );
+        }
+
+        const fillAmount = Math.max(0, Math.min(1, safeRating - i));
+
+        if (fillAmount >= 0.85) {
+          return (
+            <Star
+              key={i}
+              size={size}
+              fill="#F59E0B"
+              stroke="#F59E0B"
+              strokeWidth={1.5}
+              className="drop-shadow-[0_0_4px_rgba(245,158,11,0.4)] text-amber-500"
+            />
+          );
+        } else if (fillAmount <= 0.15) {
+          return (
+            <Star
+              key={i}
+              size={size}
+              fill="none"
+              stroke="#64748B"
+              strokeWidth={1.5}
+              className="text-slate-500 opacity-60"
+            />
+          );
+        } else {
+          const fillPercent = Math.round(fillAmount * 100);
+          return (
+            <span key={i} className="relative inline-flex items-center justify-center shrink-0" style={{ width: size, height: size }}>
+              <Star
+                size={size}
+                fill="none"
+                stroke="#64748B"
+                strokeWidth={1.5}
+                className="text-slate-500 opacity-60 absolute inset-0"
+              />
+              <span
+                className="absolute inset-y-0 left-0 overflow-hidden"
+                style={{ width: `${fillPercent}%` }}
+              >
+                <Star
+                  size={size}
+                  fill="#F59E0B"
+                  stroke="#F59E0B"
+                  strokeWidth={1.5}
+                  className="drop-shadow-[0_0_4px_rgba(245,158,11,0.4)] text-amber-500"
+                />
+              </span>
+            </span>
+          );
+        }
+      })}
     </span>
   );
 }
@@ -1835,6 +1942,45 @@ function ExpertProfileModal({ expert, onClose, onBook, theme = "dark" }: { exper
   const { getDomainName } = useDomains();
   const domainName = getDomainName(expert);
 
+  const [liveStats, setLiveStats] = useState<{
+    avgRating: number;
+    reviewCount: number;
+    completedConsultations: number;
+  }>({
+    avgRating: Number(expert.rating) || 0.0,
+    reviewCount: Number(expert.reviewCount) || 0,
+    completedConsultations: Number(expert.sessions ?? expert.total_sessions ?? expert.completedSessions) || 0
+  });
+
+  useEffect(() => {
+    let isMounted = true;
+    const loadStats = async () => {
+      try {
+        const stats = await fetchExpertDynamicStats(expert);
+        if (isMounted) {
+          setLiveStats(stats);
+        }
+      } catch {}
+    };
+
+    loadStats();
+
+    const handleUpdate = () => {
+      loadStats();
+    };
+
+    window.addEventListener("app_platform_reviews_updated", handleUpdate);
+    window.addEventListener("mongo_kv_updated", handleUpdate);
+    window.addEventListener("storage", handleUpdate);
+
+    return () => {
+      isMounted = false;
+      window.removeEventListener("app_platform_reviews_updated", handleUpdate);
+      window.removeEventListener("mongo_kv_updated", handleUpdate);
+      window.removeEventListener("storage", handleUpdate);
+    };
+  }, [expert.id, expert.email, expert.name]);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xl">
       <div 
@@ -1848,15 +1994,30 @@ function ExpertProfileModal({ expert, onClose, onBook, theme = "dark" }: { exper
         <div className={`flex items-start justify-between pb-5 border-b ${isLight ? "border-slate-100" : "border-white/10"}`}>
           <div className="flex gap-4 items-center">
             <div className="w-16 h-16 rounded-2xl flex items-center justify-center text-xl font-black shrink-0 bg-gradient-to-tr from-amber-500 to-amber-700 text-slate-950 shadow-md">
-              {expert.initials}
+              {expert.initials || expert.name?.slice(0, 2).toUpperCase() || "EX"}
             </div>
             <div>
               <div className="flex items-center gap-2">
                 <h2 style={{ ...display }} className={`text-2xl font-bold ${isLight ? "text-slate-900" : "text-white"}`}>{expert.name}</h2>
-                {expert.verified && <span title="Verified Professional History"><ShieldCheck size={18} className="text-emerald-500" /></span>}
+                {expert.verified ? (
+                  <span title="Verified Professional History" className="flex items-center gap-1 text-emerald-500">
+                    <ShieldCheck size={18} />
+                    <span className="text-[11px] font-bold">Verified Pro</span>
+                  </span>
+                ) : (
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border flex items-center gap-1 ${
+                    isLight ? "bg-amber-100 text-amber-800 border-amber-300" : "bg-amber-500/20 text-amber-400 border-amber-500/30"
+                  }`} title="Profile verification pending Admin Governance audit">
+                    <Clock size={11} /> Verification Pending
+                  </span>
+                )}
               </div>
-              <p className={`text-xs font-bold mt-0.5 ${isLight ? "text-amber-700" : "text-amber-400"}`}>{expert.title || domainName}</p>
-              <p className={`text-xs mt-0.5 ${isLight ? "text-slate-600" : "text-slate-400"}`}>{expert.years} Years Executive Experience · {domainName}</p>
+              <p className={`text-xs font-bold mt-0.5 ${isLight ? "text-amber-700" : "text-amber-400"}`}>{expert.title || domainName || "Executive Advisor"}</p>
+              <p className={`text-xs mt-0.5 ${isLight ? "text-slate-600" : "text-slate-400"}`}>
+                {expert.years && Number(expert.years) > 0 
+                  ? `${expert.years} Years Executive Experience` 
+                  : "Executive experience: Not provided yet"} · {domainName || "Advisory"}
+              </p>
             </div>
           </div>
 
@@ -1877,33 +2038,64 @@ function ExpertProfileModal({ expert, onClose, onBook, theme = "dark" }: { exper
           <div className={`flex items-center justify-between text-xs p-3.5 rounded-xl border ${
             isLight ? "bg-slate-50 border-slate-200 text-slate-800" : "bg-[#111A27] border-white/10 text-slate-300"
           }`}>
-            <div className="flex items-center gap-2">
-              <Stars n={expert.rating} />
-              <span className={`font-bold ${isLight ? "text-slate-900" : "text-white"}`}>{expert.rating} / 5.0 Rating</span>
-              <span className={isLight ? "text-slate-500" : "text-slate-400"}>({expert.sessions} Consultations Completed)</span>
+            <div className="flex flex-wrap items-center gap-2">
+              <Stars n={liveStats.avgRating} size={14} />
+              <span className={`font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
+                {liveStats.avgRating.toFixed(1)} / 5.0 Rating
+              </span>
+
+              {liveStats.reviewCount === 0 ? (
+                <>
+                  <span className={isLight ? "text-slate-500" : "text-slate-400"}>
+                    ({liveStats.completedConsultations} Consultations Completed)
+                  </span>
+                  <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium border ${
+                    isLight ? "bg-slate-200/70 text-slate-600 border-slate-300" : "bg-slate-800/80 text-slate-400 border-slate-700/60"
+                  }`}>
+                    New Expert – No reviews yet
+                  </span>
+                </>
+              ) : (
+                <span className={isLight ? "text-slate-500" : "text-slate-400"}>
+                  ({liveStats.reviewCount} {liveStats.reviewCount === 1 ? "Review" : "Reviews"}, {liveStats.completedConsultations} Consultation{liveStats.completedConsultations === 1 ? "" : "s"} Completed)
+                </span>
+              )}
             </div>
-            <div className={`font-bold text-base font-mono ${isLight ? "text-amber-700" : "text-amber-400"}`}>
-              ₹{expert.rate} <span className={`text-xs font-normal ${isLight ? "text-slate-500" : "text-slate-400"}`}>/ hr</span>
+            <div className={`font-bold text-base font-mono shrink-0 ${isLight ? "text-amber-700" : "text-amber-400"}`}>
+              ₹{expert.rate || expert.baseRate || 0} <span className={`text-xs font-normal ${isLight ? "text-slate-500" : "text-slate-400"}`}>/ hr</span>
             </div>
           </div>
 
-          <p className={`text-sm leading-relaxed ${isLight ? "text-slate-700" : "text-slate-300"}`}>{expert.bio}</p>
+          <p className={`text-sm leading-relaxed ${isLight ? "text-slate-700" : "text-slate-300"}`}>
+            {(() => {
+              const bioText = (expert.bio || '').trim();
+              if (!bioText || bioText.toLowerCase() === 'decades of executive expertise.' || bioText.toLowerCase() === 'executive expertise.') {
+                return <span className={`italic ${isLight ? 'text-slate-500' : 'text-slate-400'}`}>Executive bio not provided yet.</span>;
+              }
+              return bioText;
+            })()}
+          </p>
         </div>
 
         {/* Core Expertise Skills */}
         <div className="space-y-2.5">
           <p className={`text-[11px] font-bold uppercase tracking-wider ${isLight ? "text-slate-600" : "text-slate-400"}`}>Specialized Competencies</p>
           <div className="flex flex-wrap gap-2">
-            {expert.skills ? expert.skills.map((s: string, idx: number) => (
+            {expert.skills && expert.skills.length > 0 ? expert.skills.map((s: string, idx: number) => (
               <span key={idx} className={`text-xs px-3 py-1 rounded-full font-medium border ${
                 isLight ? "bg-slate-100 text-slate-700 border-slate-200" : "bg-white/[0.04] text-slate-300 border-white/10"
               }`}>
                 {s}
               </span>
             )) : (
-              <span className={`text-xs px-3 py-1 rounded-full font-medium border ${
-                isLight ? "bg-slate-100 text-slate-700 border-slate-200" : "bg-white/[0.04] text-slate-300 border-white/10"
-              }`}>{domainName}</span>
+              <div className="flex items-center gap-2">
+                <span className={`text-xs px-3 py-1 rounded-full font-medium border ${
+                  isLight ? "bg-slate-100 text-slate-700 border-slate-200" : "bg-white/[0.04] text-slate-300 border-white/10"
+                }`}>{domainName || "Advisory"}</span>
+                <span className={`text-xs italic ${isLight ? "text-slate-500" : "text-slate-400"}`}>
+                  (Additional competencies not provided yet)
+                </span>
+              </div>
             )}
           </div>
         </div>
@@ -1912,7 +2104,7 @@ function ExpertProfileModal({ expert, onClose, onBook, theme = "dark" }: { exper
         <div className="space-y-3">
           <p className={`text-[11px] font-bold uppercase tracking-wider ${isLight ? "text-slate-600" : "text-slate-400"}`}>Executive Work History & Leadership</p>
           <div className="space-y-2">
-            {expert.experience ? expert.experience.map((exp: any, idx: number) => (
+            {expert.experience && expert.experience.length > 0 ? expert.experience.map((exp: any, idx: number) => (
               <div key={idx} className={`p-3.5 rounded-xl border flex justify-between items-center ${
                 isLight ? "bg-slate-50 border-slate-200 text-slate-800" : "bg-[#111A27] border-white/10 text-white"
               }`}>
@@ -1924,10 +2116,9 @@ function ExpertProfileModal({ expert, onClose, onBook, theme = "dark" }: { exper
               </div>
             )) : (
               <div className={`p-3.5 rounded-xl border text-xs ${
-                isLight ? "bg-slate-50 border-slate-200 text-slate-800" : "bg-[#111A27] border-white/10 text-slate-300"
+                isLight ? "bg-slate-50 border-slate-200 text-slate-500" : "bg-[#111A27] border-white/10 text-slate-400"
               }`}>
-                <p className={`font-bold ${isLight ? "text-slate-900" : "text-white"}`}>{domainName} Senior Executive</p>
-                <p className={`text-[11px] ${isLight ? "text-slate-500" : "text-slate-400"}`}>30+ years in corporate leadership roles.</p>
+                <p className="italic">Work history and leadership background not provided yet.</p>
               </div>
             )}
           </div>
@@ -1954,7 +2145,7 @@ function ExpertProfileModal({ expert, onClose, onBook, theme = "dark" }: { exper
               Close Dossier
             </Button3D>
             <Button3D variant="brass" size="sm" onClick={() => { onClose(); onBook(expert); }}>
-              Book Advisory Call (₹{expert.rate}/hr)
+              Book Advisory Call (₹{expert.rate || expert.baseRate || 0}/hr)
             </Button3D>
           </div>
         </div>
@@ -2282,13 +2473,31 @@ function BookingModal({ expert, onClose, onBookSuccess, walletBalance, theme = "
         availabilitySlotId: chosenSlot.id
       };
 
+      // FIX 2: Await persistence in onBookSuccess before closing modal or triggering confetti!
+      const bookSuccessResult = await onBookSuccess(newBooking, price);
+      if (bookSuccessResult && bookSuccessResult.success === false) {
+        setIsSubmitting(false);
+        setConflictError(bookSuccessResult.error || "Booking failed to save. Please choose another time.");
+        if (chosenSlot?.id) {
+          try {
+            await mongoDB.releaseAvailability(chosenSlot.id, bookingId);
+          } catch {}
+        }
+        await loadAvailabilities();
+        return;
+      }
+
       setIsSubmitting(false);
-      onBookSuccess(newBooking, price);
       confetti({ particleCount: 70, spread: 60, origin: { y: 0.6 } });
       onClose();
     } catch (err: any) {
       setIsSubmitting(false);
       setConflictError(err.message || "Failed to confirm booking due to concurrency conflict.");
+      if (chosenSlot?.id) {
+        try {
+          await mongoDB.releaseAvailability(chosenSlot.id, bookingId);
+        } catch {}
+      }
       await loadAvailabilities();
     }
   };
@@ -2892,64 +3101,12 @@ function Landing({ setPage, onOpenAuth, experts, theme = "dark", onToggleTheme, 
 
   const FEATURED_ADVISORS: (ExpertDoc | { id: string; name: string; title: string; field: string; years: number; rate: number; rating: number; sessions: number; img: string; company?: string })[] = (experts && experts.length > 0)
     ? experts.filter(e => 
-        e.featuredOnLanding !== false && 
         e.verified === true && 
         e.verificationStatus !== "pending" && 
         e.verificationStatus !== "rejected" && 
-        !(e as any).rejected && 
-        e.documents?.status !== "Pending Audit" &&
-        e.documents?.status !== "Rejected"
+        !(e as any).rejected
       )
-    : [
-        {
-          id: "exp-1",
-          name: "Sunita Rao",
-          title: "Former Chief Financial Officer (Ex-CFO)",
-          field: "Finance & Taxation",
-          years: 34,
-          rate: 750,
-          rating: 4.9,
-          sessions: 128,
-          img: "https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=300&auto=format&fit=crop&q=80",
-          company: "Tata Capital",
-        },
-        {
-          id: "exp-6",
-          name: "Ravi Subramaniam",
-          title: "Senior Advocate & Board Legal Advisor",
-          field: "Legal & Compliance",
-          years: 38,
-          rate: 950,
-          rating: 4.8,
-          sessions: 73,
-          img: "https://images.unsplash.com/photo-1560250097-0b93528c311a?w=300&auto=format&fit=crop&q=80",
-          company: "Khaitan & Co Chambers",
-        },
-        {
-          id: "exp-5",
-          name: "Anjali Menon",
-          title: "Senior Mathematics Pedagogy Specialist",
-          field: "School Mathematics",
-          years: 27,
-          rate: 400,
-          rating: 4.9,
-          sessions: 210,
-          img: "https://images.unsplash.com/photo-1580894732413-80c749a0a033?w=300&auto=format&fit=crop&q=80",
-          company: "Delhi Public School",
-        },
-        {
-          id: "exp-2",
-          name: "Krishnan Iyer",
-          title: "Former VP Human Resources",
-          field: "HR & Talent",
-          years: 29,
-          rate: 650,
-          rating: 4.8,
-          sessions: 96,
-          img: "https://images.unsplash.com/photo-1519085360753-af0119f7cbe7?w=300&auto=format&fit=crop&q=80",
-          company: "Infosys BPM",
-        },
-      ];
+    : [];
 
   const filteredAdvisors = activeCategory === "All" 
     ? FEATURED_ADVISORS 
@@ -3362,8 +3519,8 @@ function Landing({ setPage, onOpenAuth, experts, theme = "dark", onToggleTheme, 
           
           {/* Floating Executive Card 1 (Admin Top Hero Spotlight) */}
           {(() => {
-            const card1 = experts?.find(e => e.heroSpotlight && e.heroPosition === "top") 
-              || experts?.find(e => e.id === "exp-6") 
+            const card1 = experts?.find(e => e.verified && e.heroSpotlight && e.heroPosition === "top") 
+              || experts?.find(e => e.verified && e.id === "exp-6") 
               || { name: "Ravi Subramaniam", field: "Legal & Compliance", years: 38, rate: 950, rating: 4.8, id: "exp-6" };
             
             return (
@@ -3397,8 +3554,8 @@ function Landing({ setPage, onOpenAuth, experts, theme = "dark", onToggleTheme, 
 
                 <div className={`mt-3 pt-2.5 border-t ${isLight ? "border-slate-100" : "border-white/10"} flex items-center justify-between text-xs`}>
                   <div className="flex items-center gap-1.5">
-                    <Stars n={card1.rating || 4.8} />
-                    <span className="font-bold text-xs" style={{ color: isLight ? "#0F172A" : "#FFFFFF" }}>{card1.rating || 4.8}</span>
+                    <Stars n={card1.rating || 0} />
+                    <span className="font-bold text-xs" style={{ color: isLight ? "#0F172A" : "#FFFFFF" }}>{(Number(card1.rating) || 0).toFixed(1)}</span>
                   </div>
                   <span className="font-bold font-mono text-sm" style={{ color: isLight ? "#B45309" : "#FBBF24" }}>₹{card1.rate}/hr</span>
                 </div>
@@ -3408,9 +3565,9 @@ function Landing({ setPage, onOpenAuth, experts, theme = "dark", onToggleTheme, 
 
           {/* Floating Executive Card 2 (Admin Bottom Hero Spotlight) */}
           {(() => {
-            const card2 = experts?.find(e => e.heroSpotlight && e.heroPosition === "bottom") 
-              || experts?.find(e => e.id === "exp-5") 
-              || { name: "Anjali Menon", field: "School Mathematics", years: 27, rate: 400, rating: 4.9, id: "exp-5" };
+            const card2 = experts?.find(e => e.verified && e.heroSpotlight && e.heroPosition === "bottom") 
+              || experts?.find(e => e.verified && e.id === "exp-5") 
+              || { name: "Anjali Menon", field: "School Mathematics", years: 27, rate: 400, rating: 0, id: "exp-5" };
 
             return (
               <div
@@ -3443,8 +3600,8 @@ function Landing({ setPage, onOpenAuth, experts, theme = "dark", onToggleTheme, 
 
                 <div className={`mt-3 pt-2.5 border-t ${isLight ? "border-slate-100" : "border-white/10"} flex items-center justify-between text-xs`}>
                   <div className="flex items-center gap-1.5">
-                    <Stars n={card2.rating || 4.9} />
-                    <span className="font-bold text-xs" style={{ color: isLight ? "#0F172A" : "#FFFFFF" }}>{card2.rating || 4.9}</span>
+                    <Stars n={card2.rating || 0} />
+                    <span className="font-bold text-xs" style={{ color: isLight ? "#0F172A" : "#FFFFFF" }}>{(Number(card2.rating) || 0).toFixed(1)}</span>
                   </div>
                   <span className="font-bold font-mono text-sm" style={{ color: isLight ? "#0284C7" : "#38BDF8" }}>₹{card2.rate}/hr</span>
                 </div>
@@ -3767,8 +3924,10 @@ function Landing({ setPage, onOpenAuth, experts, theme = "dark", onToggleTheme, 
               <div className={`pt-3.5 mt-4 border-t space-y-3 ${isLight ? "border-slate-100" : "border-white/10"}`}>
                 <div className="flex items-center justify-between text-xs">
                   <div className="flex items-center gap-1.5">
-                    <Stars n={adv.rating} />
-                    <span className={`font-bold text-xs ${isLight ? "text-slate-800" : "text-white"}`}>{adv.rating}</span>
+                    <Stars n={adv.rating || 0} />
+                    <span className={`font-bold text-xs ${isLight ? "text-slate-800" : "text-white"}`}>
+                      {adv.rating && Number(adv.rating) > 0 ? Number(adv.rating).toFixed(1) : "0.0"}
+                    </span>
                   </div>
                   <div className="flex items-baseline gap-0.5 font-mono">
                     <span className={`text-xs font-bold ${isLight ? "text-amber-600" : "text-amber-400"}`}>₹</span>
@@ -4163,6 +4322,16 @@ function Landing({ setPage, onOpenAuth, experts, theme = "dark", onToggleTheme, 
 /* ---------------------------------------------------------------
    AUTHENTICATION MODAL / PAGE (Strict MongoDB Registration First Flow)
 ---------------------------------------------------------------- */
+function normalizeRole(r?: string | null): "client" | "expert" | "admin" {
+  if (!r) return "client";
+  const clean = String(r).trim().toLowerCase();
+  if (clean === "expert" || clean === "senior_expert" || clean === "senior expert" || clean === "professional") {
+    return "expert";
+  }
+  if (clean === "admin") return "admin";
+  return "client";
+}
+
 function AuthPage({ 
   onClose, 
   onSuccessLogin, 
@@ -4207,76 +4376,244 @@ function AuthPage({
       return;
     }
 
-    if (mode === "signup") {
-      if (role === "expert") {
-        if (baseRate < 0 || baseRate > 1000) {
-          alert("⚠️ Base Hourly Rate must be between ₹0 and ₹1,000.");
+    try {
+      if (mode === "signup") {
+        const cleanRole = normalizeRole(role);
+        if (cleanRole === "expert") {
+          if (baseRate < 0 || baseRate > 1000) {
+            alert("⚠️ Base Hourly Rate must be between ₹0 and ₹1,000.");
+            return;
+          }
+        }
+        const safeBaseRate = Math.max(0, Math.min(1000, Number(baseRate) || 0));
+
+        // 1. REGISTER FLOW IN MONGODB / BACKEND
+        const res = await mongoDB.registerUser({
+          role: cleanRole as any,
+          email: email.trim().toLowerCase(),
+          password,
+          name: name || (cleanRole === "client" ? "Northwind Client" : "Sunita Rao"),
+          phone: phone || "",
+          company: company || (cleanRole === "client" ? "Northwind Retail Pvt Ltd" : ""),
+          title: title || (cleanRole === "expert" ? "Senior Executive Advisor" : ""),
+          field,
+          years,
+          baseRate: safeBaseRate,
+          bio: bio || (cleanRole === "client" ? "Seeking corporate advisory." : "Decades of executive expertise.")
+        });
+
+        if (!res.success) {
+          const errMsg = res.message || res.error || 'Unable to register';
+          console.error("Registration error:", errMsg, res);
+          alert(`❌ Registration Error: ${errMsg}`);
           return;
         }
-      }
-      const safeBaseRate = Math.max(0, Math.min(1000, Number(baseRate) || 0));
 
-      // 1. REGISTER FLOW IN MONGODB
-      const res = await mongoDB.registerUser({
-        role: role as any,
-        email,
-        password,
-        name: name || (role === "client" ? "Northwind Client" : "Sunita Rao"),
-        phone: phone || "",
-        company: company || (role === "client" ? "Northwind Retail Pvt Ltd" : ""),
-        title: title || (role === "expert" ? "Senior Executive Advisor" : ""),
-        field,
-        years,
-        baseRate: safeBaseRate,
-        bio: bio || (role === "client" ? "Seeking corporate advisory." : "Decades of executive expertise.")
-      });
+        // Establish Supabase session in browser if available
+        try {
+          await supabase.auth.signInWithPassword({
+            email: email.trim().toLowerCase(),
+            password
+          });
+        } catch (supaErr) {
+          console.warn("Supabase session note after signup:", supaErr);
+        }
 
-      if (!res.success) {
-        alert(`❌ Registration Error: ${res.message || res.error || 'Unable to register'}`);
-        return;
-      }
+        alert(`✅ ${res.message || 'Account registered successfully.'}`);
+        confetti({ particleCount: 60, spread: 60, origin: { y: 0.5 } });
+        
+        const assignedRole = normalizeRole(res.user?.role || cleanRole);
+        if (assignedRole === "admin") {
+          const token = res.token || (res.user as any)?.token;
+          if (token) {
+            try {
+              localStorage.setItem("admin_token", token);
+              sessionStorage.setItem("admin_token", token);
+            } catch {}
+          }
+        }
+        onSuccessLogin(assignedRole, res.user || { email: email.trim().toLowerCase(), role: assignedRole, name });
+      } else {
+        // 2. SIGN IN FLOW VIA SUPABASE AUTH (WITH BACKEND ADMIN FALLBACK)
+        const cleanEmail = email.trim().toLowerCase();
+        const ADMIN_EMAILS = [
+          'kushwahaashwani12@gmail.com',
+          'kushwaahaashwani12@gmail.com',
+          'kushwaashwani12@gmail.com'
+        ];
+        const isAdminTarget = ADMIN_EMAILS.includes(cleanEmail);
 
-      alert(`✅ ${res.message || 'Account registered successfully.'}`);
-      confetti({ particleCount: 60, spread: 60, origin: { y: 0.5 } });
-      
-      const assignedRole = res.user?.role || role;
-      if (assignedRole === "admin") {
-        const token = res.token || (res.user as any)?.token;
-        if (token) {
+        let data: any = null;
+        let error: any = null;
+        let userProfile: any = null;
+
+        // First attempt Supabase Auth
+        try {
+          const supaRes = await supabase.auth.signInWithPassword({
+            email: cleanEmail,
+            password
+          });
+          data = supaRes.data;
+          error = supaRes.error;
+        } catch (err: any) {
+          error = err;
+        }
+
+        // If Supabase Auth fails, attempt backend / MongoDB authentication (crucial for Admin credentials)
+        if (error) {
           try {
-            localStorage.setItem("admin_token", token);
-            sessionStorage.setItem("admin_token", token);
+            const authRes = await mongoDB.authenticateUser(cleanEmail, password);
+            if (authRes && authRes.success) {
+              error = null;
+              userProfile = authRes.user;
+            }
+          } catch (mErr) {
+            console.warn("MongoDB fallback auth error:", mErr);
+          }
+        }
+
+        if (error) {
+          const errMsg = error.message || 'Invalid login credentials';
+          console.error("Sign-In failed:", error);
+          alert(`⚠️ Sign-In Failed: ${errMsg}`);
+          return;
+        }
+
+        // Fetch user profile from MongoDB / local storage using Supabase user ID or email
+        if (!userProfile) {
+          try {
+            const dbRes = await fetch('/api/db');
+            if (dbRes.ok) {
+              const dbData = await dbRes.json();
+              userProfile = (dbData.users || []).find((u: any) =>
+                String(u.email || '').toLowerCase() === cleanEmail || (data?.user?.id && u.id === data.user.id)
+              );
+              if (!userProfile && Array.isArray(dbData.experts)) {
+                const foundExp = dbData.experts.find((e: any) =>
+                  String(e.email || '').toLowerCase() === cleanEmail || (data?.user?.id && e.id === data.user.id)
+                );
+                if (foundExp) {
+                  userProfile = { ...foundExp, role: 'expert' };
+                }
+              }
+            }
+          } catch (dbErr) {
+            console.warn("Local DB fetch error:", dbErr);
+          }
+        }
+
+        if (!userProfile) {
+          try {
+            const { data: supaUser } = await supabase
+              .from('users')
+              .select('*')
+              .eq('email', cleanEmail)
+              .maybeSingle();
+            if (supaUser) userProfile = supaUser;
+          } catch (supaErr) {
+            console.warn("Supabase users table query error:", supaErr);
+          }
+        }
+
+        if (!userProfile) {
+          try {
+            const { data: supaExpert } = await supabase
+              .from('expert_profiles')
+              .select('*')
+              .eq('email', cleanEmail)
+              .maybeSingle();
+            if (supaExpert) userProfile = { ...supaExpert, role: 'expert' };
           } catch {}
         }
-      }
-      onSuccessLogin(assignedRole, res.user);
-    } else {
-      // 2. SIGN IN FLOW WITH BACKEND MONGODB VALIDATION & AUTOMATIC ROLE DETECTION
-      const authRes = await mongoDB.authenticateUser(email, password);
 
-      if (!authRes.success) {
-        const failMessage = authRes.message || authRes.error || 'Unable to sign in';
-        alert(`⚠️ Sign-In Failed: ${failMessage}`);
-        if (String(failMessage).includes("MUST REGISTER FIRST")) {
-          setMode("signup");
-        }
-        return;
-      }
-
-      alert(`✅ Welcome Back! Signed in successfully.`);
-      confetti({ particleCount: 50, spread: 50, origin: { y: 0.5 } });
-
-      const assignedRole = authRes.user?.role || role;
-      if (assignedRole === "admin") {
-        const token = authRes.token || (authRes.user as any)?.token;
-        if (token) {
+        if (!userProfile) {
           try {
-            localStorage.setItem("admin_token", token);
-            sessionStorage.setItem("admin_token", token);
+            const { data: supaExp } = await supabase
+              .from('experts')
+              .select('*')
+              .eq('email', cleanEmail)
+              .maybeSingle();
+            if (supaExp) userProfile = { ...supaExp, role: 'expert' };
           } catch {}
         }
+
+        // Determine saved role from user profile or Supabase user_metadata first (Point 5)
+        const savedUserRole = userProfile?.role || data?.user?.user_metadata?.role || (data?.user?.app_metadata as any)?.role;
+        const normalizedSavedRole = savedUserRole ? normalizeRole(savedUserRole) : null;
+        const fallbackRole = normalizeRole(role || "client");
+        const isUserAdmin = isAdminTarget || normalizedSavedRole === "admin" || data?.user?.user_metadata?.role === "admin";
+
+        const assignedRole = isUserAdmin
+          ? "admin"
+          : (normalizedSavedRole || fallbackRole);
+
+        // Create profile object if it doesn't exist
+        if (!userProfile) {
+          userProfile = {
+            id: data?.user?.id || `usr-${Date.now()}`,
+            email: cleanEmail,
+            name: data?.user?.user_metadata?.full_name || data?.user?.user_metadata?.name || (isUserAdmin ? "Ashwani Kushwaha" : assignedRole === "client" ? "Northwind Client" : "Sunita Rao"),
+            full_name: data?.user?.user_metadata?.full_name || data?.user?.user_metadata?.name || (isUserAdmin ? "Ashwani Kushwaha" : assignedRole === "client" ? "Northwind Client" : "Sunita Rao"),
+            role: assignedRole,
+            phone: data?.user?.user_metadata?.phone || "",
+            company: data?.user?.user_metadata?.company || (assignedRole === "client" ? "Northwind Retail Pvt Ltd" : ""),
+            title: data?.user?.user_metadata?.title || (assignedRole === "expert" ? "Senior Executive Advisor" : ""),
+            field: data?.user?.user_metadata?.field || (assignedRole === "expert" ? field : "Finance & Taxation"),
+            bio: data?.user?.user_metadata?.bio || (assignedRole === "client" ? "Seeking corporate advisory." : "Decades of executive expertise.")
+          };
+
+          try {
+            await supabase.from('users').insert({
+              id: data?.user?.id,
+              email: cleanEmail,
+              full_name: userProfile.name,
+              role: userProfile.role,
+              phone: userProfile.phone || null
+            });
+          } catch {}
+        }
+
+        alert(`✅ Welcome Back! Signed in successfully.`);
+        confetti({ particleCount: 50, spread: 50, origin: { y: 0.5 } });
+
+        if (assignedRole === "admin") {
+          const token = userProfile?.token || (data?.session as any)?.access_token || (data?.user as any)?.token || "admin-session-token";
+          if (token) {
+            try {
+              localStorage.setItem("admin_token", token);
+              sessionStorage.setItem("admin_token", token);
+              localStorage.setItem("admin_user_role", "admin");
+              localStorage.setItem("current_user_role", "admin");
+              localStorage.setItem("current_admin_page", "owner");
+            } catch {}
+          }
+        }
+        if (assignedRole === "expert" || userProfile?.role === "expert") {
+          try {
+            const { data: supaExp } = await supabase
+              .from('experts')
+              .select('*')
+              .eq('email', cleanEmail)
+              .maybeSingle();
+            if (supaExp) {
+              const isVerified = Boolean(supaExp.verified === true);
+              const status = isVerified ? 'approved' : (supaExp.verificationStatus || supaExp.documents?.verificationStatus || 'pending');
+              userProfile = {
+                ...userProfile,
+                ...supaExp,
+                role: 'expert',
+                verified: isVerified,
+                is_verified: isVerified,
+                verificationStatus: status
+              };
+            }
+          } catch {}
+        }
+        onSuccessLogin(assignedRole, { ...userProfile, role: assignedRole });
       }
-      onSuccessLogin(assignedRole, authRes.user);
+    } catch (err: any) {
+      console.error("Auth submit error:", err);
+      alert(`❌ Authentication Error: ${err?.message || 'An unexpected error occurred. Please try again.'}`);
     }
   };
 
@@ -4365,6 +4702,19 @@ function AuthPage({
               </div>
             )}
 
+            {mode === "signup" && (
+              <div>
+                <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Phone Number</label>
+                <input
+                  type="tel"
+                  value={phone}
+                  onChange={(e) => setPhone(e.target.value)}
+                  placeholder="+91 98765 43210"
+                  className="w-full mt-1.5 px-3.5 py-2.5 text-xs rounded-xl outline-none border border-white/10 bg-[#111A27] text-white placeholder-slate-500 focus:border-amber-500/60 transition-colors font-mono"
+                />
+              </div>
+            )}
+
             {mode === "signup" && role === "client" && (
               <div>
                 <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Company / Organization Name</label>
@@ -4431,7 +4781,18 @@ function AuthPage({
                   />
                 </div>
 
-                <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="text-[11px] font-semibold text-slate-400">Company / Organization</label>
+                  <input
+                    type="text"
+                    value={company}
+                    onChange={(e) => setCompany(e.target.value)}
+                    placeholder="e.g. TATA Group, ICICI Bank"
+                    className="w-full mt-1.5 px-3.5 py-2 text-xs rounded-xl outline-none border border-white/10 bg-[#111A27] text-white placeholder-slate-500 focus:border-amber-500/60"
+                  />
+                </div>
+
+                <div className="grid grid-cols-3 gap-2.5">
                   <div>
                     <label className="text-[11px] font-semibold text-slate-400">Expertise Field</label>
                     <select
@@ -4446,7 +4807,19 @@ function AuthPage({
                   </div>
 
                   <div>
-                    <label className="text-[11px] font-semibold text-slate-400">Base Hourly Rate (₹)</label>
+                    <label className="text-[11px] font-semibold text-slate-400">Experience (Yrs)</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={60}
+                      value={years}
+                      onChange={(e) => setYears(Number(e.target.value) || 0)}
+                      className="w-full mt-1.5 px-3 py-2 text-xs rounded-xl outline-none border border-white/10 bg-[#111A27] text-white font-mono"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[11px] font-semibold text-slate-400">Base Rate (₹/hr)</label>
                     <input
                       type="number"
                       min={0}
@@ -4471,7 +4844,7 @@ function AuthPage({
             )}
 
             <Button3D full type="submit" variant="brass" className="mt-4">
-              <Save size={14} /> {mode === "signup" ? `Register Account & Save to MongoDB` : `Sign In with MongoDB Credentials`}
+              <Save size={14} /> {mode === "signup" ? `Register Account` : `Sign In`}
             </Button3D>
           </form>
 
@@ -4527,12 +4900,15 @@ function ClientPage({
     return 0;
   });
 
+  const clientEmailClean = (clientProfile?.email || '').toLowerCase().trim();
+  const clientIdClean = String(clientProfile?.id || '').toLowerCase().trim();
+
   const [upcoming, setUpcoming] = useState<any[]>(() => {
     const saved = localStorage.getItem(storageKey);
     if (!saved) return [];
     try {
       const parsed = JSON.parse(saved);
-      const cleaned = sanitizeBookings(parsed);
+      const cleaned = sanitizeBookings(parsed).filter(b => b && b.id && !b.deletedByClient && !isClientRoleDeleted(b.id, clientProfile?.email));
       if (cleaned.length !== parsed.length) {
         localStorage.setItem(storageKey, JSON.stringify(cleaned));
       }
@@ -4543,64 +4919,410 @@ function ClientPage({
   });
 
   useEffect(() => {
-    const refreshUpcoming = async () => {
-      // 1. Fast local read
-      const savedUpcoming = localStorage.getItem(storageKey);
-      if (savedUpcoming) {
+    // Centralized decision handler for Client Portal: updates state, active storageKey, and all client keys
+    const applyBookingDecision = (detail: any) => {
+      if (!detail) return;
+      const targetId = String(detail.bookingId || detail.id || '');
+      if (!targetId) return;
+      const newStatus = detail.status || detail.decision || 'accepted';
+      const expertName = detail.expertName || detail.expert_name || detail.expert;
+      const meetUrl = detail.meetUrl || detail.meet_link || detail.meeting_link || '';
+      const codeMatch = meetUrl ? meetUrl.match(/meet\.google\.com\/([a-z0-9-]+)/i) : null;
+      const meetCode = codeMatch ? codeMatch[1] : (detail.meetCode || (meetUrl ? meetUrl.split("/").pop() : ''));
+      const isDone = newStatus.toLowerCase().includes('complete') || detail.completed === true;
+      const isLiveNow = !isDone && (newStatus.toLowerCase().includes('live') || detail.isLive === true);
+
+      // Soft-delete guard: if hidden in Client Portal, do NOT resurrect
+      if (isClientRoleDeleted(targetId, clientEmailClean)) {
+        console.log('[CLIENT PORTAL] Booking is hidden/deleted by client, skipping update:', targetId);
+        return;
+      }
+
+      console.log('⚡ [CLIENT PORTAL] Applying real-time booking update:', { targetId, newStatus, expertName, meetUrl, meetCode, isLive: isLiveNow, completed: isDone });
+
+      setUpcoming(prev => {
+        const idx = prev.findIndex(b => b && String(b.id) === targetId);
+        let next: any[];
+        if (idx >= 0) {
+          next = [...prev];
+          next[idx] = {
+            ...next[idx],
+            ...detail,
+            status: newStatus,
+            expert: expertName || next[idx].expert,
+            meetUrl: meetUrl || next[idx].meetUrl || '',
+            meet_link: meetUrl || next[idx].meet_link || '',
+            meetCode: meetCode || next[idx].meetCode || '',
+            isLive: isLiveNow,
+            completed: isDone
+          };
+        } else {
+          next = [{
+            id: targetId,
+            topic: detail.topic || 'Consultation',
+            status: newStatus,
+            expert: expertName || 'Expert',
+            when: detail.when || 'Scheduled Time',
+            clientEmail: detail.clientEmail || '',
+            meetUrl: meetUrl,
+            meet_link: meetUrl,
+            meetCode: meetCode,
+            isLive: isLiveNow,
+            completed: isDone
+          }, ...prev];
+        }
+
         try {
-          const parsed = JSON.parse(savedUpcoming);
-          const cleaned = sanitizeBookings(parsed);
-          if (cleaned.length !== parsed.length) {
-            localStorage.setItem(storageKey, JSON.stringify(cleaned));
-          }
-          setUpcoming(cleaned);
-        } catch {
-          setUpcoming([]);
-        }
-      } else {
-        setUpcoming([]);
-      }
+          localStorage.setItem(storageKey, JSON.stringify(next));
+          mongoDB.syncKv(storageKey, next);
+        } catch {}
+        return next;
+      });
 
-      const savedWallet = localStorage.getItem(walletStorageKey);
-      if (savedWallet !== null) {
-        const num = Number(savedWallet);
-        if (!isNaN(num)) {
-          setWalletBalance(num);
-        }
-      }
-
-      // 2. Authoritative sync from MongoDB KV backend
+      // Update ALL client_upcoming_* keys in localStorage to prevent any stale cache overwrite
       try {
-        const serverUpcoming = await mongoDB.getKv(storageKey);
-        if (Array.isArray(serverUpcoming)) {
-          const cleaned = sanitizeBookings(serverUpcoming);
-          const localNow = localStorage.getItem(storageKey);
-          if (JSON.stringify(cleaned) !== localNow) {
-            localStorage.setItem(storageKey, JSON.stringify(cleaned));
-            setUpcoming(cleaned);
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key && key.startsWith("client_upcoming_")) {
+            const raw = localStorage.getItem(key);
+            if (raw) {
+              const list = JSON.parse(raw);
+              if (Array.isArray(list)) {
+                let changed = false;
+                const updated = list.map((b: any) => {
+                  if (b && String(b.id) === targetId) {
+                    changed = true;
+                    return {
+                      ...b,
+                      ...detail,
+                      status: newStatus,
+                      expert: expertName || b.expert,
+                      meetUrl: meetUrl || b.meetUrl || '',
+                      meet_link: meetUrl || b.meet_link || '',
+                      meetCode: meetCode || b.meetCode || '',
+                      isLive: isLiveNow,
+                      completed: isDone
+                    };
+                  }
+                  return b;
+                });
+                if (changed) {
+                  localStorage.setItem(key, JSON.stringify(updated));
+                  mongoDB.syncKv(key, updated);
+                }
+              }
+            }
           }
         }
-        const serverWallet = await mongoDB.getKv(walletStorageKey);
-        if (serverWallet !== null && serverWallet !== undefined) {
-          const num = Number(serverWallet);
-          if (!isNaN(num)) {
-            localStorage.setItem(walletStorageKey, String(num));
-            setWalletBalance(num);
-          }
-        }
-        refreshDomains().catch(() => {});
       } catch {}
     };
 
+    // 1. Initial Authoritative Fetch from Supabase bookings table
+    const loadSupabaseBookings = async () => {
+      try {
+        const localBookingIds: string[] = [];
+        try {
+          const raw = localStorage.getItem(storageKey);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) {
+              parsed.forEach((b: any) => { if (b && b.id) localBookingIds.push(String(b.id)); });
+            }
+          }
+          for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k && k.startsWith("client_upcoming_")) {
+              const r = localStorage.getItem(k);
+              if (r) {
+                const arr = JSON.parse(r);
+                if (Array.isArray(arr)) {
+                  arr.forEach((b: any) => { if (b && b.id) localBookingIds.push(String(b.id)); });
+                }
+              }
+            }
+          }
+        } catch {}
+
+        const rawSbBookings = await fetchClientBookings(clientProfile?.id, clientProfile?.email, localBookingIds);
+        const sbBookings = rawSbBookings.filter(b => !b.deletedByClient && !isClientRoleDeleted(b.id, clientEmailClean));
+
+        if (sbBookings.length > 0) {
+          setUpcoming(prev => {
+            const sbMap = new Map<string, any>();
+            sbBookings.forEach(b => sbMap.set(String(b.id), b));
+
+            // Merge with prev: Supabase status is single source of truth
+            const merged = prev
+              .filter(p => p && p.id && !isClientRoleDeleted(p.id, clientEmailClean) && !p.deletedByClient)
+              .map(p => {
+                if (p && p.id && sbMap.has(String(p.id))) {
+                  const sbB = sbMap.get(String(p.id));
+                  const realMeetUrl = sbB.meet_link || sbB.meeting_link || sbB.meetUrl || '';
+                  const codeMatch = realMeetUrl.match(/meet\.google\.com\/([a-z0-9-]+)/i);
+                  const realMeetCode = codeMatch ? codeMatch[1] : (realMeetUrl ? realMeetUrl.split("/").pop() : '');
+                  return {
+                    ...p,
+                    ...sbB,
+                    status: sbB.status || p.status,
+                    expert: sbB.expert || p.expert,
+                    expertEmail: sbB.expertEmail || p.expertEmail,
+                    meetUrl: realMeetUrl,
+                    meet_link: realMeetUrl,
+                    meetCode: realMeetCode
+                  };
+                }
+                return p;
+              });
+
+            // Also include any bookings from Supabase that weren't in prev yet
+            sbBookings.forEach(b => {
+              if (!merged.some(m => String(m.id) === String(b.id))) {
+                merged.push(b);
+              }
+            });
+
+            try {
+              localStorage.setItem(storageKey, JSON.stringify(merged));
+              mongoDB.syncKv(storageKey, merged);
+            } catch {}
+            return merged;
+          });
+        }
+      } catch (err) {
+        console.warn('[CLIENT PAGE] Supabase initial load note:', err);
+      }
+    };
+
+    loadSupabaseBookings();
+
+    // 2. Real-time Subscription to Supabase bookings table on dedicated client channel
+    const unsubRealtime = subscribeToBookingsRealtime({
+      channelName: 'client-portal-bookings-realtime',
+      onInsert: (newBooking) => {
+        if (newBooking.deletedByClient || isClientRoleDeleted(newBooking.id, clientEmailClean)) {
+          return;
+        }
+        const bEmail = (newBooking.client_email || newBooking.clientEmail || '').toLowerCase().trim();
+        const bId = String(newBooking.client_id || newBooking.clientId || '').toLowerCase().trim();
+        if ((clientEmailClean && bEmail === clientEmailClean) || (clientIdClean && bId === clientIdClean)) {
+          setUpcoming(prev => {
+            if (prev.some(b => String(b.id) === String(newBooking.id))) return prev;
+            const next = [newBooking, ...prev];
+            localStorage.setItem(storageKey, JSON.stringify(next));
+            return next;
+          });
+        }
+      },
+      onUpdate: (updatedBooking) => {
+        console.log('[CLIENT REALTIME] Status updated on client session:', updatedBooking);
+        if (updatedBooking.deletedByClient || isClientRoleDeleted(updatedBooking.id, clientEmailClean)) {
+          setUpcoming(prev => {
+            const next = prev.filter(b => String(b.id) !== String(updatedBooking.id));
+            try {
+              localStorage.setItem(storageKey, JSON.stringify(next));
+              mongoDB.syncKv(storageKey, next);
+            } catch {}
+            return next;
+          });
+          return;
+        }
+
+        const meetLink = updatedBooking.meet_link || updatedBooking.meeting_link || updatedBooking.meetUrl || '';
+        const codeMatch = meetLink.match(/meet\.google\.com\/([a-z0-9-]+)/i);
+        const meetCode = codeMatch ? codeMatch[1] : (meetLink ? meetLink.split("/").pop() : '');
+
+        applyBookingDecision({
+          bookingId: updatedBooking.id,
+          id: updatedBooking.id,
+          status: updatedBooking.status,
+          decision: updatedBooking.status,
+          expertName: updatedBooking.expert_name || updatedBooking.expert,
+          clientEmail: updatedBooking.client_email || updatedBooking.clientEmail,
+          topic: updatedBooking.topic,
+          meetUrl: meetLink,
+          meet_link: meetLink,
+          meetCode: meetCode,
+          isLive: updatedBooking.status?.toLowerCase().includes('live') || updatedBooking.isLive,
+          completed: updatedBooking.status?.toLowerCase().includes('complete') || updatedBooking.completed
+        });
+      },
+      onDelete: (deletedId) => {
+        setUpcoming(prev => {
+          const next = prev.filter(b => String(b.id) !== String(deletedId));
+          try {
+            localStorage.setItem(storageKey, JSON.stringify(next));
+            mongoDB.syncKv(storageKey, next);
+          } catch {}
+          return next;
+        });
+      }
+    });
+
+    // 3. Web API Native BroadcastChannel for instant cross-tab sync
+    let bc: BroadcastChannel | null = null;
+    let bcUpdates: BroadcastChannel | null = null;
+    try {
+      if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+        bc = new BroadcastChannel('mentora_booking_decisions');
+        bc.onmessage = (event) => {
+          console.log('[CLIENT BROADCASTCHANNEL] Decision received:', event.data);
+          applyBookingDecision(event.data);
+        };
+        bcUpdates = new BroadcastChannel('mentora_booking_updates');
+        bcUpdates.onmessage = (event) => {
+          console.log('[CLIENT BROADCASTCHANNEL] Update received:', event.data);
+          applyBookingDecision(event.data);
+        };
+      }
+    } catch {}
+
+    // 4. Cross-tab Storage Event Listener
+    const handleStorageEvent = (e: StorageEvent) => {
+      if ((e.key === 'mentora_last_booking_decision' || e.key === 'mentora_last_booking_update') && e.newValue) {
+        try {
+          const decision = JSON.parse(e.newValue);
+          applyBookingDecision(decision);
+        } catch {}
+      } else if (e.key && e.key.startsWith('client_upcoming_')) {
+        refreshUpcoming();
+      }
+    };
+    window.addEventListener('storage', handleStorageEvent);
+
+    // 5. Same-window custom event listener
+    const handleCustomBookingDecision = (e: any) => {
+      applyBookingDecision(e.detail);
+    };
+    window.addEventListener('booking_decision_updated', handleCustomBookingDecision);
+    window.addEventListener('booking_updated', handleCustomBookingDecision);
+
+    // 6. Polling & synchronization fallback (authoritative Supabase & backend sync)
+    const refreshUpcoming = async () => {
+      // Fast local read for cached view
+      const savedUpcoming = localStorage.getItem(storageKey);
+      let localList: any[] = [];
+      if (savedUpcoming) {
+        try {
+          const parsed = JSON.parse(savedUpcoming);
+          localList = sanitizeBookings(parsed);
+          if (localList.length !== parsed.length) {
+            localStorage.setItem(storageKey, JSON.stringify(localList));
+          }
+        } catch {}
+      }
+
+      // Merge from all client_upcoming_* keys to prevent missing bookings
+      try {
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key && key.startsWith("client_upcoming_") && key !== storageKey) {
+            const raw = localStorage.getItem(key);
+            if (raw) {
+              const other = JSON.parse(raw);
+              if (Array.isArray(other)) {
+                other.forEach((ob: any) => {
+                  if (!ob || !ob.id) return;
+                  const idx = localList.findIndex(l => String(l.id) === String(ob.id));
+                  const oStatus = (ob.status || '').toLowerCase();
+                  if (idx >= 0) {
+                    const lStatus = (localList[idx].status || '').toLowerCase();
+                    if ((oStatus.includes('accept') || oStatus.includes('reject')) && !lStatus.includes('accept') && !lStatus.includes('reject')) {
+                      localList[idx] = { ...localList[idx], ...ob, status: ob.status };
+                      localStorage.setItem(storageKey, JSON.stringify(localList));
+                    }
+                  } else if (oStatus.includes('accept') || oStatus.includes('reject') || oStatus.includes('pending')) {
+                    localList.push(ob);
+                    localStorage.setItem(storageKey, JSON.stringify(localList));
+                  }
+                });
+              }
+            }
+          }
+        }
+      } catch {}
+
+      // Authoritative Supabase fetch for client's bookings
+      try {
+        const localIds = localList.map(b => String(b.id)).filter(Boolean);
+        const sbBookings = await fetchClientBookings(clientProfile?.id, clientProfile?.email, localIds);
+        const validSbBookings = (sbBookings || []).filter(b => b && b.id && !b.deletedByClient && !isClientRoleDeleted(b.id, clientEmailClean));
+
+        if (validSbBookings.length > 0) {
+          setUpcoming(prev => {
+            const sbMap = new Map<string, any>();
+            validSbBookings.forEach(b => sbMap.set(String(b.id), b));
+
+            const baseList = prev.length > 0 ? prev : localList;
+            const merged = baseList
+              .filter(p => p && p.id && !isClientRoleDeleted(p.id, clientEmailClean) && !p.deletedByClient)
+              .map(p => {
+                if (p && p.id && sbMap.has(String(p.id))) {
+                  const sbB = sbMap.get(String(p.id));
+                  const realMeetUrl = sbB.meet_link || sbB.meeting_link || sbB.meetUrl || '';
+                  const codeMatch = realMeetUrl.match(/meet\.google\.com\/([a-z0-9-]+)/i);
+                  const realMeetCode = codeMatch ? codeMatch[1] : (realMeetUrl ? realMeetUrl.split("/").pop() : '');
+                  return {
+                    ...p,
+                    ...sbB,
+                    status: sbB.status || p.status,
+                    expert: sbB.expert || p.expert,
+                    expertEmail: sbB.expertEmail || p.expertEmail,
+                    meetUrl: realMeetUrl,
+                    meet_link: realMeetUrl,
+                    meetCode: realMeetCode
+                  };
+                }
+                return p;
+              });
+
+            validSbBookings.forEach(b => {
+              if (!merged.some(m => String(m.id) === String(b.id))) {
+                merged.push(b);
+              }
+            });
+
+            try {
+              localStorage.setItem(storageKey, JSON.stringify(merged));
+              mongoDB.syncKv(storageKey, merged);
+            } catch {}
+            return merged;
+          });
+        } else if (localList.length > 0) {
+          setUpcoming(localList);
+        }
+      } catch (sbErr) {
+        if (localList.length > 0) setUpcoming(localList);
+      }
+
+      // Authoritative Supabase & Backend Wallet Balance Fetch
+      try {
+        const savedWalletRaw = localStorage.getItem(walletStorageKey);
+        const localBalNum = savedWalletRaw !== null ? Number(savedWalletRaw) : undefined;
+        const walletRes = await fetchWalletBalance(clientProfile?.id, clientProfile?.email, localBalNum);
+        if (typeof walletRes.balance === 'number') {
+          setWalletBalance(walletRes.balance);
+          try {
+            localStorage.setItem(walletStorageKey, String(walletRes.balance));
+          } catch {}
+        }
+      } catch {}
+
+      refreshDomains().catch(() => {});
+    };
+
     refreshUpcoming();
-    window.addEventListener("storage", refreshUpcoming);
     window.addEventListener("focus", refreshUpcoming);
     window.addEventListener("mongo_db_updated", refreshUpcoming);
     window.addEventListener("mongo_kv_updated", refreshUpcoming);
-    const interval = setInterval(refreshUpcoming, 1500);
+    const interval = setInterval(refreshUpcoming, 5000);
 
     return () => {
-      window.removeEventListener("storage", refreshUpcoming);
+      unsubRealtime();
+      if (bc) bc.close();
+      if (bcUpdates) bcUpdates.close();
+      window.removeEventListener("storage", handleStorageEvent);
+      window.removeEventListener("booking_decision_updated", handleCustomBookingDecision);
+      window.removeEventListener("booking_updated", handleCustomBookingDecision);
       window.removeEventListener("focus", refreshUpcoming);
       window.removeEventListener("mongo_db_updated", refreshUpcoming);
       window.removeEventListener("mongo_kv_updated", refreshUpcoming);
@@ -4670,35 +5392,130 @@ function ClientPage({
   const [reviewRating, setReviewRating] = useState(5);
   const [reviewComment, setReviewComment] = useState("");
 
-  const handleSubmittingClientReview = (e: React.FormEvent) => {
+  const handleSubmittingClientReview = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!reviewComment.trim()) {
       alert("Please enter review comments before submitting.");
       return;
     }
+
     try {
       const raw = localStorage.getItem("app_platform_reviews");
       let current: any[] = [];
       if (raw) {
         try { current = JSON.parse(raw); } catch {}
       }
-      const targetExp = experts.find((e: any) => e.name?.toLowerCase() === reviewExpertName.toLowerCase());
+
+      const targetExp = experts.find((e: any) => 
+        e.name?.toLowerCase() === reviewExpertName.toLowerCase() ||
+        e.id === reviewExpertName ||
+        e.email?.toLowerCase() === reviewExpertName.toLowerCase()
+      );
+
+      // Find completed sessions for this client & expert to link review
+      const completedSessionsForExp = upcoming.filter((b: any) => 
+        (b.status === "Completed" || b.completed === true) &&
+        (
+          !reviewExpertName || 
+          b.expert?.toLowerCase() === reviewExpertName.toLowerCase() ||
+          b.expertEmail?.toLowerCase() === targetExp?.email?.toLowerCase()
+        )
+      );
+
+      const effectiveSessionId = reviewSessionId || completedSessionsForExp[0]?.id || `session-completed-${Date.now()}`;
+
+      // Check if this completed session has already been reviewed
+      const alreadyReviewed = current.some((r: any) => 
+        (r.sessionId && r.sessionId === effectiveSessionId) ||
+        (r.session_id && r.session_id === effectiveSessionId)
+      );
+
+      if (alreadyReviewed) {
+        alert("A rating has already been submitted for this consultation session.");
+        return;
+      }
+
       const newRev = {
         id: `rev-${Date.now()}`,
         clientName: clientProfile?.name || "Corporate Client",
         clientAvatar: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80",
-        expertName: reviewExpertName,
+        clientId: clientProfile?.id || clientProfile?.email || "client-1",
+        clientEmail: clientProfile?.email || "",
+        expertName: targetExp?.name || reviewExpertName,
         expertEmail: targetExp?.email || "",
+        expertId: targetExp?.id || "",
+        sessionId: effectiveSessionId,
         rating: reviewRating,
         comment: reviewComment.trim(),
         date: new Date().toISOString().split("T")[0],
-        status: "pending",
-        visibleToExpert: false,
-        featuredOnLanding: false
+        status: "approved",
+        visibleToExpert: true,
+        featuredOnLanding: true
       };
+
+      // 1. Submit to server API
+      try {
+        await fetch("/api/reviews", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expertId: targetExp?.id || "",
+            expertEmail: targetExp?.email || "",
+            expertName: targetExp?.name || reviewExpertName,
+            clientId: clientProfile?.id || clientProfile?.email || "client-1",
+            clientEmail: clientProfile?.email || "",
+            clientName: clientProfile?.name || "Corporate Client",
+            sessionId: effectiveSessionId,
+            rating: reviewRating,
+            comment: reviewComment.trim()
+          })
+        });
+      } catch (apiErr) {
+        console.warn("Server reviews API sync note:", apiErr);
+      }
+
+      // 2. Update local stores
       const updated = [newRev, ...current];
       localStorage.setItem("app_platform_reviews", JSON.stringify(updated));
       mongoDB.syncKv("app_platform_reviews", updated);
+
+      // 3. Calculate new dynamic average rating
+      const expReviews = updated.filter((r: any) => 
+        (targetExp?.id && (r.expertId === targetExp.id || r.expert_id === targetExp.id)) ||
+        (targetExp?.email && r.expertEmail?.toLowerCase() === targetExp.email.toLowerCase()) ||
+        (r.expertName?.toLowerCase() === reviewExpertName.toLowerCase())
+      );
+      const validRatings = expReviews.map((r: any) => Number(r.rating)).filter((n: number) => !isNaN(n) && n >= 1 && n <= 5);
+      const newAvgRating = validRatings.length > 0 
+        ? Math.round((validRatings.reduce((a, b) => a + b, 0) / validRatings.length) * 10) / 10 
+        : 0.0;
+      const newReviewCount = validRatings.length;
+
+      // 4. Update in-place on targetExp object if present
+      if (targetExp) {
+        targetExp.rating = newAvgRating;
+        targetExp.sessions = Math.max(1, (targetExp.sessions || 0) + (reviewSessionId ? 0 : 1));
+        targetExp.reviewCount = newReviewCount;
+      }
+
+      // 5. Update local expert profiles in storage
+      try {
+        const storedExpert = localStorage.getItem("current_logged_in_expert");
+        if (storedExpert) {
+          const parsed = JSON.parse(storedExpert);
+          const matches = (targetExp?.id && parsed.id === targetExp.id) ||
+                          (targetExp?.email && parsed.email?.toLowerCase().trim() === targetExp.email.toLowerCase().trim()) ||
+                          (parsed.name?.toLowerCase().trim() === reviewExpertName.toLowerCase().trim());
+          if (matches) {
+            parsed.rating = newAvgRating;
+            parsed.sessions = Math.max(1, (parsed.sessions || 0) + (reviewSessionId ? 0 : 1));
+            parsed.reviewCount = newReviewCount;
+            localStorage.setItem("current_logged_in_expert", JSON.stringify(parsed));
+          }
+        }
+      } catch {}
+
+      // 6. Dispatch cross-component real-time events
       if (typeof window !== "undefined") {
         window.dispatchEvent(new CustomEvent("app_platform_reviews_updated", { detail: updated }));
         window.dispatchEvent(new Event("storage"));
@@ -4708,7 +5525,7 @@ function ClientPage({
       // Mark the completed session as reviewed in client portal upcoming list
       setUpcoming(prev => {
         const next = prev.map(b => {
-          if ((reviewSessionId && b.id === reviewSessionId) || (!reviewSessionId && b.expert?.toLowerCase() === reviewExpertName.toLowerCase())) {
+          if ((effectiveSessionId && b.id === effectiveSessionId) || (!effectiveSessionId && b.expert?.toLowerCase() === reviewExpertName.toLowerCase())) {
             return { ...b, reviewed: true };
           }
           return b;
@@ -4722,16 +5539,16 @@ function ClientPage({
       notificationService.add({
         target: "admin",
         type: "review",
-        title: "New Client Review for Audit",
-        message: `${clientProfile?.name || "Client"} submitted a ${reviewRating}★ review for "${reviewExpertName}". Awaiting audit.`,
+        title: "New Client Review Received",
+        message: `${clientProfile?.name || "Client"} submitted a ${reviewRating}★ review for "${reviewExpertName}". Dynamic rating updated to ${newAvgRating.toFixed(1)}★.`,
         actionLink: "owner"
       });
       notificationService.add({
         target: "client",
         recipientId: clientProfile?.email,
         type: "review",
-        title: "Review Awaiting Moderation",
-        message: `Your ${reviewRating}★ review for "${reviewExpertName}" was sent to Admin Governance Desk.`,
+        title: "Review Published Successfully",
+        message: `Your ${reviewRating}★ review for "${reviewExpertName}" is verified and active!`,
         actionLink: "client"
       });
 
@@ -4739,7 +5556,7 @@ function ClientPage({
       setReviewComment("");
       setReviewSessionId(null);
       confetti({ particleCount: 50, spread: 50, origin: { y: 0.5 } });
-      alert(`⭐ Review Submitted to Admin Governance Desk!\nYour review for "${reviewExpertName}" has been submitted and sent to Admin for audit.`);
+      alert(`⭐ Review Submitted Successfully!\nYour ${reviewRating}★ rating for "${reviewExpertName}" is recorded. Expert rating updated dynamically to ${newAvgRating.toFixed(1)} / 5.0!`);
     } catch (err) {
       console.error(err);
     }
@@ -4754,16 +5571,13 @@ function ClientPage({
   ];
 
   const filteredExperts = experts.filter((e) => {
-    // Only show expert profiles that have passed the admin audit
+    // Visibility depends purely on the expert's verification status field in the database
     if (
       e.verified !== true || 
       e.verificationStatus === "pending" || 
       e.verificationStatus === "rejected" || 
-      (e as any).rejected === true ||
-      e.documents?.status === "Pending Audit" ||
-      e.documents?.status === "Rejected"
+      (e as any).rejected === true
     ) return false;
-    if (pendingVerifications && pendingVerifications.some((p: any) => p.id === e.id || p.name.toLowerCase().trim() === e.name.toLowerCase().trim())) return false;
     const dName = getDomainName(e);
     if (activeCategory !== "All" && !dName?.toLowerCase().includes(activeCategory.toLowerCase()) && !activeCategory.toLowerCase().includes(dName?.toLowerCase() || "")) return false;
     if (searchQuery.trim() && !e.name.toLowerCase().includes(searchQuery.toLowerCase()) && !dName?.toLowerCase().includes(searchQuery.toLowerCase())) return false;
@@ -4790,15 +5604,50 @@ function ClientPage({
   };
 
 
-  const handleBookingSuccess = (newBooking: any, cost: number) => {
+  const handleBookingSuccess = async (newBooking: any, cost: number) => {
     const bookingWithClient = {
       ...newBooking,
       client: newBooking.client || clientProfile?.name || "Client ABC",
       clientEmail: newBooking.clientEmail || clientProfile?.email || "client@company.com"
     };
 
+    const scheduledDate = bookingWithClient.date || (bookingWithClient.when ? bookingWithClient.when.split(',')[0].trim() : '');
+    const scheduledTime = bookingWithClient.timeSlot || (bookingWithClient.when ? bookingWithClient.when.split(',')[1]?.trim() : '');
+
+    // FIX 2: Await createConsultationBooking FIRST before updating state or deducting wallet!
+    const res = await createConsultationBooking({
+      id: bookingWithClient.id,
+      clientId: clientProfile?.id || bookingWithClient.clientId || clientProfile?.email || 'client-1',
+      clientName: bookingWithClient.client,
+      clientEmail: bookingWithClient.clientEmail,
+      expertId: selectedExpertForBooking?.id || bookingWithClient.expertId || '',
+      expertName: selectedExpertForBooking?.name || bookingWithClient.expert || '',
+      expertEmail: selectedExpertForBooking?.email || bookingWithClient.expertEmail || '',
+      topic: bookingWithClient.topic || 'Consultation',
+      scheduledDate,
+      scheduledTime,
+      when: bookingWithClient.when,
+      durationMinutes: 60,
+      packageType: bookingWithClient.type === "hourly" || bookingWithClient.type === "Hourly" ? "Hourly Consultation" : "Project Advisory",
+      value: cost,
+      price: cost,
+      status: 'pending'
+    });
+
+    if (!res.success) {
+      console.error('❌ [CLIENT BOOKING] Booking insert failed:', res.error);
+      const userMessage = res.code === '23505'
+        ? "This slot was just booked, please choose another time"
+        : (res.error || "Failed to confirm booking.");
+      alert(`⚠️ Booking Error: ${userMessage}`);
+      return { success: false, error: userMessage, code: res.code };
+    }
+
+    // ONLY ON SUCCESS: update state, deduct wallet, save to localStorage
+    const confirmedBooking = res.booking || bookingWithClient;
+
     setUpcoming(prev => {
-      const next = [bookingWithClient, ...prev];
+      const next = [confirmedBooking, ...prev];
       localStorage.setItem(storageKey, JSON.stringify(next));
       mongoDB.syncKv(storageKey, next);
       return next;
@@ -4810,16 +5659,28 @@ function ClientPage({
       return nextBal;
     });
 
+    deductWallet({
+      userId: clientProfile?.id || bookingWithClient.clientId || clientProfile?.email,
+      userEmail: bookingWithClient.clientEmail,
+      amount: cost,
+      description: `Consultation Booking: ${confirmedBooking.topic} with ${confirmedBooking.expert}`,
+      relatedBookingId: confirmedBooking.id
+    }).then(res => {
+      if (res && typeof res.newBalance === 'number') {
+        setWalletBalance(res.newBalance);
+      }
+    }).catch(() => {});
+
     // Sync to Admin Meeting & Session OPS Desk immediately
     syncSessionToAdminOps({
-      id: bookingWithClient.id,
-      client: bookingWithClient.client,
-      clientEmail: bookingWithClient.clientEmail,
-      expert: bookingWithClient.expert,
-      expertEmail: bookingWithClient.expertEmail,
-      topic: bookingWithClient.topic,
-      when: bookingWithClient.when,
-      type: bookingWithClient.type === "hourly" || bookingWithClient.type === "Hourly" ? "Hourly Consultation" : "Project Advisory",
+      id: confirmedBooking.id,
+      client: confirmedBooking.client,
+      clientEmail: confirmedBooking.clientEmail,
+      expert: confirmedBooking.expert,
+      expertEmail: confirmedBooking.expertEmail,
+      topic: confirmedBooking.topic,
+      when: confirmedBooking.when,
+      type: confirmedBooking.type === "hourly" || confirmedBooking.type === "Hourly" ? "Hourly Consultation" : "Project Advisory",
       rate: cost,
       payout: Math.round(cost * 0.85),
       status: "Pending Expert Acceptance",
@@ -4902,6 +5763,8 @@ function ClientPage({
         mongoDB.syncKv(reqKey, updated);
       });
     } catch {}
+
+    return { success: true, booking: confirmedBooking };
   };
 
   const handleTopup = async (e: React.FormEvent) => {
@@ -4938,6 +5801,17 @@ function ClientPage({
       return nextBal;
     });
 
+    depositWallet({
+      userId: clientProfile?.id || clientProfile?.email,
+      userEmail: clientProfile?.email || 'client@company.com',
+      amount: amt,
+      description: `Wallet Funded via UPI (₹${amt})`
+    }).then(res => {
+      if (res && typeof res.newBalance === 'number') {
+        setWalletBalance(res.newBalance);
+      }
+    }).catch(() => {});
+
     notificationService.add({
       target: "client",
       recipientId: clientProfile?.email,
@@ -4949,6 +5823,25 @@ function ClientPage({
   };
 
   const handleRemoveBooking = (bookingId?: string, sessionItem?: any) => {
+    const sessId = bookingId || sessionItem?.id;
+
+    if (sessId) {
+      recordRoleDeleted(sessId, 'client', clientProfile?.email);
+      try {
+        const delKey = `client_deleted_sessions_${clientEmailClean || 'default'}`;
+        const raw = localStorage.getItem(delKey);
+        const arr = raw ? JSON.parse(raw) : [];
+        const nextArr = Array.from(new Set([...arr, sessId]));
+        localStorage.setItem(delKey, JSON.stringify(nextArr));
+        mongoDB.syncKv(delKey, nextArr);
+      } catch {}
+      deleteBooking(sessId, {
+        userId: clientProfile?.id,
+        userEmail: clientProfile?.email,
+        userRole: 'client'
+      }).catch(() => {});
+    }
+
     setUpcoming(prev => {
       const next = prev.filter(b => {
         if (bookingId && b.id && b.id === bookingId) return false;
@@ -5259,7 +6152,13 @@ function ClientPage({
                   </div>
 
                   <div className={`flex items-center gap-2 mt-3 text-xs ${isLight ? "text-slate-700" : "text-slate-300"}`}>
-                    <Stars n={e.rating} /> <span className={`font-bold ${isLight ? "text-slate-900" : "text-white"}`}>{e.rating}</span> <span className={isLight ? "text-slate-400" : "text-slate-500"}>· {e.sessions} consultations</span>
+                    <Stars n={e.rating || 0} /> 
+                    <span className={`font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
+                      {e.rating && Number(e.rating) > 0 ? Number(e.rating).toFixed(1) : "0.0"}
+                    </span> 
+                    <span className={isLight ? "text-slate-400" : "text-slate-500"}>
+                      · {e.sessions || e.total_sessions || 0} consultations
+                    </span>
                   </div>
 
                   <p className={`text-xs mt-2 italic line-clamp-2 ${isLight ? "text-slate-600" : "text-slate-300"}`}>"{e.bio}"</p>
@@ -5320,7 +6219,11 @@ function ClientPage({
               </div>
             ) : (
               upcoming.map((s, idx) => {
-                const isDeclined = s.status && s.status.toLowerCase().includes("decline");
+                const rawStatus = (s.status || '').toLowerCase().trim();
+                const isDeclined = rawStatus.includes("decline") || rawStatus.includes("reject");
+                const isCompleted = s.status === "Completed" || s.completed || rawStatus.includes("complete");
+                const isLive = !isDeclined && !isCompleted && (s.status === "live" || s.isLive || rawStatus.includes("live"));
+                const isAccepted = !isDeclined && !isCompleted && !isLive && (rawStatus.includes("accept") || rawStatus.includes("confirm"));
                 return (
                   <div
                     key={s.id || `session-${idx}`}
@@ -5356,16 +6259,26 @@ function ClientPage({
 
                     <div className="flex items-center justify-between text-xs">
                       <span className={`flex items-center gap-1 font-semibold font-mono ${isLight ? "text-amber-600" : "text-amber-400"}`}><Clock size={12} /> {s.when}</span>
-                      <Pill tone={isDeclined ? "rust" : "moss"}>
-                        {isDeclined ? "Declined by Expert" : s.status?.includes("Accepted") ? "Accepted by Expert" : (s.meetUrl ? "Confirmed" : s.status)}
+                      <Pill tone={isDeclined ? "rust" : isCompleted ? "moss" : isLive ? "rust" : (s.meetUrl || isAccepted) ? "moss" : "brass"}>
+                        {isDeclined ? "Rejected" : isCompleted ? "Completed" : isLive ? "LIVE NOW" : (s.meetUrl || isAccepted) ? "Accepted" : "Pending Expert Acceptance"}
                       </Pill>
                     </div>
 
                     {isDeclined ? (
                       <div className="p-3.5 rounded-xl bg-rose-950/40 border border-rose-500/30 text-rose-300 text-[11px] space-y-2">
-                        <p className="font-semibold flex items-center gap-1.5 text-rose-200">
-                          <AlertCircle size={14} className="text-rose-400 shrink-0" />
-                          The Expert is currently busy/unavailable and has declined your consultation request.
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-1.5 text-xs font-bold text-rose-300">
+                            <AlertCircle size={13} className="text-rose-400 shrink-0" />
+                            <span>Request Rejected</span>
+                          </div>
+                          <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold border ${
+                            isLight ? "bg-white text-rose-800 border-rose-300" : "bg-rose-900/50 text-rose-300 border-rose-500/30"
+                          }`}>
+                            Rejected
+                          </span>
+                        </div>
+                        <p className={`text-[11px] leading-relaxed ${isLight ? "text-rose-900/80" : "text-rose-200/90 font-medium"}`}>
+                          Expert {s.expert} has rejected your session request.
                         </p>
                         <button
                           type="button"
@@ -5379,7 +6292,7 @@ function ClientPage({
                           <Trash2 size={13} /> Remove Request
                         </button>
                       </div>
-                    ) : (s.status === "Completed" || s.completed) ? (
+                    ) : (s.status === "Completed" || s.completed || isCompleted) ? (
                       <div className={`p-3.5 rounded-xl border space-y-2.5 transition-colors ${
                         isLight ? "bg-emerald-50 border-emerald-200 text-emerald-950 shadow-sm" : "bg-emerald-950/40 border-emerald-500/30 text-emerald-200 shadow-inner"
                       }`}>
@@ -5418,24 +6331,89 @@ function ClientPage({
                           </button>
                         )}
                       </div>
-                    ) : (!s.meetUrl) ? (
-                      <div className={`p-3.5 rounded-xl border space-y-2 transition-colors ${
-                        isLight ? "bg-amber-50/80 border-amber-200 text-amber-950 shadow-sm" : "bg-amber-950/30 border-amber-500/30 text-amber-200 shadow-inner"
+                    ) : isLive ? (
+                      <div className={`p-3.5 rounded-xl border space-y-3 transition-colors ${
+                        isLight ? "bg-rose-50/90 border-rose-300 text-rose-950 shadow-sm" : "bg-rose-950/40 border-rose-500/40 text-rose-100 shadow-inner"
                       }`}>
                         <div className="flex items-center justify-between">
-                          <div className={`flex items-center gap-1.5 text-xs font-bold ${isLight ? "text-amber-800" : "text-amber-400"}`}>
-                            <Clock size={13} className="animate-pulse text-amber-500" />
-                            <span>{s.status?.includes("Accepted") ? "Request Accepted — Ready to Schedule" : "Awaiting Expert Acceptance"}</span>
+                          <div className="flex items-center gap-1.5 text-xs font-bold text-rose-500">
+                            <span className="relative flex h-2.5 w-2.5">
+                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
+                              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-rose-500"></span>
+                            </span>
+                            <span>🔴 Live Meeting In Progress</span>
                           </div>
-                          <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold border ${
-                            isLight ? "bg-white text-amber-800 border-amber-300" : "bg-amber-900/50 text-amber-300 border-amber-500/30"
-                          }`}>
-                            {s.status?.includes("Accepted") ? "Accepted" : "Pending"}
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded font-bold border bg-rose-500 text-white border-rose-600 animate-pulse">
+                            LIVE NOW
                           </span>
                         </div>
-                        <p className={`text-[11px] leading-relaxed ${isLight ? "text-amber-900/80" : "text-amber-200/80"}`}>
-                          {s.status?.includes("Accepted")
-                            ? `Your consultation request has been accepted by Expert ${s.expert}. Your session is now ready to be scheduled.`
+                        <p className={`text-[11px] leading-relaxed ${isLight ? "text-rose-900 font-medium" : "text-rose-200 font-medium"}`}>
+                          Your consultation with <strong>{s.expert}</strong> is active right now! Please join the Google Meet room.
+                        </p>
+                        {s.meetUrl && (
+                          <div className={`p-2 rounded-lg border text-[10px] font-mono truncate select-all ${
+                            isLight ? "bg-white border-rose-200 text-slate-800" : "bg-black/40 border-rose-500/30 text-rose-200"
+                          }`}>
+                            {s.meetUrl}
+                          </div>
+                        )}
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => window.open(s.meetUrl, "_blank", "noopener,noreferrer")}
+                            className="flex-1 py-2 px-3 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white flex items-center justify-center gap-1.5 cursor-pointer shadow-md transition-all hover:scale-[1.01]"
+                          >
+                            <Video size={13} /> Join Meeting ↗
+                          </button>
+                          {s.meetUrl && (
+                            <button
+                              onClick={() => {
+                                navigator.clipboard.writeText(s.meetUrl);
+                                alert(`📋 Copied Google Meet link for ${s.expert}:\n${s.meetUrl}`);
+                              }}
+                              className={`py-2 px-2.5 rounded-lg text-xs font-bold border flex items-center justify-center gap-1 cursor-pointer transition-colors ${
+                                isLight ? "bg-white hover:bg-slate-100 text-slate-700 border-slate-300" : "bg-white/10 hover:bg-white/20 text-slate-200 border-white/10"
+                              }`}
+                              title="Copy Link"
+                            >
+                              <Copy size={12} />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ) : (!s.meetUrl) ? (
+                      <div className={`p-3.5 rounded-xl border space-y-2 transition-colors ${
+                        isAccepted
+                          ? isLight ? "bg-emerald-50/80 border-emerald-200 text-emerald-950 shadow-sm" : "bg-emerald-950/30 border-emerald-500/40 text-emerald-200 shadow-inner"
+                          : isLight ? "bg-amber-50/80 border-amber-200 text-amber-950 shadow-sm" : "bg-amber-950/30 border-amber-500/30 text-amber-200 shadow-inner"
+                      }`}>
+                        <div className="flex items-center justify-between">
+                          <div className={`flex items-center gap-1.5 text-xs font-bold ${
+                            isAccepted
+                              ? isLight ? "text-emerald-800" : "text-emerald-400"
+                              : isLight ? "text-amber-800" : "text-amber-400"
+                          }`}>
+                            {isAccepted ? (
+                              <CheckCircle2 size={13} className="text-emerald-400" />
+                            ) : (
+                              <Clock size={13} className="animate-pulse text-amber-500" />
+                            )}
+                            <span>{isAccepted ? "Request Accepted" : "Awaiting Expert Acceptance"}</span>
+                          </div>
+                          <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold border ${
+                            isAccepted
+                              ? isLight ? "bg-white text-emerald-800 border-emerald-300" : "bg-emerald-900/50 text-emerald-300 border-emerald-500/30"
+                              : isLight ? "bg-white text-amber-800 border-amber-300" : "bg-amber-900/50 text-amber-300 border-amber-500/30"
+                          }`}>
+                            {isAccepted ? "Accepted" : "Pending"}
+                          </span>
+                        </div>
+                        <p className={`text-[11px] leading-relaxed ${
+                          isAccepted
+                            ? isLight ? "text-emerald-900/90 font-medium" : "text-emerald-200/90 font-medium"
+                            : isLight ? "text-amber-900/80" : "text-amber-200/80"
+                        }`}>
+                          {isAccepted
+                            ? `Expert ${s.expert} has accepted your request. Please prepare for your meeting.`
                             : `Your consultation request was sent to Expert ${s.expert}. Awaiting expert confirmation.`}
                         </p>
                       </div>
@@ -5453,10 +6431,10 @@ function ClientPage({
                           </div>
                           <span className={`text-[10px] font-mono px-2 py-0.5 rounded border ${
                             isLight ? "text-cyan-700 bg-cyan-50 border-cyan-200 font-bold" : "text-cyan-300 bg-cyan-950/60 border-cyan-500/30"
-                          }`}>{s.meetCode || "live-meet"}</span>
+                          }`}>{s.meetCode || (s.meetUrl ? (s.meetUrl.match(/meet\.google\.com\/([a-z0-9-]+)/i)?.[1] || s.meetUrl.split("/").pop()) : "")}</span>
                         </div>
 
-                        <div className={`p-2 rounded-lg border text-[10px] font-mono truncate ${
+                        <div className={`p-2 rounded-lg border text-[10px] font-mono truncate select-all ${
                           isLight ? "bg-white border-slate-200 text-slate-700" : "bg-black/40 border-white/10 text-cyan-300"
                         }`}>
                           {s.meetUrl}
@@ -5464,10 +6442,10 @@ function ClientPage({
 
                         <div className="grid grid-cols-2 gap-2">
                           <button
-                            onClick={() => window.open(s.meetUrl, "_blank")}
-                            className="py-1.5 px-2.5 rounded-lg text-xs font-bold bg-[#1a73e8] hover:bg-[#1557b0] text-white flex items-center justify-center gap-1 cursor-pointer transition-all shadow-md"
+                            onClick={() => window.open(s.meetUrl, "_blank", "noopener,noreferrer")}
+                            className="py-1.5 px-2.5 rounded-lg text-xs font-bold bg-[#1a73e8] hover:bg-[#1557b0] text-white flex items-center justify-center gap-1 cursor-pointer transition-all shadow-md hover:scale-[1.01]"
                           >
-                            <Video size={12} /> Join Google Meet ↗
+                            <Video size={12} /> Join Meeting ↗
                           </button>
                           <button
                             onClick={() => {
@@ -6303,14 +7281,9 @@ function ExpertPage({
   const getExpertAcceptedSessions = () => {
     const sessionsMap = new Map<string, any>();
 
-    // Load blacklist of deleted sessions so deleted items never resurrect
+    // Load blacklist of expert deleted sessions so deleted items never resurrect in Expert Portal
     const deletedIds = new Set<string>();
     try {
-      const savedGlobal = localStorage.getItem("app_deleted_sessions");
-      if (savedGlobal) {
-        const parsed = JSON.parse(savedGlobal);
-        if (Array.isArray(parsed)) parsed.forEach((id: string) => deletedIds.add(id));
-      }
       const savedExp = localStorage.getItem(`expert_deleted_sessions_${expertEmailKey}`);
       if (savedExp) {
         const parsed = JSON.parse(savedExp);
@@ -6324,7 +7297,7 @@ function ExpertPage({
         const parsed = JSON.parse(savedDirect);
         if (Array.isArray(parsed)) {
           parsed.forEach(s => {
-            if (s && s.id && !deletedIds.has(s.id)) {
+            if (s && s.id && !deletedIds.has(s.id) && !s.deletedByExpert && !isExpertRoleDeleted(s.id, expertEmailKey)) {
               sessionsMap.set(s.id, s);
             }
           });
@@ -6342,7 +7315,7 @@ function ExpertPage({
           const parsed = JSON.parse(raw);
           if (Array.isArray(parsed)) {
             parsed.forEach(s => {
-              if (s && s.id && !deletedIds.has(s.id)) {
+              if (s && s.id && !deletedIds.has(s.id) && !s.deletedByExpert && !isExpertRoleDeleted(s.id, expertEmailKey)) {
                 sessionsMap.set(s.id, s);
               }
             });
@@ -6351,7 +7324,7 @@ function ExpertPage({
       }
     });
 
-    const result = Array.from(sessionsMap.values()).filter(s => s && s.id && !deletedIds.has(s.id));
+    const result = Array.from(sessionsMap.values()).filter(s => s && s.id && !deletedIds.has(s.id) && !s.deletedByExpert && !isExpertRoleDeleted(s.id, expertEmailKey));
     if (result.length > 0) {
       localStorage.setItem(acceptedKey, JSON.stringify(result));
       return result;
@@ -6376,11 +7349,6 @@ function ExpertPage({
       if (rawDeclined) {
         const arr = JSON.parse(rawDeclined);
         if (Array.isArray(arr)) declinedIds = new Set(arr);
-      }
-      const rawDeleted = localStorage.getItem("app_deleted_sessions");
-      if (rawDeleted) {
-        const arr = JSON.parse(rawDeleted);
-        if (Array.isArray(arr)) arr.forEach((id: string) => declinedIds.add(id));
       }
       const rawExpDeleted = localStorage.getItem(`expert_deleted_sessions_${expertEmailKey}`);
       if (rawExpDeleted) {
@@ -6443,7 +7411,7 @@ function ExpertPage({
                   statusStr.includes("accept") || 
                   statusStr.includes("complete");
 
-                if ((matchesName || matchesEmail || matchesId) && !isAlreadyConfirmedOrDeclined) {
+                if ((matchesName || matchesEmail || matchesId) && !isAlreadyConfirmedOrDeclined && !b.deletedByExpert && !isExpertRoleDeleted(b.id, expertEmailKey)) {
                   if (b.id && !acceptedIds.has(b.id) && !declinedIds.has(b.id)) {
                     if (!reqsMap.has(b.id)) {
                       reqsMap.set(b.id, {
@@ -6464,18 +7432,10 @@ function ExpertPage({
       }
     } catch {}
 
-    const result = Array.from(reqsMap.values()).filter(r => r && r.id && !acceptedIds.has(r.id) && !declinedIds.has(r.id));
+    const result = Array.from(reqsMap.values()).filter(r => r && r.id && !acceptedIds.has(r.id) && !declinedIds.has(r.id) && !r.deletedByExpert && !isExpertRoleDeleted(r.id, expertEmailKey));
 
     localStorage.setItem(requestsKey, JSON.stringify(result));
-    if (result.length > 0) {
-      return result;
-    }
-
-    if (expertProfile?.email === "sunita.rao@registry.com") {
-      return INITIAL_REQUESTS_EXPERT.filter(r => !acceptedIds.has(r.id) && !declinedIds.has(r.id));
-    }
-
-    return [];
+    return result;
   };
 
   const [requests, setRequests] = useState<any[]>(getExpertSessionRequests);
@@ -6656,10 +7616,15 @@ function ExpertPage({
     // Real-time listener: when client submits or Admin approves/toggles reviews or documents, update Expert Portal immediately
     const handleExpertUpdates = async () => {
       setReviews(getApprovedPlatformReviews());
-      setRequests(getExpertSessionRequests());
+      const localReqs = getExpertSessionRequests();
+      setRequests(prev => {
+        const map = new Map<string, any>();
+        // Preserve all existing requests (including Supabase requests)
+        prev.forEach(r => { if (r && r.id) map.set(r.id, r); });
+        localReqs.forEach(r => { if (r && r.id && !map.has(r.id)) map.set(r.id, r); });
+        return Array.from(map.values());
+      });
       setAcceptedSessions(getExpertAcceptedSessions());
-      const latestDocs = mongoDB.getExpertDocuments(expertProfile?.id || expertProfile?.email || expertProfile?.name);
-      if (latestDocs) setExpertDocs(latestDocs);
 
       // Synchronize expert requests and accepted sessions from MongoDB KV server backend
       try {
@@ -6678,7 +7643,13 @@ function ExpertPage({
             localStorage.setItem(`expert_accepted_sessions_${k}`, JSON.stringify(srvAccepted));
           }
         }
-        setRequests(getExpertSessionRequests());
+        const refreshedLocal = getExpertSessionRequests();
+        setRequests(prev => {
+          const map = new Map<string, any>();
+          prev.forEach(r => { if (r && r.id) map.set(r.id, r); });
+          refreshedLocal.forEach(r => { if (r && r.id && !map.has(r.id)) map.set(r.id, r); });
+          return Array.from(map.values());
+        });
         setAcceptedSessions(getExpertAcceptedSessions());
       } catch {}
     };
@@ -6690,7 +7661,7 @@ function ExpertPage({
     window.addEventListener("mongo_db_updated", handleExpertUpdates);
     window.addEventListener("mongo_kv_updated", handleExpertUpdates);
     window.addEventListener("expert_documents_updated", handleExpertUpdates);
-    const expertSyncInterval = setInterval(handleExpertUpdates, 1500);
+    const expertSyncInterval = setInterval(handleExpertUpdates, 30000);
 
     return () => {
       window.removeEventListener("storage", handleExpertUpdates);
@@ -6703,6 +7674,214 @@ function ExpertPage({
     };
   }, [expertProfile?.id, expertProfile?.name, expertProfile?.email, earningsKey, walletKey, trendKey, requestsKey, reviewsKey]);
 
+  // Authoritative Supabase Real-time Sync for Expert Requests & Confirmed Sessions
+  useEffect(() => {
+    const expEmail = (expertProfile?.email || '').toLowerCase().trim();
+    const expId = String(resolvedExpertId || expertProfile?.id || expertProfile?.user_id || '').toLowerCase().trim();
+    const expName = String(expertProfile?.name || '').toLowerCase().trim();
+
+    if (!expEmail && !expId && !expName) return;
+
+    // 1. Initial Authoritative Fetch from Supabase bookings table
+    const loadSupabaseExpertBookings = async () => {
+      try {
+        const rawBookings = await fetchExpertBookings(expId, expEmail, 'all', expertProfile?.user_id);
+        const sbBookings = rawBookings.filter(b => !b.deletedByExpert && !isExpertRoleDeleted(b.id, expEmail));
+        const pending = sbBookings.filter(b => b.status?.toLowerCase().includes('pending') || b.status === 'pending');
+        const confirmed = sbBookings.filter(b => !b.status?.toLowerCase().includes('pending') && b.status !== 'pending' && !b.status?.toLowerCase().includes('reject'));
+
+        if (pending.length > 0) {
+          setRequests(prev => {
+            const map = new Map<string, any>();
+            pending.forEach(b => map.set(b.id, b));
+            prev.forEach(p => {
+              if (p && p.id && !map.has(p.id) && !p.deletedByExpert && !isExpertRoleDeleted(p.id, expEmail) && (p.status?.toLowerCase().includes('pending') || p.status === 'pending')) {
+                map.set(p.id, p);
+              }
+            });
+            const merged = Array.from(map.values());
+            try { localStorage.setItem(requestsKey, JSON.stringify(merged)); } catch {}
+            return merged;
+          });
+        }
+
+        if (confirmed.length > 0) {
+          setAcceptedSessions(prev => {
+            const map = new Map<string, any>();
+            confirmed.forEach(b => {
+              const isDone = b.status?.toLowerCase().includes('complete') || b.completed === true;
+              const isLiveNow = !isDone && (b.status?.toLowerCase().includes('live') || b.isLive === true);
+              map.set(b.id, {
+                ...b,
+                meetUrl: b.meet_link || b.meeting_link || b.meetUrl || '',
+                isLive: isLiveNow,
+                completed: isDone
+              });
+            });
+            prev.forEach(p => {
+              if (p && p.id && !map.has(p.id) && !p.deletedByExpert && !isExpertRoleDeleted(p.id, expEmail)) {
+                map.set(p.id, p);
+              }
+            });
+            const merged = Array.from(map.values());
+            try { localStorage.setItem(acceptedKey, JSON.stringify(merged)); } catch {}
+            return merged;
+          });
+        }
+      } catch (err) {
+        console.warn('[EXPERT PORTAL] Supabase bookings load note:', err);
+      }
+    };
+
+    loadSupabaseExpertBookings();
+
+    const handleExpertLiveUpdate = (updatedBooking: any) => {
+      if (!updatedBooking || !updatedBooking.id) return;
+      if (updatedBooking.deletedByExpert || isExpertRoleDeleted(updatedBooking.id, expEmail)) {
+        setRequests(prev => {
+          const next = prev.filter(r => r.id !== updatedBooking.id);
+          try { localStorage.setItem(requestsKey, JSON.stringify(next)); } catch {}
+          return next;
+        });
+        setAcceptedSessions(prev => {
+          const next = prev.filter(s => s.id !== updatedBooking.id);
+          try { localStorage.setItem(acceptedKey, JSON.stringify(next)); } catch {}
+          return next;
+        });
+        return;
+      }
+
+      const bExpId = String(updatedBooking.expert_id || '').toLowerCase().trim();
+      const bExpEmail = String(updatedBooking.expert_email || '').toLowerCase().trim();
+      const bExpName = String(updatedBooking.expert_name || '').toLowerCase().trim();
+
+      const isForMe = (expId && bExpId === expId) ||
+                      (expEmail && bExpEmail === expEmail) ||
+                      (expName && bExpName === expName) ||
+                      (expertProfile?.user_id && bExpId === String(expertProfile.user_id).toLowerCase());
+
+      if (!isForMe) return;
+
+      const isStillPending = updatedBooking.status?.toLowerCase().includes('pending') || updatedBooking.status === 'pending';
+      const isDone = updatedBooking.status?.toLowerCase().includes('complete') || updatedBooking.completed === true;
+      const isLiveNow = !isDone && (updatedBooking.status?.toLowerCase().includes('live') || updatedBooking.isLive === true);
+      const meetUrl = updatedBooking.meet_link || updatedBooking.meeting_link || updatedBooking.meetUrl || '';
+
+      console.log('⚡ [EXPERT REALTIME] Processing booking update for expert:', { id: updatedBooking.id, status: updatedBooking.status, meetUrl, isLive: isLiveNow, completed: isDone });
+
+      setRequests(prev => {
+        let next: any[];
+        if (!isStillPending) {
+          next = prev.filter(r => r.id !== updatedBooking.id);
+        } else {
+          next = prev.map(r => r.id === updatedBooking.id ? updatedBooking : r);
+        }
+        try { localStorage.setItem(requestsKey, JSON.stringify(next)); } catch {}
+        return next;
+      });
+
+      if (!isStillPending && !updatedBooking.status?.toLowerCase().includes('reject')) {
+        setAcceptedSessions(prev => {
+          const mapped = {
+            ...updatedBooking,
+            meetUrl: meetUrl,
+            isLive: isLiveNow,
+            completed: isDone
+          };
+          const idx = prev.findIndex(s => s.id === updatedBooking.id);
+          let next: any[];
+          if (idx >= 0) {
+            next = [...prev];
+            next[idx] = { ...next[idx], ...mapped };
+          } else {
+            next = [mapped, ...prev];
+          }
+          try { localStorage.setItem(acceptedKey, JSON.stringify(next)); } catch {}
+          return next;
+        });
+      }
+    };
+
+    // 2. Real-time Subscription to Supabase bookings table
+    const unsubRealtime = subscribeToBookingsRealtime({
+      channelName: 'bookings-realtime-channel',
+      onInsert: (newBooking) => {
+        if (newBooking.deletedByExpert || isExpertRoleDeleted(newBooking.id, expEmail)) {
+          return;
+        }
+
+        const bExpId = String(newBooking.expert_id || '').toLowerCase().trim();
+        const bExpEmail = String(newBooking.expert_email || '').toLowerCase().trim();
+        const bExpName = String(newBooking.expert_name || '').toLowerCase().trim();
+
+        const isForMe = (expId && bExpId === expId) ||
+                        (expEmail && bExpEmail === expEmail) ||
+                        (expName && bExpName === expName) ||
+                        (expertProfile?.user_id && bExpId === String(expertProfile.user_id).toLowerCase());
+
+        const isPending = newBooking.status?.toLowerCase().includes('pending') || newBooking.status === 'pending';
+
+        if (isForMe && isPending) {
+          console.log('⚡ [EXPERT REALTIME] New incoming client booking request received:', newBooking);
+          setRequests(prev => {
+            if (prev.some(r => r.id === newBooking.id)) return prev;
+            const next = [newBooking, ...prev];
+            try { localStorage.setItem(requestsKey, JSON.stringify(next)); } catch {}
+            return next;
+          });
+        }
+      },
+      onUpdate: (updatedBooking) => {
+        handleExpertLiveUpdate(updatedBooking);
+      },
+      onDelete: (deletedId) => {
+        console.log('⚡ [EXPERT REALTIME] Booking request deleted:', deletedId);
+        setRequests(prev => {
+          const next = prev.filter(r => r.id !== deletedId);
+          try { localStorage.setItem(requestsKey, JSON.stringify(next)); } catch {}
+          return next;
+        });
+        setAcceptedSessions(prev => {
+          const next = prev.filter(s => s.id !== deletedId);
+          try { localStorage.setItem(acceptedKey, JSON.stringify(next)); } catch {}
+          return next;
+        });
+      }
+    });
+
+    // 3. BroadcastChannel & Custom window events for instantaneous cross-portal sync
+    let bcUpdates: BroadcastChannel | null = null;
+    let bcDecisions: BroadcastChannel | null = null;
+    try {
+      if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+        bcUpdates = new BroadcastChannel('mentora_booking_updates');
+        bcUpdates.onmessage = (event) => {
+          if (event.data) handleExpertLiveUpdate(normalizeBooking(event.data));
+        };
+        bcDecisions = new BroadcastChannel('mentora_booking_decisions');
+        bcDecisions.onmessage = (event) => {
+          if (event.data) handleExpertLiveUpdate(normalizeBooking(event.data));
+        };
+      }
+    } catch {}
+
+    const handleWindowBookingUpdate = (e: any) => {
+      if (e.detail) handleExpertLiveUpdate(normalizeBooking(e.detail));
+    };
+    window.addEventListener("booking_updated", handleWindowBookingUpdate);
+    window.addEventListener("booking_decision_updated", handleWindowBookingUpdate);
+    window.addEventListener("app_platform_sessions_updated", loadSupabaseExpertBookings);
+
+    return () => {
+      unsubRealtime();
+      bcUpdates?.close();
+      bcDecisions?.close();
+      window.removeEventListener("booking_updated", handleWindowBookingUpdate);
+      window.removeEventListener("booking_decision_updated", handleWindowBookingUpdate);
+      window.removeEventListener("app_platform_sessions_updated", loadSupabaseExpertBookings);
+    };
+  }, [resolvedExpertId, expertProfile?.id, expertProfile?.user_id, expertProfile?.email, expertProfile?.name]);
+
   const [acceptedSessions, setAcceptedSessions] = useState<any[]>(getExpertAcceptedSessions);
   const [activeCallSession, setActiveCallSession] = useState<any | null>(null);
   const [meetSetupRequest, setMeetSetupRequest] = useState<any | null>(null);
@@ -6710,24 +7889,142 @@ function ExpertPage({
   const [boostActive, setBoostActive] = useState(false);
   const [selectedExpertForProfile, setSelectedExpertForProfile] = useState<any | null>(null);
   const [showEditProfileModal, setShowEditProfileModal] = useState(false);
-  const [expertDocs, setExpertDocs] = useState<ExpertDocumentsRecord | null>(() => {
-    return mongoDB.getExpertDocuments(expertProfile?.id || expertProfile?.email || expertProfile?.name);
+
+  // Supabase Documents State (Eliminates localStorage quota issues)
+  const [supabaseDocs, setSupabaseDocs] = useState<Record<ExpertDocType, SupabaseExpertDoc | null>>({
+    work_experience_cert: null,
+    offer_relieving_letter: null,
+    executive_cv: null
   });
-  const [isEditingDocs, setIsEditingDocs] = useState<boolean>(false);
-  const [selectedDocs, setSelectedDocs] = useState<{
-    expCert?: { fileName: string; fileSize: string; fileData?: string };
-    offerLetter?: { fileName: string; fileSize: string; fileData?: string };
-    resume?: { fileName: string; fileSize: string; fileData?: string };
+  const [selectedUploadFiles, setSelectedUploadFiles] = useState<{
+    work_experience_cert?: File;
+    offer_relieving_letter?: File;
+    executive_cv?: File;
   }>({});
   const [isSavingDocs, setIsSavingDocs] = useState(false);
+  const [isLoadingDocs, setIsLoadingDocs] = useState(false);
+  const [docToast, setDocToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const [resolvedExpertUuid, setResolvedExpertUuid] = useState<string>("");
   const [viewerDoc, setViewerDoc] = useState<DocumentViewerItem | null>(null);
+
+  const showDocToast = (message: string, type: 'success' | 'error' = 'success') => {
+    setDocToast({ message, type });
+    setTimeout(() => {
+      setDocToast(prev => prev?.message === message ? null : prev);
+    }, 4500);
+  };
+
+  // Resolve expert profile UUID and clean up legacy localStorage entries
+  useEffect(() => {
+    cleanupLegacyExpertDocsLocalStorage();
+    let isMounted = true;
+
+    async function resolveUuid() {
+      const isUuid = (val: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val);
+
+      // Check current Supabase Auth user
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user?.id && isUuid(user.id)) {
+          if (isMounted) setResolvedExpertUuid(user.id);
+          return;
+        }
+      } catch {}
+
+      const candidate = expertProfile?.user_id || expertProfile?.id;
+      if (candidate && isUuid(candidate)) {
+        if (isMounted) setResolvedExpertUuid(candidate);
+        return;
+      }
+
+      // Check email in users / profiles table
+      const cleanEmail = (expertProfile?.email || '').toLowerCase().trim();
+      if (cleanEmail) {
+        try {
+          const { data: u } = await supabase
+            .from('users')
+            .select('id')
+            .eq('email', cleanEmail)
+            .maybeSingle();
+          if (u?.id && isUuid(u.id)) {
+            if (isMounted) setResolvedExpertUuid(u.id);
+            return;
+          }
+        } catch {}
+
+        try {
+          const { data: p } = await supabase
+            .from('profiles')
+            .select('id')
+            .eq('email', cleanEmail)
+            .maybeSingle();
+          if (p?.id && isUuid(p.id)) {
+            if (isMounted) setResolvedExpertUuid(p.id);
+            return;
+          }
+        } catch {}
+      }
+
+      if (candidate && isMounted) {
+        setResolvedExpertUuid(String(candidate));
+      }
+    }
+
+    resolveUuid();
+    return () => { isMounted = false; };
+  }, [expertProfile?.id, expertProfile?.user_id, expertProfile?.email]);
+
+  const loadDocumentsFromDb = async (uuidToUse: string) => {
+    if (!uuidToUse) return;
+    setIsLoadingDocs(true);
+    try {
+      const res = await fetchExpertDocuments(uuidToUse);
+      if (res.success) {
+        setSupabaseDocs(res.documents);
+      } else {
+        console.warn('[DOCUMENTS] Fetch warning:', res.error);
+      }
+    } catch (err: any) {
+      console.error('[DOCUMENTS] Load error:', err);
+    } finally {
+      setIsLoadingDocs(false);
+    }
+  };
+
+  useEffect(() => {
+    if (resolvedExpertUuid) {
+      loadDocumentsFromDb(resolvedExpertUuid);
+    }
+  }, [resolvedExpertUuid]);
+
+  // Realtime subscription for expert documents table
+  useEffect(() => {
+    if (!resolvedExpertUuid) return;
+    const channel = supabase.channel(`expert-docs-realtime-${resolvedExpertUuid}`)
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'expert_documents',
+        filter: `expert_id=eq.${resolvedExpertUuid}`
+      }, () => {
+        console.log('[REALTIME] Document change received for expert:', resolvedExpertUuid);
+        loadDocumentsFromDb(resolvedExpertUuid);
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [resolvedExpertUuid]);
 
   const [meetLinkInputs, setMeetLinkInputs] = useState<{ [sessionId: string]: string }>({});
   const [editingMeetSessionId, setEditingMeetSessionId] = useState<string | null>(null);
+  const [meetLinkErrors, setMeetLinkErrors] = useState<{ [sessionId: string]: string }>({});
+  const [meetLinkSuccess, setMeetLinkSuccess] = useState<{ [sessionId: string]: string }>({});
 
   // Supabase Realtime synchronization with Admin Document Audit & KYC desk
   useEffect(() => {
-    const ch = supabase.channel('admin-kyc-desk-expert', {
+    const ch = supabase.channel('admin-kyc-desk', {
       config: { broadcast: { self: false } }
     });
 
@@ -6739,15 +8036,16 @@ function ExpertPage({
       const targetId = String(p.expertId || '').toLowerCase();
       const targetEmail = String(p.email || '').toLowerCase();
 
-      if ((targetId && targetId === myId) || (targetEmail && targetEmail === myEmail)) {
+      if ((targetId && (targetId === myId || targetId === resolvedExpertUuid)) || (targetEmail && targetEmail === myEmail)) {
         console.log('[EXPERT PORTAL] Real-time status event received:', p);
-        const isApproved = p.status === 'approved';
-        const isRejected = p.status === 'changes_requested' || p.status === 'rejected';
+        const isApproved = p.status === 'approved' || p.status === 'Verified' || p.isApproved === true;
+        const isRejected = p.status === 'changes_requested' || p.status === 'rejected' || p.status === 'Rejected' || p.isRejected === true;
 
         const updatedProfile = {
           ...expertProfile,
           verified: isApproved,
           verificationStatus: isApproved ? 'approved' : (isRejected ? 'rejected' : 'pending'),
+          status: isApproved ? 'Verified' : (isRejected ? 'Rejected' : (p.status || 'Pending Review')),
           rejected: isRejected,
           rejectionReason: p.rejectionReason || null
         };
@@ -6761,8 +8059,25 @@ function ExpertPage({
           localStorage.setItem(activeKey, JSON.stringify(updatedProfile));
         } catch {}
 
-        const latestDocs = mongoDB.getExpertDocuments(expertProfile?.id || expertProfile?.email || expertProfile?.name);
-        if (latestDocs) setExpertDocs(latestDocs);
+        if (resolvedExpertUuid) {
+          loadDocumentsFromDb(resolvedExpertUuid);
+        }
+      }
+    });
+
+    ch.on('broadcast', { event: 'expert_deleted' }, (payload: any) => {
+      const p = payload.payload;
+      if (!p) return;
+      const myId = String(expertProfile?.id || '').toLowerCase();
+      const targetId = String(p.expertId || '').toLowerCase();
+
+      if (targetId && (targetId === myId || targetId === resolvedExpertUuid)) {
+        console.log('[EXPERT PORTAL] Expert deleted event received, resetting profile');
+        try {
+          localStorage.removeItem("current_logged_in_expert");
+          localStorage.removeItem("admin_logged_in_expert");
+        } catch {}
+        if (onLogout) onLogout();
       }
     });
 
@@ -6771,31 +8086,35 @@ function ExpertPage({
       {
         event: 'UPDATE',
         schema: 'public',
-        table: 'expert_profiles',
-        filter: expertProfile?.id ? `id=eq.${expertProfile.id}` : undefined
+        table: 'experts'
       },
       (payload: any) => {
         const newRecord = payload.new;
         if (!newRecord) return;
-        const isApproved = newRecord.status === 'approved';
-        const isRejected = newRecord.status === 'rejected' || newRecord.status === 'changes_requested';
+        const myId = String(expertProfile?.id || '').toLowerCase();
+        const myEmail = String(expertProfile?.email || '').toLowerCase();
+        if (newRecord.id === myId || (newRecord.email && newRecord.email.toLowerCase() === myEmail)) {
+          const isApproved = newRecord.verified === true || newRecord.status === 'approved' || newRecord.verification_status === 'approved';
+          const isRejected = newRecord.status === 'rejected' || newRecord.verification_status === 'rejected' || newRecord.rejected === true;
 
-        const updatedProfile = {
-          ...expertProfile,
-          verified: isApproved,
-          verificationStatus: isApproved ? 'approved' : (isRejected ? 'rejected' : 'pending'),
-          rejected: isRejected,
-          rejectionReason: newRecord.rejection_reason || null
-        };
+          const updatedProfile = {
+            ...expertProfile,
+            verified: isApproved,
+            verificationStatus: isApproved ? 'approved' : (isRejected ? 'rejected' : 'pending'),
+            status: isApproved ? 'Verified' : (isRejected ? 'Rejected' : (newRecord.status || 'Pending Review')),
+            rejected: isRejected,
+            rejectionReason: newRecord.rejection_reason || null
+          };
 
-        if (onUpdateExpertProfile) {
-          onUpdateExpertProfile(updatedProfile);
+          if (onUpdateExpertProfile) {
+            onUpdateExpertProfile(updatedProfile);
+          }
+
+          try {
+            const activeKey = localStorage.getItem("admin_logged_in_expert") ? "admin_logged_in_expert" : "current_logged_in_expert";
+            localStorage.setItem(activeKey, JSON.stringify(updatedProfile));
+          } catch {}
         }
-
-        try {
-          const activeKey = localStorage.getItem("admin_logged_in_expert") ? "admin_logged_in_expert" : "current_logged_in_expert";
-          localStorage.setItem(activeKey, JSON.stringify(updatedProfile));
-        } catch {}
       }
     );
 
@@ -6808,8 +8127,61 @@ function ExpertPage({
     };
   }, [expertProfile?.id, expertProfile?.email]);
 
+  // Placeholder handler for Accept Booking (as specified in requirements)
+  const handleAcceptBooking = async (bookingId: string) => {
+    // TODO: Final business logic for accepting booking will be specified later.
+    // Currently updates booking status to 'accepted' in Supabase bookings table and invokes existing accept workflow.
+    try {
+      await updateBookingStatus(bookingId, 'accepted');
+      const targetReq = requests.find(r => r.id === bookingId);
+      if (targetReq) {
+        handleAcceptRequest(targetReq);
+      } else {
+        setRequests(prev => prev.filter(r => r.id !== bookingId));
+      }
+
+      // Event emit & notification trigger AFTER existing action has already succeeded
+      broadcastBookingDecision({
+        bookingId,
+        decision: 'accepted',
+        expertName: expertProfile?.name || targetReq?.expert || 'Senior Expert',
+        clientEmail: targetReq?.clientEmail || targetReq?.client_email || '',
+        topic: targetReq?.topic || ''
+      });
+    } catch (err) {
+      console.error('[EXPERT PORTAL] handleAcceptBooking error:', err);
+    }
+  };
+
+  // Placeholder handler for Reject Booking (as specified in requirements)
+  const handleRejectBooking = async (bookingId: string) => {
+    // TODO: Final business logic for rejecting booking will be specified later.
+    // Currently updates booking status to 'rejected' in Supabase bookings table and invokes existing decline workflow.
+    try {
+      await updateBookingStatus(bookingId, 'rejected');
+      const targetReq = requests.find(r => r.id === bookingId);
+      if (targetReq) {
+        handleDeclineRequest(targetReq);
+      } else {
+        setRequests(prev => prev.filter(r => r.id !== bookingId));
+      }
+
+      // Event emit & notification trigger AFTER existing action has already succeeded
+      broadcastBookingDecision({
+        bookingId,
+        decision: 'rejected',
+        expertName: expertProfile?.name || targetReq?.expert || 'Senior Expert',
+        clientEmail: targetReq?.clientEmail || targetReq?.client_email || '',
+        topic: targetReq?.topic || ''
+      });
+    } catch (err) {
+      console.error('[EXPERT PORTAL] handleRejectBooking error:', err);
+    }
+  };
+
   const handleAcceptRequest = (req: any) => {
     if (!req) return;
+    updateBookingStatus(req.id, 'accepted').catch(() => {});
     const basePay = expertProfile?.baseRate || 600;
     const payout = req.type === "Project" ? basePay * 3 : basePay;
 
@@ -6991,7 +8363,7 @@ function ExpertPage({
     const rawUrl = (inputUrl !== undefined ? inputUrl : (meetLinkInputs[sessId] || "")).trim();
 
     if (!rawUrl) {
-      alert("⚠️ Please enter or paste a valid Google Meet link (e.g., https://meet.google.com/xxx-yyyy-zzz) before sending.");
+      setMeetLinkErrors(prev => ({ ...prev, [sessId]: "Please enter or paste a valid Google Meet link before sending." }));
       return;
     }
 
@@ -6999,6 +8371,43 @@ function ExpertPage({
     if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
       cleanUrl = `https://${cleanUrl}`;
     }
+
+    const isGoogleMeet = /^https?:\/\/meet\.google\.com\/[a-zA-Z0-9_\-]+(\?.*)?$/i.test(cleanUrl);
+    if (!isGoogleMeet) {
+      setMeetLinkErrors(prev => ({
+        ...prev,
+        [sessId]: "Please enter a valid Google Meet link (e.g. https://meet.google.com/xxx-yyyy-zzz)"
+      }));
+      return;
+    }
+
+    setMeetLinkErrors(prev => {
+      const next = { ...prev };
+      delete next[sessId];
+      return next;
+    });
+    setMeetLinkSuccess(prev => ({ ...prev, [sessId]: "Link sent to client and admin" }));
+
+    // Single source of truth: write exact character-for-character meet link to Supabase / DB
+    const expId = expertProfile?.id || expertProfile?.user_id || "";
+    const expEmail = expertProfile?.email || "";
+    updateBookingStatus(
+      sessId,
+      session.isLive || session.status === "live" ? "live" : "accepted",
+      {
+        meet_link: cleanUrl,
+        meeting_link: cleanUrl,
+        meet_url: cleanUrl,
+        updated_at: new Date().toISOString()
+      },
+      {
+        userId: expId,
+        userEmail: expEmail,
+        userRole: "expert"
+      }
+    ).catch(err => {
+      console.error("[EXPERT] Failed to sync meet link to Supabase:", err);
+    });
 
     const codeMatch = cleanUrl.match(/meet\.google\.com\/([a-z0-9-]+)/i);
     const meetCode = codeMatch ? codeMatch[1] : cleanUrl.split("/").pop() || "meet-session";
@@ -7179,6 +8588,26 @@ function ExpertPage({
       return;
     }
 
+    // Single source of truth: write completed status to Supabase / DB and broadcast to Client & Admin
+    const expId = expertProfile?.id || expertProfile?.user_id || "";
+    const expEmail = expertProfile?.email || "";
+    updateBookingStatus(
+      s.id,
+      "completed",
+      {
+        completed: true,
+        completed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      },
+      {
+        userId: expId,
+        userEmail: expEmail,
+        userRole: "expert"
+      }
+    ).catch(err => {
+      console.error("[EXPERT] Failed to mark booking completed in DB:", err);
+    });
+
     const updatedAccepted = acceptedSessions.map(item => {
       if (item.id === s.id) {
         return { ...item, status: "Completed", completed: true, completedAt: new Date().toISOString() };
@@ -7298,22 +8727,23 @@ function ExpertPage({
     const idKey = (expertProfile?.id || "").toLowerCase().trim();
     const deletedSessionKey = `expert_deleted_sessions_${expertEmailKey || nameKey || emailKey || "default"}`;
 
-    // 1. Add to persistent deleted sessions blacklist
+    // 1. Add to persistent expert deleted sessions blacklist
     if (sessId) {
+      recordRoleDeleted(sessId, 'expert', expertProfile?.email);
       try {
         const rawDeleted = localStorage.getItem(deletedSessionKey);
         const existing = rawDeleted ? JSON.parse(rawDeleted) : [];
         const next = Array.from(new Set([...existing, sessId]));
         localStorage.setItem(deletedSessionKey, JSON.stringify(next));
         mongoDB.syncKv(deletedSessionKey, next);
-
-        // Also add to global app_deleted_sessions
-        const rawGlobal = localStorage.getItem("app_deleted_sessions");
-        const existingGlobal = rawGlobal ? JSON.parse(rawGlobal) : [];
-        const nextGlobal = Array.from(new Set([...existingGlobal, sessId]));
-        localStorage.setItem("app_deleted_sessions", JSON.stringify(nextGlobal));
-        mongoDB.syncKv("app_deleted_sessions", nextGlobal);
       } catch {}
+
+      // Call role-based soft-delete API (does NOT delete globally)
+      deleteBooking(sessId, {
+        userId: expertProfile?.id,
+        userEmail: expertProfile?.email,
+        userRole: 'expert'
+      }).catch(() => {});
     }
 
     // 2. Remove from active acceptedSessions state
@@ -7324,7 +8754,7 @@ function ExpertPage({
     localStorage.setItem(acceptedKey, JSON.stringify(updatedAccepted));
     mongoDB.syncKv(acceptedKey, updatedAccepted);
 
-    // 4. Clean from ALL expert_accepted_sessions_* keys in localStorage and mongoDB
+    // 4. Clean from expert_accepted_sessions_* keys for this expert only
     const checkAcceptedKeys = new Set<string>([
       acceptedKey,
       nameKey ? `expert_accepted_sessions_${nameKey}` : "",
@@ -7349,45 +8779,9 @@ function ExpertPage({
       } catch {}
     });
 
-    // 5. Clean from Admin Portal sessions (app_platform_sessions)
-    try {
-      const rawPlatform = localStorage.getItem("app_platform_sessions");
-      if (rawPlatform) {
-        const parsed = JSON.parse(rawPlatform);
-        if (Array.isArray(parsed)) {
-          const filtered = parsed.filter((item: any) => item && item.id !== sessId);
-          localStorage.setItem("app_platform_sessions", JSON.stringify(filtered));
-          mongoDB.syncKv("app_platform_sessions", filtered);
-        }
-      }
-    } catch {}
-
-    // 6. Clean from client_upcoming_* keys
-    try {
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (key && key.startsWith("client_upcoming_")) {
-          const raw = localStorage.getItem(key);
-          if (raw) {
-            const bookings = JSON.parse(raw);
-            if (Array.isArray(bookings)) {
-              const filtered = bookings.filter((b: any) => b.id !== sessId);
-              if (filtered.length !== bookings.length) {
-                localStorage.setItem(key, JSON.stringify(filtered));
-                mongoDB.syncKv(key, filtered);
-              }
-            }
-          }
-        }
-      }
-    } catch {}
-
-    // 7. Dispatch events
+    // 5. Dispatch events (ONLY expert-local events, DO NOT touch client or admin)
     if (typeof window !== "undefined") {
-      window.dispatchEvent(new CustomEvent("mongo_kv_updated", { detail: { key: "client_upcoming" } }));
       window.dispatchEvent(new CustomEvent("mongo_kv_updated", { detail: { key: acceptedKey } }));
-      window.dispatchEvent(new CustomEvent("mongo_kv_updated", { detail: { key: "app_platform_sessions" } }));
-      window.dispatchEvent(new CustomEvent("app_platform_sessions_updated"));
       window.dispatchEvent(new Event("storage"));
     }
 
@@ -7401,8 +8795,75 @@ function ExpertPage({
     });
   };
 
+  const handleDeleteRequest = (r: any) => {
+    if (!r) return;
+    const reqId = r.id;
+    const reqTopic = r.topic || "Consultation Request";
+    const reqClient = r.client || r.client_name || "Client";
+
+    if (!confirm(`Are you sure you want to delete request "${reqTopic}" from ${reqClient}? This will remove it from your incoming requests.`)) {
+      return;
+    }
+
+    const nameKey = (expertProfile?.name || "").toLowerCase().trim();
+    const emailKey = (expertProfile?.email || "").toLowerCase().trim();
+    const deletedSessionKey = `expert_deleted_sessions_${expertEmailKey || nameKey || emailKey || "default"}`;
+
+    if (reqId) {
+      recordRoleDeleted(reqId, 'expert', expertProfile?.email);
+      try {
+        const rawDeleted = localStorage.getItem(deletedSessionKey);
+        const existing = rawDeleted ? JSON.parse(rawDeleted) : [];
+        const next = Array.from(new Set([...existing, reqId]));
+        localStorage.setItem(deletedSessionKey, JSON.stringify(next));
+        mongoDB.syncKv(deletedSessionKey, next);
+      } catch {}
+
+      deleteBooking(reqId, {
+        userId: expertProfile?.id,
+        userEmail: expertProfile?.email,
+        userRole: 'expert'
+      }).catch(() => {});
+    }
+
+    const updatedRequests = requests.filter(item => item.id !== reqId);
+    setRequests(updatedRequests);
+    try {
+      localStorage.setItem(requestsKey, JSON.stringify(updatedRequests));
+      mongoDB.syncKv(requestsKey, updatedRequests);
+    } catch {}
+
+    const checkRequestKeys = [
+      requestsKey,
+      nameKey ? `expert_requests_${nameKey}` : "",
+      emailKey ? `expert_requests_${emailKey}` : ""
+    ].filter(Boolean);
+
+    checkRequestKeys.forEach(k => {
+      try {
+        const raw = localStorage.getItem(k);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) {
+            const filtered = parsed.filter((item: any) => item && item.id !== reqId);
+            localStorage.setItem(k, JSON.stringify(filtered));
+            mongoDB.syncKv(k, filtered);
+          }
+        }
+      } catch {}
+    });
+
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("mongo_kv_updated", { detail: { key: requestsKey } }));
+      window.dispatchEvent(new Event("storage"));
+    }
+  };
+
   const handleDeclineRequest = (reqItem: any) => {
     const reqId = typeof reqItem === "object" ? reqItem.id : reqItem;
+    if (reqId) {
+      updateBookingStatus(reqId, 'rejected').catch(() => {});
+    }
     const reqTopic = typeof reqItem === "object" ? reqItem.topic : "";
     const reqClient = typeof reqItem === "object" ? reqItem.client : "";
     const reqClientEmail = typeof reqItem === "object" ? (reqItem.clientEmail || "") : "";
@@ -7593,166 +9054,207 @@ function ExpertPage({
     alert(`✅ Bank Payout Initiated!\n₹${withdrawAmt.toLocaleString("en-IN")} has been transferred to your registered bank account via NEFT/UPI.`);
   };
 
-  const handleFileChange = (slot: "expCert" | "offerLetter" | "resume", file: File | null) => {
-    if (!file) return;
-    const formatSize = (bytes: number) => {
-      if (bytes < 1024) return `${bytes} B`;
-      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    };
+  const handleSelectDocFile = (docType: ExpertDocType, file: File | null) => {
+    if (!file) {
+      setSelectedUploadFiles(prev => {
+        const copy = { ...prev };
+        delete copy[docType];
+        return copy;
+      });
+      return;
+    }
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      setSelectedDocs(prev => ({
-        ...prev,
-        [slot]: {
-          fileName: file.name,
-          fileSize: formatSize(file.size),
-          fileData: reader.result as string
-        }
-      }));
-    };
-    reader.readAsDataURL(file);
+    const val = validateDocumentFile(file);
+    if (!val.valid) {
+      showDocToast(val.error || "Invalid file", "error");
+      return;
+    }
+
+    setSelectedUploadFiles(prev => ({
+      ...prev,
+      [docType]: file
+    }));
   };
 
-  const handleSaveDocs = async (e: React.FormEvent) => {
+  const handleSaveAllDocs = async (e: React.FormEvent) => {
     e.preventDefault();
-    const expId = expertProfile?.id || `exp-${Date.now()}`;
-    const expName = expertProfile?.name || "Senior Expert";
-    const expEmail = expertProfile?.email || `${expName.toLowerCase().replace(/\s+/g, ".")}@registry.com`;
+    if (!resolvedExpertUuid) {
+      showDocToast("Could not resolve expert profile identifier. Please sign in again.", "error");
+      return;
+    }
 
-    const hasExisting = Boolean(expertDocs?.docs?.expCert || expertDocs?.docs?.offerLetter || expertDocs?.docs?.resume);
-    const hasNew = Boolean(selectedDocs.expCert || selectedDocs.offerLetter || selectedDocs.resume);
+    const filesToUpload = Object.entries(selectedUploadFiles).filter(([_, f]) => Boolean(f)) as [ExpertDocType, File][];
 
-    if (!hasExisting && !hasNew) {
-      alert("⚠️ Please choose at least one PDF credential document to submit.");
+    if (filesToUpload.length === 0) {
+      showDocToast("⚠️ Please choose at least one PDF credential document to submit.", "error");
       return;
     }
 
     setIsSavingDocs(true);
-    try {
-      // 1. Upload new documents to Supabase Storage & Documents Table via /api/documents/upload
-      const uploadedMap: Record<string, any> = {};
-      const docSlots: Array<"expCert" | "offerLetter" | "resume"> = ["expCert", "offerLetter", "resume"];
+    let successCount = 0;
+    const errors: string[] = [];
+    const updatedDocsMap = { ...supabaseDocs };
 
-      for (const slot of docSlots) {
-        const item = selectedDocs[slot];
-        if (item?.fileData) {
-          try {
-            const upRes = await fetch("/api/documents/upload", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                expertId: expId,
-                documentType: slot,
-                fileName: item.fileName,
-                fileData: item.fileData,
-                fileSize: item.fileSize
-              })
-            });
-            if (upRes.ok) {
-              const upJson = await upRes.json();
-              if (upJson.success) {
-                uploadedMap[slot] = upJson;
-              }
-            }
-          } catch (upErr) {
-            console.warn(`Supabase document upload warning for ${slot}:`, upErr);
-          }
-        }
+    for (const [docType, file] of filesToUpload) {
+      const existingDoc = supabaseDocs[docType];
+      const res = await uploadSingleExpertDocument(
+        resolvedExpertUuid,
+        docType,
+        file,
+        existingDoc?.file_path
+      );
+
+      if (res.success && res.document) {
+        successCount++;
+        updatedDocsMap[docType] = res.document;
+      } else {
+        errors.push(res.error || `Failed to upload ${docType}`);
       }
+    }
 
-      // 2. Broadcast realtime document_uploaded event to Admin Desk
-      try {
-        const ch = supabase.channel('admin-kyc-desk');
-        await ch.send({
-          type: 'broadcast',
-          event: 'document_uploaded',
-          payload: {
-            expertId: expId,
-            expertName: expName,
-            uploadedDocs: Object.keys(uploadedMap),
-            timestamp: new Date().toISOString()
-          }
-        });
-      } catch (brErr) {
-        console.warn("Realtime broadcast note:", brErr);
-      }
+    setIsSavingDocs(false);
 
-      const saved = await mongoDB.saveExpertDocuments(expId, expName, expEmail, {
-        expCert: selectedDocs.expCert,
-        offerLetter: selectedDocs.offerLetter,
-        resume: selectedDocs.resume
-      });
+    if (errors.length > 0) {
+      showDocToast(errors.join("; "), "error");
+    }
 
-      const fullDocsWithBinaries: ExpertDocumentsRecord = {
-        ...saved,
-        docs: {
-          expCert: selectedDocs.expCert?.fileData ? { ...saved.docs.expCert!, fileData: selectedDocs.expCert.fileData, filePath: uploadedMap.expCert?.filePath } : (uploadedMap.expCert ? { ...saved.docs.expCert!, filePath: uploadedMap.expCert.filePath } : saved.docs.expCert),
-          offerLetter: selectedDocs.offerLetter?.fileData ? { ...saved.docs.offerLetter!, fileData: selectedDocs.offerLetter.fileData, filePath: uploadedMap.offerLetter?.filePath } : (uploadedMap.offerLetter ? { ...saved.docs.offerLetter!, filePath: uploadedMap.offerLetter.filePath } : saved.docs.offerLetter),
-          resume: selectedDocs.resume?.fileData ? { ...saved.docs.resume!, fileData: selectedDocs.resume.fileData, filePath: uploadedMap.resume?.filePath } : (uploadedMap.resume ? { ...saved.docs.resume!, filePath: uploadedMap.resume.filePath } : saved.docs.resume),
-        }
-      };
+    if (successCount > 0) {
+      // Update state immediately without waiting for page refresh
+      setSupabaseDocs(updatedDocsMap);
+      setSelectedUploadFiles({});
 
-      setExpertDocs(fullDocsWithBinaries);
-      setIsEditingDocs(false);
-      setSelectedDocs({});
+      // Reset verification status upon new upload
+      const isResubmit = expertProfile?.rejected === true || expertProfile?.verificationStatus === 'rejected' || expertProfile?.status === 'Rejected';
+      const nextStatus = isResubmit ? 'Pending Review (Re-submitted)' : 'Pending Review';
 
-      // Safely update profile documents in local session cache
-      try {
-        const activeKey = localStorage.getItem("admin_logged_in_expert") ? "admin_logged_in_expert" : "current_logged_in_expert";
-        const cur = localStorage.getItem(activeKey);
-        if (cur) {
-          const parsed = JSON.parse(cur);
-          parsed.documents = {
-            expCert: saved.docs.expCert?.fileName,
-            offerLetter: saved.docs.offerLetter?.fileName,
-            resume: saved.docs.resume?.fileName,
-            items: fullDocsWithBinaries.docs,
-            updatedAt: saved.updatedAt,
-            status: "Pending Audit"
-          };
-          parsed.verificationStatus = "pending";
-          parsed.rejected = false;
-          parsed.rejectionReason = null;
-          localStorage.setItem(activeKey, JSON.stringify(parsed));
-        }
-      } catch {}
-
-      // Update parent profile state so banner turns back to Pending
       if (onUpdateExpertProfile && expertProfile) {
         onUpdateExpertProfile({
           ...expertProfile,
+          status: nextStatus,
+          verified: false,
           verificationStatus: "pending",
           rejected: false,
           rejectionReason: null
         });
       }
 
-      notificationService.add({
-        target: "admin",
-        type: "verification",
-        title: "Verification Documents Saved & Updated",
-        message: `Expert ${expName} uploaded and saved verification documents in Supabase & database for audit.`,
-        actionLink: "owner"
-      });
-
-      notificationService.add({
-        target: "expert",
-        recipientId: expEmail,
-        type: "verification",
-        title: "Credentials Saved to Database",
-        message: "Your verification documents are permanently stored and queued for Admin Governance Desk audit.",
-        actionLink: "expert"
-      });
+      try {
+        const ch = supabase.channel('admin-kyc-desk');
+        ch.send({
+          type: 'broadcast',
+          event: 'document_uploaded',
+          payload: {
+            expertId: resolvedExpertUuid,
+            status: nextStatus,
+            verificationStatus: 'pending_verification',
+            isResubmission: isResubmit
+          }
+        });
+      } catch {}
 
       confetti({ particleCount: 50, spread: 60, origin: { y: 0.5 } });
-      alert("✅ Verification documents permanently uploaded to private storage and synchronized with Admin Audit Queue!");
+      showDocToast("✅ Documents successfully uploaded and synchronized with Supabase database!", "success");
+    }
+  };
+
+  const handleViewDocument = async (doc: SupabaseExpertDoc) => {
+    try {
+      const signedUrl = await getDocumentSignedUrl(doc.file_path, 3600);
+      window.open(signedUrl, "_blank", "noopener,noreferrer");
     } catch (err: any) {
-      console.error("Failed to save expert documents:", err);
-      alert(`Failed to save documents to database: ${err?.message || "Storage error"}. Please try again.`);
-    } finally {
-      setIsSavingDocs(false);
+      console.error("View document error:", err);
+      showDocToast(err?.message || "Failed to generate signed document preview URL", "error");
+    }
+  };
+
+  const handleReplaceDocument = async (docType: ExpertDocType, file: File) => {
+    if (!resolvedExpertUuid) {
+      showDocToast("Could not resolve expert identifier.", "error");
+      return;
+    }
+
+    const val = validateDocumentFile(file);
+    if (!val.valid) {
+      showDocToast(val.error || "Invalid file", "error");
+      return;
+    }
+
+    setIsSavingDocs(true);
+    const existingDoc = supabaseDocs[docType];
+    const res = await uploadSingleExpertDocument(
+      resolvedExpertUuid,
+      docType,
+      file,
+      existingDoc?.file_path
+    );
+    setIsSavingDocs(false);
+
+    if (res.success && res.document) {
+      setSupabaseDocs(prev => ({
+        ...prev,
+        [docType]: res.document!
+      }));
+
+      // Status resets upon document replacement
+      const isResubmit = expertProfile?.rejected === true || expertProfile?.verificationStatus === 'rejected' || expertProfile?.status === 'Rejected';
+      const nextStatus = isResubmit ? 'Pending Review (Re-submitted)' : 'Pending Review';
+
+      if (onUpdateExpertProfile && expertProfile) {
+        onUpdateExpertProfile({
+          ...expertProfile,
+          status: nextStatus,
+          verified: false,
+          verificationStatus: "pending",
+          rejected: false,
+          rejectionReason: null
+        });
+      }
+
+      try {
+        const ch = supabase.channel('admin-kyc-desk');
+        ch.send({
+          type: 'broadcast',
+          event: 'document_uploaded',
+          payload: {
+            expertId: resolvedExpertUuid,
+            documentType: docType,
+            document: res.document,
+            status: nextStatus,
+            verificationStatus: 'pending_verification',
+            isResubmission: isResubmit
+          }
+        });
+      } catch {}
+
+      showDocToast(`✅ ${res.document.file_name} replaced and queued for Admin audit!`, "success");
+    } else {
+      showDocToast(res.error || "Failed to replace document", "error");
+    }
+  };
+
+  const handleDeleteDocument = async (docType: ExpertDocType) => {
+    const existingDoc = supabaseDocs[docType];
+    if (!existingDoc || !resolvedExpertUuid) return;
+
+    const confirmDelete = window.confirm(`Are you sure you want to delete ${existingDoc.file_name}?`);
+    if (!confirmDelete) return;
+
+    setIsSavingDocs(true);
+    const res = await deleteExpertDocument(
+      resolvedExpertUuid,
+      docType,
+      existingDoc.file_path
+    );
+    setIsSavingDocs(false);
+
+    if (res.success) {
+      setSupabaseDocs(prev => ({
+        ...prev,
+        [docType]: null
+      }));
+      showDocToast("Document deleted successfully.", "success");
+    } else {
+      showDocToast(res.error || "Failed to delete document", "error");
     }
   };
 
@@ -7844,53 +9346,7 @@ function ExpertPage({
           <Logo theme={theme} />
         </button>
 
-        <nav className="hidden xl:flex items-center gap-4 text-xs font-semibold">
-          <button
-            type="button"
-            onClick={() => setPage("landing")}
-            className={`transition-colors cursor-pointer hover:text-amber-500 ${isLight ? "text-slate-600" : "text-slate-300"}`}
-          >
-            Home
-          </button>
-          <button
-            type="button"
-            onClick={() => setPage("client")}
-            className={`transition-colors cursor-pointer hover:text-amber-500 ${isLight ? "text-slate-600" : "text-slate-300"}`}
-          >
-            Client Advisory
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setActiveExpertTab("sessions");
-              window.scrollTo({ top: 0, behavior: "smooth" });
-            }}
-            className="text-amber-500 font-bold cursor-pointer"
-          >
-            Senior Pro Desk
-          </button>
-          <button
-            type="button"
-            onClick={() => setPage("about")}
-            className={`transition-colors cursor-pointer hover:text-amber-500 ${isLight ? "text-slate-600" : "text-slate-300"}`}
-          >
-            About
-          </button>
-          <button
-            type="button"
-            onClick={() => setPage("blogs")}
-            className={`transition-colors cursor-pointer hover:text-amber-500 ${isLight ? "text-slate-600" : "text-slate-300"}`}
-          >
-            Blogs
-          </button>
-          <button
-            type="button"
-            onClick={() => setPage("owner")}
-            className="text-amber-500 font-bold px-2 py-0.5 rounded border border-amber-500/40 hover:bg-amber-500/10 transition-colors cursor-pointer"
-          >
-            Admin Desk
-          </button>
-        </nav>
+
         
         <div className="hidden 2xl:block w-36 h-14 relative overflow-hidden">
           <TrophyGraphic />
@@ -7971,170 +9427,257 @@ function ExpertPage({
               <p className={`text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 ${isLight ? "text-slate-900" : "text-white"}`}>
                 <FileCheck size={14} className={isLight ? "text-amber-600" : "text-amber-400"} /> Upload Credentials (PDF)
               </p>
-              {expertDocs && (
-                <span className={`text-[9px] font-mono px-2 py-0.5 rounded-full border ${
-                  expertDocs.status === "Verified"
-                    ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
-                    : "bg-amber-500/15 text-amber-400 border-amber-500/30"
-                }`}>
-                  {expertDocs.status === "Verified" ? "Verified" : "Database Synced"}
-                </span>
-              )}
+              {(() => {
+                const uploaded = Object.values(supabaseDocs).filter(Boolean);
+                const allVerified = REQUIRED_DOC_TYPES.every(t => supabaseDocs[t]?.status === 'verified');
+                if (uploaded.length > 0) {
+                  return (
+                    <span className={`text-[9px] font-mono px-2 py-0.5 rounded-full border ${
+                      allVerified
+                        ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
+                        : "bg-amber-500/15 text-amber-400 border-amber-500/30"
+                    }`}>
+                      {allVerified ? "Verified Badge" : "Database Synced"}
+                    </span>
+                  );
+                }
+                return null;
+              })()}
             </div>
 
             <p className={`text-[11px] leading-relaxed ${isLight ? "text-slate-500" : "text-slate-400"}`}>
-              Upload work experience certificate, offer letter & CV for Admin audit to earn official Verified Badge.
+              Upload work experience certificate, offer letter & CV (PDF only, up to 10MB) for Admin audit to earn official Verified Badge.
             </p>
 
-            {expertDocs && (expertDocs.docs.expCert || expertDocs.docs.offerLetter || expertDocs.docs.resume) && !isEditingDocs ? (
-              /* Persisted Saved Documents View */
-              <div className="space-y-3 pt-1">
-                <div className={`p-2.5 border rounded-xl flex items-center justify-between ${
-                  isLight ? "border-slate-200 bg-slate-50" : "border-white/10 bg-[#111A27]"
-                }`}>
-                  <div className="space-y-0.5 min-w-0 pr-2">
-                    <span className={`font-semibold block text-[11px] truncate ${isLight ? "text-slate-700" : "text-slate-300"}`}>
-                      1. Work Experience Cert
-                    </span>
-                    <span className={`text-[10px] font-mono block truncate ${isLight ? "text-slate-500" : "text-slate-400"}`}>
-                      {expertDocs.docs.expCert?.fileName || "Experience_Certificate.pdf"}
-                    </span>
-                    <span className="text-[9px] text-amber-500/90 font-mono block">
-                      {expertDocs.docs.expCert?.fileSize || "1.8 MB"} · {expertDocs.docs.expCert?.uploadedAt ? new Date(expertDocs.docs.expCert.uploadedAt).toLocaleDateString() : "Uploaded"}
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => handleOpenDocPreview(expertDocs.docs.expCert, "Work Experience & Tenure Certificate")}
-                    className="text-[11px] font-bold text-amber-500 hover:text-amber-400 shrink-0 flex items-center gap-1 cursor-pointer transition-colors"
-                  >
-                    <Eye size={12} /> View PDF
-                  </button>
-                </div>
+            <form onSubmit={handleSaveAllDocs} className="space-y-3 pt-1">
+              {REQUIRED_DOC_TYPES.map((docType) => {
+                const meta = DOC_TYPE_META[docType];
+                const doc = supabaseDocs[docType];
+                const selectedFile = selectedUploadFiles[docType];
 
-                <div className={`p-2.5 border rounded-xl flex items-center justify-between ${
-                  isLight ? "border-slate-200 bg-slate-50" : "border-white/10 bg-[#111A27]"
-                }`}>
-                  <div className="space-y-0.5 min-w-0 pr-2">
-                    <span className={`font-semibold block text-[11px] truncate ${isLight ? "text-slate-700" : "text-slate-300"}`}>
-                      2. Offer / Relieving Letter
-                    </span>
-                    <span className={`text-[10px] font-mono block truncate ${isLight ? "text-slate-500" : "text-slate-400"}`}>
-                      {expertDocs.docs.offerLetter?.fileName || "Offer_Relieving_Letter.pdf"}
-                    </span>
-                    <span className="text-[9px] text-emerald-500/90 font-mono block">
-                      {expertDocs.docs.offerLetter?.fileSize || "950 KB"} · {expertDocs.docs.offerLetter?.uploadedAt ? new Date(expertDocs.docs.offerLetter.uploadedAt).toLocaleDateString() : "Uploaded"}
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => handleOpenDocPreview(expertDocs.docs.offerLetter, "Company Relieving / Promotion Letter")}
-                    className="text-[11px] font-bold text-amber-500 hover:text-amber-400 shrink-0 flex items-center gap-1 cursor-pointer transition-colors"
-                  >
-                    <Eye size={12} /> View PDF
-                  </button>
-                </div>
+                if (doc) {
+                  // Document already uploaded in Supabase -> Show View / Replace / Delete
+                  return (
+                    <div key={docType} className={`p-3 border rounded-xl space-y-2 transition-all ${
+                      isLight ? "border-slate-200 bg-slate-50" : "border-white/10 bg-[#111A27]"
+                    }`}>
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0 flex-1 space-y-0.5">
+                          <span className={`font-semibold block text-[11px] truncate ${isLight ? "text-slate-700" : "text-slate-300"}`}>
+                            {meta.title}
+                          </span>
+                          <span className={`text-[10px] font-mono block truncate ${isLight ? "text-slate-600" : "text-slate-400"}`} title={doc.file_name}>
+                            {doc.file_name}
+                          </span>
+                          <span className="text-[9px] text-amber-500 font-mono block">
+                            {formatDocumentSize(doc.file_size)} · {new Date(doc.uploaded_at).toLocaleDateString()}
+                          </span>
+                        </div>
 
-                <div className={`p-2.5 border rounded-xl flex items-center justify-between ${
-                  isLight ? "border-slate-200 bg-slate-50" : "border-white/10 bg-[#111A27]"
-                }`}>
-                  <div className="space-y-0.5 min-w-0 pr-2">
-                    <span className={`font-semibold block text-[11px] truncate ${isLight ? "text-slate-700" : "text-slate-300"}`}>
-                      3. Executive CV / Dossier
-                    </span>
-                    <span className={`text-[10px] font-mono block truncate ${isLight ? "text-slate-500" : "text-slate-400"}`}>
-                      {expertDocs.docs.resume?.fileName || "Executive_CV_Dossier.pdf"}
-                    </span>
-                    <span className="text-[9px] text-sky-500/90 font-mono block">
-                      {expertDocs.docs.resume?.fileSize || "2.4 MB"} · {expertDocs.docs.resume?.uploadedAt ? new Date(expertDocs.docs.resume.uploadedAt).toLocaleDateString() : "Uploaded"}
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => handleOpenDocPreview(expertDocs.docs.resume, "Executive Dossier & Bio Resume")}
-                    className="text-[11px] font-bold text-amber-500 hover:text-amber-400 shrink-0 flex items-center gap-1 cursor-pointer transition-colors"
-                  >
-                    <Eye size={12} /> View PDF
-                  </button>
-                </div>
+                        {/* Status Badge */}
+                        <span className={`text-[9px] font-bold px-2 py-0.5 rounded-full border shrink-0 flex items-center gap-1 uppercase tracking-wider ${
+                          doc.status === 'verified'
+                            ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
+                            : doc.status === 'rejected'
+                            ? "bg-rose-500/15 text-rose-400 border-rose-500/30"
+                            : "bg-amber-500/15 text-amber-400 border-amber-500/30"
+                        }`}>
+                          {doc.status === 'verified' ? (
+                            <><Check size={10} /> Verified</>
+                          ) : doc.status === 'rejected' ? (
+                            <><AlertCircle size={10} /> Rejected</>
+                          ) : (
+                            <><Clock size={10} /> Pending</>
+                          )}
+                        </span>
+                      </div>
 
-                <Button3D full size="sm" variant="brass" onClick={() => setIsEditingDocs(true)}>
-                  <Edit3 size={13} /> Edit / Replace Credentials
+                      {/* Admin Remark if Rejected */}
+                      {doc.status === 'rejected' && doc.admin_remark && (
+                        <div className="p-2 rounded-lg bg-rose-500/10 border border-rose-500/20 text-[10px] text-rose-300 font-mono">
+                          <span className="font-bold">Admin Remark:</span> {doc.admin_remark}
+                        </div>
+                      )}
+
+                      {/* 3 Action Buttons: View, Replace, Delete */}
+                      <div className="flex items-center gap-2 pt-1 border-t border-slate-200/40 dark:border-white/5">
+                        <button
+                          type="button"
+                          onClick={() => handleViewDocument(doc)}
+                          className="text-[11px] font-bold text-amber-500 hover:text-amber-400 flex items-center gap-1 cursor-pointer transition-colors"
+                          title="Open document in a new tab"
+                        >
+                          <ExternalLink size={12} /> View
+                        </button>
+
+                        <span className="text-slate-500 text-[10px]">·</span>
+
+                        <label className="text-[11px] font-bold text-sky-500 hover:text-sky-400 flex items-center gap-1 cursor-pointer transition-colors">
+                          <RefreshCw size={12} /> Replace
+                          <input
+                            type="file"
+                            accept=".pdf,application/pdf"
+                            className="hidden"
+                            disabled={isSavingDocs}
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) handleReplaceDocument(docType, file);
+                              e.target.value = '';
+                            }}
+                          />
+                        </label>
+
+                        <span className="text-slate-500 text-[10px]">·</span>
+
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteDocument(docType)}
+                          disabled={isSavingDocs}
+                          className="text-[11px] font-bold text-rose-500 hover:text-rose-400 flex items-center gap-1 cursor-pointer transition-colors ml-auto"
+                          title="Delete this document"
+                        >
+                          <Trash2 size={12} /> Delete
+                        </button>
+                      </div>
+                    </div>
+                  );
+                }
+
+                // Document not yet uploaded -> Render File Input with client validation
+                return (
+                  <div key={docType} className={`p-2.5 border rounded-xl space-y-1.5 ${
+                    isLight ? "border-slate-200 bg-slate-50" : "border-white/10 bg-[#111A27]"
+                  }`}>
+                    <span className={`font-semibold block text-[11px] ${isLight ? "text-slate-700" : "text-slate-300"}`}>
+                      {meta.title}
+                    </span>
+                    <span className="text-[10px] text-slate-500 block">
+                      {meta.subtitle} (PDF only, max 10MB)
+                    </span>
+
+                    {selectedFile ? (
+                      <div className="flex items-center justify-between p-1.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-[10px]">
+                        <span className="truncate text-amber-400 font-mono font-medium">
+                          📄 {selectedFile.name} ({formatDocumentSize(selectedFile.size)})
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleSelectDocFile(docType, null)}
+                          className="text-slate-400 hover:text-white ml-2 cursor-pointer"
+                          title="Remove file"
+                        >
+                          <X size={12} />
+                        </button>
+                      </div>
+                    ) : (
+                      <input
+                        type="file"
+                        accept=".pdf,application/pdf"
+                        disabled={isSavingDocs}
+                        onChange={(e) => {
+                          const file = e.target.files?.[0] || null;
+                          handleSelectDocFile(docType, file);
+                        }}
+                        className={`text-[10px] mt-1 block w-full file:mr-2 file:py-1 file:px-2 file:rounded-md file:border-0 file:text-[10px] file:font-semibold file:bg-amber-500/10 file:text-amber-500 hover:file:bg-amber-500/20 cursor-pointer ${
+                          isLight ? "text-slate-600" : "text-slate-400"
+                        }`}
+                      />
+                    )}
+                  </div>
+                );
+              })}
+
+              {/* Save Documents to Database Button */}
+              {Object.keys(selectedUploadFiles).length > 0 && (
+                <Button3D
+                  full
+                  size="sm"
+                  type="submit"
+                  variant="brass"
+                  disabled={isSavingDocs}
+                >
+                  <Upload size={13} className={isSavingDocs ? "animate-spin" : ""} /> {isSavingDocs ? "Saving to Database..." : "Save Documents to Database"}
                 </Button3D>
-              </div>
-            ) : (
-              /* Upload / Edit Documents Form View (Matching User Screenshot) */
-              <form onSubmit={handleSaveDocs} className="space-y-2.5 text-xs">
-                <div className={`p-2.5 border rounded-xl ${isLight ? "border-slate-200 bg-slate-50" : "border-white/10 bg-[#111A27]"}`}>
-                  <span className={`font-semibold block text-[11px] ${isLight ? "text-slate-700" : "text-slate-300"}`}>1. Work Experience Cert (PDF)</span>
-                  {(selectedDocs.expCert?.fileName || expertDocs?.docs?.expCert?.fileName) && (
-                    <span className="text-[10px] font-mono text-amber-500 block truncate mt-0.5">
-                      Current: {selectedDocs.expCert?.fileName || expertDocs?.docs?.expCert?.fileName}
-                    </span>
-                  )}
-                  <input
-                    type="file"
-                    accept=".pdf,image/*,.png,.jpg,.jpeg,.webp"
-                    onChange={(e) => handleFileChange("expCert", e.target.files?.[0] || null)}
-                    className={`text-[10px] mt-1 block w-full ${isLight ? "text-slate-600" : "text-slate-400"}`}
-                  />
-                </div>
-
-                <div className={`p-2.5 border rounded-xl ${isLight ? "border-slate-200 bg-slate-50" : "border-white/10 bg-[#111A27]"}`}>
-                  <span className={`font-semibold block text-[11px] ${isLight ? "text-slate-700" : "text-slate-300"}`}>2. Offer / Relieving Letter (PDF)</span>
-                  {(selectedDocs.offerLetter?.fileName || expertDocs?.docs?.offerLetter?.fileName) && (
-                    <span className="text-[10px] font-mono text-emerald-500 block truncate mt-0.5">
-                      Current: {selectedDocs.offerLetter?.fileName || expertDocs?.docs?.offerLetter?.fileName}
-                    </span>
-                  )}
-                  <input
-                    type="file"
-                    accept=".pdf,image/*,.png,.jpg,.jpeg,.webp"
-                    onChange={(e) => handleFileChange("offerLetter", e.target.files?.[0] || null)}
-                    className={`text-[10px] mt-1 block w-full ${isLight ? "text-slate-600" : "text-slate-400"}`}
-                  />
-                </div>
-
-                <div className={`p-2.5 border rounded-xl ${isLight ? "border-slate-200 bg-slate-50" : "border-white/10 bg-[#111A27]"}`}>
-                  <span className={`font-semibold block text-[11px] ${isLight ? "text-slate-700" : "text-slate-300"}`}>3. Executive CV / Dossier (PDF)</span>
-                  {(selectedDocs.resume?.fileName || expertDocs?.docs?.resume?.fileName) && (
-                    <span className="text-[10px] font-mono text-sky-500 block truncate mt-0.5">
-                      Current: {selectedDocs.resume?.fileName || expertDocs?.docs?.resume?.fileName}
-                    </span>
-                  )}
-                  <input
-                    type="file"
-                    accept=".pdf,image/*,.png,.jpg,.jpeg,.webp"
-                    onChange={(e) => handleFileChange("resume", e.target.files?.[0] || null)}
-                    className={`text-[10px] mt-1 block w-full ${isLight ? "text-slate-600" : "text-slate-400"}`}
-                  />
-                </div>
-
-                <Button3D full size="sm" type="submit" variant="brass" disabled={isSavingDocs}>
-                  <Upload size={13} /> {isSavingDocs ? "Saving to Database..." : "Save Documents to Database"}
-                </Button3D>
-
-                {expertDocs && (expertDocs.docs.expCert || expertDocs.docs.offerLetter || expertDocs.docs.resume) && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsEditingDocs(false);
-                      setSelectedDocs({});
-                    }}
-                    className={`w-full py-1.5 text-xs transition-colors cursor-pointer text-center font-medium ${
-                      isLight ? "text-slate-500 hover:text-slate-900" : "text-slate-400 hover:text-white"
-                    }`}
-                  >
-                    Cancel Editing
-                  </button>
-                )}
-              </form>
-            )}
+              )}
+            </form>
           </div>
         </aside>
 
         {/* Right Section: Telemetry & Sessions */}
         <section>
+          {/* Dynamic Admin Audit Status Notification Banner */}
+          {(() => {
+            const isApproved = expertProfile?.verified === true && expertProfile?.verificationStatus === "approved" && !expertProfile?.rejected;
+            const isRejected = expertProfile?.status === 'Rejected' || expertProfile?.verificationStatus === 'rejected' || expertProfile?.rejected === true;
+            const isResubmitted = expertProfile?.status === 'Pending Review (Re-submitted)' || String(expertProfile?.status).includes('Re-submitted');
+
+            if (isApproved) {
+              return (
+                <div className={`mb-6 p-4 rounded-2xl border flex items-center gap-3.5 shadow-xl backdrop-blur-md ${
+                  isLight ? "bg-emerald-50 text-emerald-900 border-emerald-300 shadow-sm" : "bg-emerald-950/50 text-emerald-200 border-emerald-500/40"
+                }`}>
+                  <ShieldCheck size={22} className={isLight ? "text-emerald-600 shrink-0" : "text-emerald-400 shrink-0"} />
+                  <div>
+                    <p className={`font-bold text-sm ${isLight ? "text-emerald-900" : "text-emerald-100"}`}>
+                      Your documents have been audited and your account has been verified by Admin. Your profile is now live and you are ready to take work.
+                    </p>
+                  </div>
+                </div>
+              );
+            }
+
+            if (isRejected) {
+              return (
+                <div className="mb-6 p-4 rounded-2xl border flex items-start gap-3.5 shadow-xl backdrop-blur-md bg-rose-950/70 text-rose-200 border-rose-500/50 animate-fadeIn">
+                  <AlertCircle size={22} className="text-rose-400 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-bold text-sm text-rose-200 flex items-center gap-2">
+                      Submission Rejected
+                    </p>
+                    <p className="text-xs mt-1 leading-relaxed text-rose-300 font-medium">
+                      {expertProfile?.rejectionReason || "Your submission has been rejected because the uploaded documents were not valid. Please upload valid documents and re-apply."}
+                    </p>
+                    <p className="text-[11px] text-rose-400/80 mt-1.5 font-mono">
+                      You can replace or re-upload your credential documents on the left. Upon uploading, your submission will automatically change to &quot;Pending Review (Re-submitted)&quot; for admin verification.
+                    </p>
+                  </div>
+                </div>
+              );
+            }
+
+            if (isResubmitted) {
+              return (
+                <div className="mb-6 p-4 rounded-2xl border flex items-start gap-3.5 shadow-xl backdrop-blur-md bg-indigo-950/50 text-indigo-200 border-indigo-500/40 animate-fadeIn">
+                  <RefreshCw size={22} className="text-indigo-400 shrink-0 mt-0.5 animate-spin" />
+                  <div>
+                    <p className="font-bold text-sm text-indigo-200 flex items-center gap-2">
+                      Pending Review (Re-submitted)
+                    </p>
+                    <p className="text-xs mt-1 leading-relaxed text-indigo-300">
+                      Your updated credentials have been re-submitted to the Admin KYC Verification Queue. The admin is auditing your latest documents.
+                    </p>
+                  </div>
+                </div>
+              );
+            }
+
+            return (
+              <div className={`mb-6 p-4 rounded-2xl border flex items-start gap-3.5 shadow-xl backdrop-blur-md ${
+                isLight ? "bg-amber-50 text-amber-950 border-amber-300 shadow-sm" : "bg-amber-950/40 text-amber-200 border-amber-500/40"
+              }`}>
+                <Clock size={22} className="text-amber-500 shrink-0 mt-0.5 animate-pulse" />
+                <div>
+                  <p className={`font-bold text-sm flex items-center gap-2 ${isLight ? "text-amber-900" : "text-amber-100"}`}>
+                    Verification pending – admin audit
+                  </p>
+                  <p className={`text-xs mt-1 leading-relaxed ${isLight ? "text-amber-800 font-medium" : "text-amber-300/90"}`}>
+                    Please upload all your documents in the Documents section so the admin can verify them.
+                  </p>
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Top Navigation Tabs for Expert Desk */}
           <div className="flex items-center gap-2 mb-6 border-b border-slate-200 dark:border-white/10 pb-3">
             <button
@@ -8515,71 +10058,6 @@ function ExpertPage({
             </div>
           ) : (
             <>
-          {/* Dynamic Admin Audit Status Notification Banner */}
-          {(() => {
-            const isApproved = expertProfile?.verified === true && expertProfile?.verificationStatus === "approved" && !expertProfile?.rejected;
-            const isRejected = expertProfile?.rejected === true || expertProfile?.verificationStatus === "rejected";
-
-            if (isApproved) {
-              return (
-                <div className={`mb-6 p-4 rounded-2xl border flex items-start gap-3.5 shadow-xl backdrop-blur-md ${
-                  isLight ? "bg-emerald-50 text-emerald-900 border-emerald-300 shadow-sm" : "bg-emerald-950/50 text-emerald-200 border-emerald-500/40"
-                }`}>
-                  <ShieldCheck size={22} className={isLight ? "text-emerald-600 shrink-0 mt-0.5" : "text-emerald-400 shrink-0 mt-0.5"} />
-                  <div>
-                    <p className={`font-bold text-sm flex items-center gap-2 ${isLight ? "text-emerald-900" : "text-emerald-100"}`}>
-                      🎉 Verification Approved by Admin Governance Desk!
-                    </p>
-                    <p className={`text-xs mt-1 leading-relaxed ${isLight ? "text-emerald-800" : "text-emerald-300/90"}`}>
-                      Your uploaded PDF credentials have been audited and approved by Admin. Your profile is now <strong>LIVE & VERIFIED</strong> across Mentora for Client consultations!
-                    </p>
-                  </div>
-                </div>
-              );
-            }
-
-            if (isRejected) {
-              return (
-                <div className={`mb-6 p-4 rounded-2xl border flex items-start gap-3.5 shadow-xl backdrop-blur-md ${
-                  isLight ? "bg-rose-50 text-rose-900 border-rose-300 shadow-sm" : "bg-rose-950/50 text-rose-200 border-rose-500/40"
-                }`}>
-                  <UserX size={22} className={isLight ? "text-rose-600 shrink-0 mt-0.5" : "text-rose-400 shrink-0 mt-0.5"} />
-                  <div className="w-full">
-                    <p className={`font-bold text-sm flex items-center gap-2 ${isLight ? "text-rose-900" : "text-rose-100"}`}>
-                      ❌ Verification Audit Rejected / Moved to Re-Audit Queue
-                    </p>
-                    <p className={`text-xs mt-1 leading-relaxed ${isLight ? "text-rose-800" : "text-rose-300/90"}`}>
-                      Admin has demoted your verification status back to the Document Audit Queue. Please update your details or re-upload your work certificates for re-audit.
-                    </p>
-                    {expertProfile?.rejectionReason && (
-                      <div className={`mt-2.5 p-2.5 rounded-xl border text-xs font-mono ${
-                        isLight ? "bg-rose-100/70 border-rose-300 text-rose-950" : "bg-rose-900/40 border-rose-500/40 text-rose-200"
-                      }`}>
-                        <strong>Admin Rejection Reason:</strong> {expertProfile.rejectionReason}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              );
-            }
-
-            return (
-              <div className={`mb-6 p-4 rounded-2xl border flex items-start gap-3.5 shadow-xl backdrop-blur-md ${
-                isLight ? "bg-amber-50 text-amber-950 border-amber-300 shadow-sm" : "bg-amber-950/40 text-amber-200 border-amber-500/40"
-              }`}>
-                <Clock size={22} className="text-amber-500 shrink-0 mt-0.5 animate-pulse" />
-                <div>
-                  <p className={`font-bold text-sm flex items-center gap-2 ${isLight ? "text-amber-900" : "text-amber-100"}`}>
-                    ⏳ Verification Pending Admin Audit
-                  </p>
-                  <p className={`text-xs mt-1 leading-relaxed ${isLight ? "text-amber-800 font-medium" : "text-amber-300/90"}`}>
-                    Your profile registration and uploaded PDF documents have been submitted to Admin. Once verified by Admin, your profile will become LIVE for Client bookings.
-                  </p>
-                </div>
-              </div>
-            );
-          })()}
-
           {/* Telemetry KPI Cards */}
           <div className="grid sm:grid-cols-3 gap-4 mb-8">
             <div 
@@ -8693,52 +10171,87 @@ function ExpertPage({
               </div>
             ) : (
               <div className="flex flex-col gap-3.5">
-                {requests.map((r) => (
-                  <div 
-                    key={r.id} 
-                    className={`p-4.5 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 border shadow-xl transition-all ${
-                      isLight ? "border-slate-200 bg-white hover:border-amber-400/60" : "border-white/10 bg-[#0B111A] hover:border-amber-500/30"
-                    }`} 
-                    style={{ background: isLight ? "#FFFFFF" : "#0B111A" }}
-                  >
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <p className={`text-sm font-bold ${isLight ? "text-slate-900" : "text-white"}`}>{r.topic}</p>
-                        <span className={`text-[10px] px-2 py-0.5 rounded font-mono border font-bold flex items-center gap-1 ${
-                          isLight ? "bg-amber-50 text-amber-800 border-amber-300" : "bg-amber-950/60 text-amber-300 border-amber-500/30"
-                        }`}>
-                          Pending Acceptance
-                        </span>
-                      </div>
-                      <p className={`text-xs mt-1 ${isLight ? "text-slate-500" : "text-slate-400"}`}>
-                        Client: <strong className={isLight ? "text-slate-800" : "text-slate-200"}>{r.client}</strong> · {r.when} · {r.type} Package · Earned Rate: ₹{r.rate || expertProfile?.baseRate || 600}
-                      </p>
-                    </div>
+                {requests.map((r) => {
+                  const reqDate = r.date || r.scheduled_date || (r.when ? r.when.split(',')[0].trim() : '');
+                  const reqTime = r.time || r.scheduled_time || (r.when ? r.when.split(',')[1]?.trim() : '');
+                  const reqDuration = r.duration_minutes || r.duration || 60;
+                  const reqClient = r.client || r.client_name || "Client";
+                  const reqClientEmail = r.clientEmail || r.client_email || "";
 
-                    <div className="flex items-center gap-2 shrink-0">
-                      <Button3D
-                        size="sm"
-                        variant="moss"
-                        onClick={() => handleAcceptRequest(r)}
-                      >
-                        <Check size={13} /> Accept Request
-                      </Button3D>
-                      <button 
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          e.preventDefault();
-                          handleDeclineRequest(r);
-                        }}
-                        className={`text-xs px-3.5 py-1.5 rounded-xl border font-semibold cursor-pointer transition-colors ${
-                          isLight ? "border-rose-300 text-rose-700 hover:bg-rose-50" : "border-rose-500/40 text-rose-300 hover:bg-rose-950/30"
-                        }`}
-                      >
-                        <X size={13} className="inline mr-1" /> Decline Request
-                      </button>
+                  return (
+                    <div 
+                      key={r.id} 
+                      className={`p-4.5 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 border shadow-xl transition-all ${
+                        isLight ? "border-slate-200 bg-white hover:border-amber-400/60" : "border-white/10 bg-[#0B111A] hover:border-amber-500/30"
+                      }`} 
+                      style={{ background: isLight ? "#FFFFFF" : "#0B111A" }}
+                    >
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <p className={`text-sm font-bold ${isLight ? "text-slate-900" : "text-white"}`}>{r.topic}</p>
+                          <span className={`text-[10px] px-2 py-0.5 rounded font-mono border font-bold flex items-center gap-1 ${
+                            isLight ? "bg-amber-50 text-amber-800 border-amber-300" : "bg-amber-950/60 text-amber-300 border-amber-500/30"
+                          }`}>
+                            Pending
+                          </span>
+                        </div>
+                        <div className={`text-xs space-y-0.5 ${isLight ? "text-slate-500" : "text-slate-400"}`}>
+                          <p>
+                            Client: <strong className={isLight ? "text-slate-800" : "text-slate-200"}>{reqClient}</strong>
+                            {reqClientEmail ? <span className="font-mono text-[11px] ml-1 opacity-80">({reqClientEmail})</span> : null}
+                          </p>
+                          <p className="flex items-center gap-2 flex-wrap">
+                            {reqDate && <span>📅 {reqDate}</span>}
+                            {reqTime && <span>⏰ {reqTime}</span>}
+                            <span>⏳ {reqDuration} mins</span>
+                            <span>• {r.type || r.package_type || "Hourly Consultation"}</span>
+                            <span>• ₹{r.rate || r.value || r.price || (expertProfile?.baseRate || 600)}</span>
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        <Button3D
+                          size="sm"
+                          variant="moss"
+                          onClick={() => handleAcceptBooking(r.id)}
+                        >
+                          <Check size={13} /> Accept
+                        </Button3D>
+                        <button 
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            handleRejectBooking(r.id);
+                          }}
+                          className={`text-xs px-3.5 py-1.5 rounded-xl border font-semibold cursor-pointer transition-colors ${
+                            isLight ? "border-rose-300 text-rose-700 hover:bg-rose-50" : "border-rose-500/40 text-rose-300 hover:bg-rose-950/30"
+                          }`}
+                        >
+                          <X size={13} className="inline mr-1" /> Reject
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            handleDeleteRequest(r);
+                          }}
+                          className={`p-2 rounded-xl border transition-all cursor-pointer ${
+                            isLight
+                              ? "bg-slate-50 hover:bg-rose-50 text-slate-400 hover:text-rose-600 border-slate-200 hover:border-rose-300 shadow-sm"
+                              : "bg-white/5 hover:bg-rose-950/60 text-slate-400 hover:text-rose-400 border-white/10 hover:border-rose-500/40"
+                          }`}
+                          title="Delete Request"
+                          aria-label="Delete Request"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -8788,8 +10301,8 @@ function ExpertPage({
                         <div>
                           <div className="flex items-center gap-2">
                             <p className={`text-sm font-bold ${isLight ? "text-slate-900" : "text-white"}`}>{s.topic}</p>
-                            <Pill tone="moss">
-                              {isCompleted ? "Completed" : hasMeetUrl ? "Confirmed" : "Accepted — Ready to Schedule"}
+                            <Pill tone={isCompleted ? "moss" : (s.isLive || s.status?.toLowerCase().includes("live")) ? "rust" : hasMeetUrl ? "moss" : "brass"}>
+                              {isCompleted ? "Completed" : (s.isLive || s.status?.toLowerCase().includes("live")) ? "🔴 LIVE NOW" : hasMeetUrl ? "Confirmed" : "Accepted — Ready to Schedule"}
                             </Pill>
                           </div>
                           <p className={`text-xs mt-1 ${isLight ? "text-slate-500" : "text-slate-400"}`}>
@@ -8824,13 +10337,19 @@ function ExpertPage({
                           <span className={`text-[10px] font-mono px-2.5 py-0.5 rounded border font-bold flex items-center gap-1 ${
                             isCompleted
                               ? (isLight ? "bg-emerald-100 text-emerald-900 border-emerald-300" : "bg-emerald-950/80 text-emerald-300 border-emerald-500/50")
-                              : hasMeetUrl
-                                ? (isLight ? "bg-emerald-50 text-emerald-800 border-emerald-300" : "bg-emerald-950/60 text-emerald-300 border-emerald-500/30")
-                                : (isLight ? "bg-amber-50 text-amber-800 border-amber-300" : "bg-amber-950/60 text-amber-300 border-amber-500/30")
+                              : (s.isLive || s.status?.toLowerCase().includes("live"))
+                                ? (isLight ? "bg-rose-100 text-rose-900 border-rose-300 animate-pulse" : "bg-rose-950/80 text-rose-300 border-rose-500/50 animate-pulse")
+                                : hasMeetUrl
+                                  ? (isLight ? "bg-emerald-50 text-emerald-800 border-emerald-300" : "bg-emerald-950/60 text-emerald-300 border-emerald-500/30")
+                                  : (isLight ? "bg-amber-50 text-amber-800 border-amber-300" : "bg-amber-950/60 text-amber-300 border-amber-500/30")
                           }`}>
                             {isCompleted ? (
                               <>
                                 <CheckCircle2 size={11} className="text-emerald-500" /> Session Completed
+                              </>
+                            ) : (s.isLive || s.status?.toLowerCase().includes("live")) ? (
+                              <>
+                                <span className="w-1.5 h-1.5 rounded-full bg-rose-500 inline-block animate-ping mr-0.5" /> 🔴 Live Meeting In Progress
                               </>
                             ) : hasMeetUrl ? (
                               <>
@@ -8892,12 +10411,23 @@ function ExpertPage({
                                 <input
                                   type="url"
                                   value={meetLinkInputs[s.id] ?? (s.meetUrl || "")}
-                                  onChange={(e) => setMeetLinkInputs(prev => ({ ...prev, [s.id]: e.target.value }))}
+                                  onChange={(e) => {
+                                    setMeetLinkInputs(prev => ({ ...prev, [s.id]: e.target.value }));
+                                    if (meetLinkErrors[s.id]) {
+                                      setMeetLinkErrors(prev => {
+                                        const next = { ...prev };
+                                        delete next[s.id];
+                                        return next;
+                                      });
+                                    }
+                                  }}
                                   placeholder="https://meet.google.com/xxx-yyyy-zzz"
                                   className={`flex-1 px-3.5 py-2 text-xs font-mono rounded-xl outline-none border transition-colors ${
-                                    isLight 
-                                      ? "bg-white border-slate-300 text-slate-900 focus:border-amber-500" 
-                                      : "bg-[#070C15] border-white/15 text-white focus:border-amber-500/60"
+                                    meetLinkErrors[s.id]
+                                      ? "border-rose-500 bg-rose-50/10 focus:border-rose-500"
+                                      : isLight 
+                                        ? "bg-white border-slate-300 text-slate-900 focus:border-amber-500" 
+                                        : "bg-[#070C15] border-white/15 text-white focus:border-amber-500/60"
                                   }`}
                                 />
                                 <button
@@ -8908,6 +10438,11 @@ function ExpertPage({
                                   <Send size={13} /> Send Meeting Link
                                 </button>
                               </div>
+                              {meetLinkErrors[s.id] && (
+                                <p className="text-[11px] text-rose-500 font-medium flex items-center gap-1 mt-1">
+                                  <AlertCircle size={12} className="shrink-0" /> {meetLinkErrors[s.id]}
+                                </p>
+                              )}
                             </div>
                           </div>
                         ) : (
@@ -8918,9 +10453,14 @@ function ExpertPage({
                             style={{ background: isLight ? "#F8FAFC" : "#070C15" }}
                           >
                             <div>
-                              <span className={`text-xs font-bold flex items-center gap-1.5 ${isLight ? "text-slate-800" : "text-white"}`}>
-                                <Video size={13} className={isLight ? "text-emerald-600" : "text-emerald-400"} /> Google Meet Link:
-                              </span>
+                              <div className="flex flex-wrap items-center gap-2 mb-1">
+                                <span className={`text-xs font-bold flex items-center gap-1.5 ${isLight ? "text-slate-800" : "text-white"}`}>
+                                  <Video size={13} className={isLight ? "text-emerald-600" : "text-emerald-400"} /> Google Meet Link:
+                                </span>
+                                <span className="text-[10px] font-semibold text-emerald-400 flex items-center gap-1 bg-emerald-950/40 border border-emerald-500/30 px-2 py-0.5 rounded-full">
+                                  <CheckCircle2 size={11} className="text-emerald-400" /> Link sent to client and admin
+                                </span>
+                              </div>
                               <span className={`text-xs font-mono select-all ${isLight ? "text-cyan-700" : "text-cyan-300"}`}>{s.meetUrl}</span>
                             </div>
                             <div className="flex items-center gap-2 shrink-0">
@@ -9151,6 +10691,29 @@ function ExpertPage({
           }}
           theme={theme}
         />
+      )}
+
+      {/* Floating Document Action Toast Notification */}
+      {docToast && (
+        <div className={`fixed bottom-6 right-6 z-50 flex items-center gap-3 px-4 py-3 rounded-xl shadow-2xl border backdrop-blur-md transition-all ${
+          docToast.type === 'error'
+            ? 'bg-rose-950/90 border-rose-500/40 text-rose-200 shadow-rose-950/50'
+            : 'bg-emerald-950/90 border-emerald-500/40 text-emerald-200 shadow-emerald-950/50'
+        }`}>
+          {docToast.type === 'error' ? (
+            <AlertCircle size={18} className="text-rose-400 shrink-0" />
+          ) : (
+            <CheckCircle2 size={18} className="text-emerald-400 shrink-0" />
+          )}
+          <span className="text-xs font-semibold">{docToast.message}</span>
+          <button
+            onClick={() => setDocToast(null)}
+            className="ml-2 text-slate-400 hover:text-white cursor-pointer"
+            title="Dismiss notification"
+          >
+            <X size={14} />
+          </button>
+        </div>
       )}
     </div>
   );
@@ -10045,8 +11608,8 @@ const DEFAULT_EXPERT_FALLBACK = {
   field: "Finance & Taxation",
   years: 34,
   rate: 750,
-  rating: 4.9,
-  sessions: 128,
+  rating: 0,
+  sessions: 0,
   email: "sunita.rao@registry.com",
   phone: "+91 98765 43210",
   verified: true,
@@ -10054,6 +11617,25 @@ const DEFAULT_EXPERT_FALLBACK = {
   initials: "SR",
   bio: "Over three decades of senior financial leadership across Tata Capital and listed corporate entities."
 };
+
+function hasValidExpertSession(): boolean {
+  try {
+    const savedRole = localStorage.getItem("current_user_role");
+    const expertData = localStorage.getItem("current_logged_in_expert");
+    const adminExpert = localStorage.getItem("admin_logged_in_expert");
+    if (expertData || adminExpert) {
+      try {
+        const parsed = JSON.parse(expertData || adminExpert || '{}');
+        if (parsed && (parsed.email || parsed.name || parsed.id)) {
+          return true;
+        }
+      } catch {}
+    }
+    return Boolean(savedRole && normalizeRole(savedRole) === "expert");
+  } catch {
+    return false;
+  }
+}
 
 function parseRouteFromLocation(): { page: string; isAdmin: boolean; blogSlug?: string } {
   try {
@@ -10102,8 +11684,22 @@ function parseRouteFromLocation(): { page: string; isAdmin: boolean; blogSlug?: 
     if (pathname === '/client' || queryPage === 'client' || hash === '#client') {
       return { page: 'client', isAdmin: false };
     }
-    if (pathname === '/expert' || queryPage === 'expert' || hash === '#expert') {
-      return { page: 'expert', isAdmin: false };
+    if (
+      pathname === '/expert' ||
+      pathname === '/expert-portal' ||
+      pathname === '/expertportal' ||
+      pathname === '/portal/expert' ||
+      queryPage === 'expert' ||
+      queryPage === 'expert-portal' ||
+      queryPage === 'expertportal' ||
+      portal === 'expert' ||
+      hash === '#expert' ||
+      hash === '#expert-portal'
+    ) {
+      if (hasValidExpertSession()) {
+        return { page: 'expert', isAdmin: false };
+      }
+      return { page: 'login', isAdmin: false };
     }
     if (pathname === '/login' || pathname === '/auth' || queryPage === 'login' || hash === '#login') {
       return { page: 'login', isAdmin: false };
@@ -10129,14 +11725,16 @@ export default function App() {
       const route = parseRouteFromLocation();
       if (route.isAdmin) {
         const savedRole = localStorage.getItem("admin_user_role");
-        if (savedRole && ["client", "expert", "admin"].includes(savedRole)) {
-          return savedRole;
+        const normSaved = normalizeRole(savedRole);
+        if (savedRole && ["client", "expert", "admin"].includes(normSaved)) {
+          return normSaved;
         }
         return "admin";
       } else {
         const savedRole = localStorage.getItem("current_user_role");
-        if (savedRole && ["client", "expert"].includes(savedRole)) {
-          return savedRole;
+        const normSaved = normalizeRole(savedRole);
+        if (savedRole && ["client", "expert"].includes(normSaved)) {
+          return normSaved;
         }
         if (route.page === "client") return "client";
         if (route.page === "expert") return "expert";
@@ -10174,6 +11772,15 @@ export default function App() {
         }
       }
 
+      // Authorization guard for Expert Portal (expert)
+      if (newPage === "expert" || newPage === "expert-portal" || newPage === "expertportal") {
+        if (!hasValidExpertSession()) {
+          newPage = "login";
+        } else {
+          newPage = "expert";
+        }
+      }
+
       setPage(newPage);
       setBlogSlug(extraSlug);
 
@@ -10188,12 +11795,11 @@ export default function App() {
       } else {
         localStorage.setItem("current_page", newPage);
         const savedRole = localStorage.getItem("current_user_role");
-        if (savedRole && (savedRole === "client" || savedRole === "expert")) {
-          setUserRole(savedRole);
+        const normSavedRole = normalizeRole(savedRole);
+        if (savedRole && (normSavedRole === "client" || normSavedRole === "expert")) {
+          setUserRole(normSavedRole);
         } else if (newPage === "client") {
           setUserRole("client");
-        } else if (newPage === "expert") {
-          setUserRole("expert");
         }
       }
 
@@ -10302,6 +11908,16 @@ export default function App() {
     }
   }, [page, isAdminPortal]);
 
+  // Protected Route Guard for Expert Portal
+  useEffect(() => {
+    if (page === "expert") {
+      try {
+        localStorage.setItem("current_user_role", "expert");
+        setUserRole("expert");
+      } catch {}
+    }
+  }, [page]);
+
   // MongoDB experts & pending verifications state
   const [experts, setExperts] = useState<ExpertDoc[]>([]);
   const [pendingVerifications, setPendingVerifications] = useState<any[]>([]);
@@ -10334,6 +11950,7 @@ export default function App() {
                 (currName && (queryKey === currName || statusRes.expert?.name?.toLowerCase().trim() === currName || statusRes.applicant?.name?.toLowerCase().trim() === currName))
               );
               if (!isMatch) return curr;
+              if (!statusRes || statusRes.verified === undefined) return curr;
 
               if (
                 curr.verified === statusRes.verified &&
@@ -10349,6 +11966,7 @@ export default function App() {
                 ...(statusRes.expert || {}),
                 email: curr.email || statusRes.expert?.email || statusRes.applicant?.email,
                 verified: statusRes.verified,
+                is_verified: statusRes.verified,
                 verificationStatus: statusRes.verificationStatus,
                 rejected: statusRes.rejected
               };
@@ -10419,13 +12037,23 @@ export default function App() {
           setUserRole(adminRole);
         } else {
           const publicRole = localStorage.getItem("current_user_role");
-          if (publicRole && ["client", "expert"].includes(publicRole)) {
-            setUserRole(publicRole);
+          const normRole = normalizeRole(publicRole);
+          if (publicRole && ["client", "expert"].includes(normRole)) {
+            setUserRole(normRole);
           } else if (route.page === "client") {
             setUserRole("client");
-          } else if (route.page === "expert") {
-            setUserRole("expert");
           }
+        }
+
+        const clientKey = route.isAdmin ? "admin_logged_in_client" : "current_logged_in_client";
+        const savedClient = localStorage.getItem(clientKey);
+        if (savedClient) {
+          try {
+            const parsed = JSON.parse(savedClient);
+            if (parsed && (parsed.email || parsed.name)) {
+              setClientProfile(parsed);
+            }
+          } catch {}
         }
       } catch {}
     };
@@ -10525,10 +12153,11 @@ export default function App() {
   };
 
   const handleSuccessLogin = async (role: string, userData: any) => {
-    setUserRole(role);
+    const normalizedRole = normalizeRole(role);
+    setUserRole(normalizedRole);
     setShowAuthModal(false);
 
-    if (role === "client") {
+    if (normalizedRole === "client") {
       setIsAdminPortal(false);
       try {
         localStorage.removeItem("admin_token");
@@ -10537,7 +12166,7 @@ export default function App() {
         localStorage.setItem("current_user_role", "client");
       } catch {}
 
-      const emailKey = (userData.email || "guest").toLowerCase();
+      const emailKey = (userData?.email || "guest").toLowerCase();
       const storageKey = `client_upcoming_${emailKey}`;
       const walletStorageKey = `client_wallet_${emailKey}`;
 
@@ -10552,42 +12181,42 @@ export default function App() {
       } else {
         localStorage.setItem(storageKey, JSON.stringify([]));
       }
-      const savedWallet = localStorage.getItem(walletStorageKey);
-      if (savedWallet === null) {
-        localStorage.setItem(walletStorageKey, "0");
-      }
-
-      // Synchronize latest bookings & wallet from server KV
-      try {
-        mongoDB.getKv(storageKey).then((srvUpcoming: any) => {
-          if (Array.isArray(srvUpcoming)) {
-            const cleaned = sanitizeBookings(srvUpcoming);
-            localStorage.setItem(storageKey, JSON.stringify(cleaned));
-          }
-        });
-        mongoDB.getKv(walletStorageKey).then((srvWallet: any) => {
-          if (srvWallet !== null && srvWallet !== undefined) {
-            localStorage.setItem(walletStorageKey, String(srvWallet));
-          }
-        });
-      } catch {}
-
       const clientData = {
-        name: userData.name || "Corporate Client",
-        company: userData.company || "Enterprise Partner",
-        email: userData.email || "client@company.com",
-        phone: userData.phone || "+91 98765 43210",
-        field: userData.field || "Corporate Advisory",
-        bio: userData.bio || "Registered client account.",
-        initials: userData.name ? userData.name.split(" ").map((n: string) => n[0]).join("").toUpperCase().slice(0, 2) : "CC"
+        id: userData?.id || userData?.user_id || `usr-${emailKey}`,
+        name: userData?.name || "Corporate Client",
+        company: userData?.company || "Enterprise Partner",
+        email: userData?.email || "client@company.com",
+        phone: userData?.phone || "+91 98765 43210",
+        field: userData?.field || "Corporate Advisory",
+        bio: userData?.bio || "Registered client account.",
+        initials: userData?.name ? userData.name.split(" ").map((n: string) => n[0]).join("").toUpperCase().slice(0, 2) : "CC"
       };
       setClientProfile(clientData);
+
+      const savedWallet = localStorage.getItem(walletStorageKey);
+      const initialLocalBal = savedWallet !== null ? Number(savedWallet) : undefined;
+      fetchWalletBalance(clientData.id, emailKey, initialLocalBal).then(res => {
+        try {
+          localStorage.setItem(walletStorageKey, String(res.balance));
+        } catch {}
+      }).catch(() => {});
+
+      fetchClientBookings(clientData.id, emailKey).then(srvBookings => {
+        if (Array.isArray(srvBookings) && srvBookings.length > 0) {
+          try {
+            localStorage.setItem(storageKey, JSON.stringify(srvBookings));
+          } catch {}
+        }
+      }).catch(() => {});
+
+      notificationService.syncWithBackend('client', emailKey).catch(() => {});
+
       try {
         localStorage.setItem("current_logged_in_client", JSON.stringify(clientData));
         localStorage.setItem("current_page", "client");
       } catch {}
       navigateTo("client");
-    } else if (role === "expert") {
+    } else if (normalizedRole === "expert") {
       setIsAdminPortal(false);
       try {
         localStorage.removeItem("admin_token");
@@ -10596,34 +12225,65 @@ export default function App() {
         localStorage.setItem("current_user_role", "expert");
       } catch {}
 
-      const freshExperts = await mongoDB.getExperts();
-      const match = freshExperts.find(e => 
-        (userData.email && e.email?.toLowerCase() === userData.email.toLowerCase()) ||
-        (userData.name && e.name.toLowerCase() === userData.name.toLowerCase())
+      const userEmail = (userData?.email || "").toLowerCase().trim();
+      const userName = (userData?.name || userData?.full_name || "").toLowerCase().trim();
+      const match = (experts || []).find(e => 
+        (userEmail && e.email?.toLowerCase().trim() === userEmail) ||
+        (userName && e.name?.toLowerCase().trim() === userName)
       );
-      const isVerified = match ? (match.verified === true) : false;
-      const status = isVerified ? "approved" : (match?.verificationStatus || "pending");
-      const isRejected = match ? (match.rejected === true || status === "rejected") : false;
+      const isVerified = match 
+        ? Boolean(match.verified === true && match.verificationStatus !== "pending" && !(match as any).rejected) 
+        : Boolean(userData?.verified === true && userData?.verificationStatus === "approved" && !userData?.rejected);
+      const status = isVerified ? "approved" : (match?.verificationStatus || userData?.verificationStatus || "pending");
+      const isRejected = match ? Boolean((match as any).rejected === true || status === "rejected") : Boolean(userData?.rejected === true || status === "rejected");
 
       const merged = { 
         ...(expertProfile || {}), 
         ...(match || {}),
         ...userData, 
+        role: "expert",
+        name: userData?.name || userData?.full_name || match?.name || expertProfile?.name || "Senior Expert",
+        email: userData?.email || match?.email || expertProfile?.email || "",
+        phone: userData?.phone || match?.phone || expertProfile?.phone || "",
+        title: userData?.title || match?.title || expertProfile?.title || "Senior Executive Advisor",
+        company: userData?.company || match?.company || expertProfile?.company || "",
+        field: userData?.field || match?.field || expertProfile?.field || "Finance & Taxation",
         verified: isVerified,
         verificationStatus: status,
         rejected: isRejected,
-        initials: (userData.name || match?.name || expertProfile?.name || "EX").split(" ").map((n: string) => n[0]).join("").toUpperCase().slice(0, 2) 
+        rating: match?.rating !== undefined ? Number(match.rating) : (userData?.rating !== undefined ? Number(userData.rating) : 0),
+        sessions: match?.sessions !== undefined ? Number(match.sessions) : (match?.total_sessions !== undefined ? Number(match.total_sessions) : (userData?.sessions !== undefined ? Number(userData.sessions) : 0)),
+        initials: (userData?.name || userData?.full_name || match?.name || expertProfile?.name || "EX").split(" ").map((n: string) => n[0]).join("").toUpperCase().slice(0, 2) 
       };
+
       setExpertProfile(merged);
       try {
         localStorage.setItem("current_logged_in_expert", JSON.stringify(merged));
         localStorage.setItem("current_page", "expert");
       } catch {}
-      const res = await mongoDB.submitExpertVerification(merged);
-      if (Array.isArray(res?.experts)) setExperts(res.experts);
-      if (Array.isArray(res?.pendingVerifications)) setPendingVerifications(res.pendingVerifications);
+
+      // Immediately navigate to the Expert Portal page (same mechanism as Client flow)
       navigateTo("expert");
-    } else if (role === "admin") {
+
+      // Non-blocking background sync so expert verification and fresh directory data stay up to date
+      (async () => {
+        try {
+          const freshExperts = await mongoDB.getExperts();
+          if (Array.isArray(freshExperts) && freshExperts.length > 0) {
+            setExperts(freshExperts);
+            const freshMatch = freshExperts.find(e => 
+              (userEmail && e.email?.toLowerCase().trim() === userEmail) ||
+              (userName && e.name?.toLowerCase().trim() === userName)
+            );
+            if (freshMatch) {
+              setExpertProfile((prev: any) => ({ ...prev, ...freshMatch }));
+            }
+          }
+        } catch (syncErr) {
+          console.error("Expert directory sync note:", syncErr);
+        }
+      })();
+    } else if (normalizedRole === "admin") {
       setIsAdminPortal(true);
       setUserRole("admin");
       const token = userData?.token || localStorage.getItem("admin_token") || localStorage.getItem("admin_session_token") || "admin-session-token";
@@ -11048,7 +12708,7 @@ export default function App() {
 
       {page === "login" && (
         <AuthPage
-          onClose={() => navigateTo(prevPageRef.current || "landing")}
+          onClose={() => navigateTo((prevPageRef.current && prevPageRef.current !== "expert" && prevPageRef.current !== "owner") ? prevPageRef.current : "landing")}
           onSuccessLogin={handleSuccessLogin}
           initialMode="login"
           initialRole={userRole || "client"}
@@ -11170,20 +12830,53 @@ export default function App() {
           onClose={() => setSelectedExpertForBooking(null)}
           theme={theme}
           clientProfile={clientProfile}
-          onBookSuccess={(newBooking: any, cost: number) => {
+          onBookSuccess={async (newBooking: any, cost: number) => {
             const bookingWithClient = {
               ...newBooking,
               client: newBooking.client || clientProfile?.name || "Client ABC",
               clientEmail: newBooking.clientEmail || clientProfile?.email || "client@company.com"
             };
 
+            const scheduledDate = bookingWithClient.date || (bookingWithClient.when ? bookingWithClient.when.split(',')[0].trim() : '');
+            const scheduledTime = bookingWithClient.timeSlot || (bookingWithClient.when ? bookingWithClient.when.split(',')[1]?.trim() : '');
+
+            // FIX 2: Await createConsultationBooking FIRST before updating state or deducting wallet!
+            const res = await createConsultationBooking({
+              id: bookingWithClient.id,
+              clientId: clientProfile?.id || bookingWithClient.clientId || clientProfile?.email || 'client-1',
+              clientName: bookingWithClient.client,
+              clientEmail: bookingWithClient.clientEmail,
+              expertId: selectedExpertForBooking?.id || bookingWithClient.expertId || '',
+              expertName: selectedExpertForBooking?.name || bookingWithClient.expert || '',
+              expertEmail: selectedExpertForBooking?.email || bookingWithClient.expertEmail || '',
+              topic: bookingWithClient.topic || 'Consultation',
+              scheduledDate,
+              scheduledTime,
+              when: bookingWithClient.when,
+              durationMinutes: 60,
+              packageType: bookingWithClient.type === "hourly" || bookingWithClient.type === "Hourly" ? "Hourly Consultation" : "Project Advisory",
+              value: cost,
+              price: cost,
+              status: 'pending'
+            });
+
+            if (!res.success) {
+              console.error('[ROOT BOOKING] Failed to persist to Supabase:', res.error);
+              const userMessage = res.code === '23505'
+                ? "This slot was just booked, please choose another time"
+                : (res.error || "Failed to confirm booking.");
+              alert(`⚠️ Booking Error: ${userMessage}`);
+              return { success: false, error: userMessage, code: res.code };
+            }
+
+            const confirmedBooking = res.booking || bookingWithClient;
             const emailKey = (clientProfile?.email || "guest").toLowerCase();
             const storageKey = `client_upcoming_${emailKey}`;
             const walletStorageKey = `client_wallet_${emailKey}`;
 
             const savedBookings = localStorage.getItem(storageKey);
             const prevBookings = savedBookings ? JSON.parse(savedBookings) : [];
-            const nextBookings = [bookingWithClient, ...prevBookings];
+            const nextBookings = [confirmedBooking, ...prevBookings];
             localStorage.setItem(storageKey, JSON.stringify(nextBookings));
 
             const savedWallet = localStorage.getItem(walletStorageKey);
@@ -11194,14 +12887,14 @@ export default function App() {
 
             // Sync to Admin Meeting & Session OPS Desk
             syncSessionToAdminOps({
-              id: bookingWithClient.id,
-              client: bookingWithClient.client,
-              clientEmail: bookingWithClient.clientEmail,
-              expert: bookingWithClient.expert,
-              expertEmail: bookingWithClient.expertEmail,
-              topic: bookingWithClient.topic,
-              when: bookingWithClient.when,
-              type: bookingWithClient.type === "hourly" || bookingWithClient.type === "Hourly" ? "Hourly Consultation" : "Project Advisory",
+              id: confirmedBooking.id,
+              client: confirmedBooking.client,
+              clientEmail: confirmedBooking.clientEmail,
+              expert: confirmedBooking.expert,
+              expertEmail: confirmedBooking.expertEmail,
+              topic: confirmedBooking.topic,
+              when: confirmedBooking.when,
+              type: confirmedBooking.type === "hourly" || confirmedBooking.type === "Hourly" ? "Hourly Consultation" : "Project Advisory",
               rate: cost,
               payout: Math.round(cost * 0.85),
               status: "Pending Expert Acceptance",
@@ -11271,6 +12964,7 @@ export default function App() {
 
             setSelectedExpertForBooking(null);
             navigateTo("client");
+            return { success: true, booking: confirmedBooking };
           }}
           walletBalance={(() => {
             const emailKey = (clientProfile?.email || "guest").toLowerCase();

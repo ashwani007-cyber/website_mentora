@@ -61,8 +61,10 @@ function publicUser(user, extras = {}) {
   const name = user.full_name || user.fullName || user.name || extras.name || '';
   const role = user.role || extras.role || 'client';
   const token = role === 'admin' ? (extras.token || crypto.randomBytes(24).toString('hex')) : extras.token;
+  const isVerified = Boolean(user.verified === true || extras.verified === true || user.is_verified === true || extras.is_verified === true);
+  const status = isVerified ? 'approved' : (user.verificationStatus || extras.verificationStatus || 'pending');
   return {
-    id: user.id,
+    id: user.id || extras.id,
     email: user.email,
     role,
     name,
@@ -72,9 +74,12 @@ function publicUser(user, extras = {}) {
     title: user.title || extras.title || '',
     field: user.field || extras.field || '',
     bio: user.bio || extras.bio || '',
-    years: extras.years,
-    baseRate: extras.baseRate,
-    is_verified: user.is_verified ?? true,
+    years: extras.years ?? user.years ?? 0,
+    baseRate: extras.baseRate ?? user.baseRate ?? 600,
+    projectRate: extras.projectRate ?? user.projectRate ?? 1000,
+    verified: isVerified,
+    is_verified: isVerified,
+    verificationStatus: status,
     token
   };
 }
@@ -124,6 +129,26 @@ function upsertLocalUser(user) {
   return user;
 }
 
+function upsertLocalExpert(expert) {
+  const db = readLocalDb();
+  if (!Array.isArray(db.experts)) db.experts = [];
+  const idx = db.experts.findIndex((entry) => String(entry.email || '').toLowerCase() === String(expert.email).toLowerCase() || (expert.id && entry.id === expert.id));
+  if (idx >= 0) db.experts[idx] = { ...db.experts[idx], ...expert };
+  else db.experts.unshift(expert);
+  writeLocalDb(db);
+  return expert;
+}
+
+function upsertLocalPending(pending) {
+  const db = readLocalDb();
+  if (!Array.isArray(db.pendingVerifications)) db.pendingVerifications = [];
+  const idx = db.pendingVerifications.findIndex((entry) => String(entry.email || '').toLowerCase() === String(pending.email).toLowerCase() || (pending.id && entry.id === pending.id));
+  if (idx >= 0) db.pendingVerifications[idx] = { ...db.pendingVerifications[idx], ...pending };
+  else db.pendingVerifications.unshift(pending);
+  writeLocalDb(db);
+  return pending;
+}
+
 async function registerUser(payload) {
   const email = String(payload.email || '').toLowerCase().trim();
   const password = String(payload.password || '');
@@ -145,8 +170,9 @@ async function registerUser(payload) {
   }
 
   const passwordHash = await bcrypt.hash(password, 10);
+  const expertId = payload.id || `exp-${Date.now()}`;
   const localRecord = {
-    id: payload.id || `usr-${Date.now()}`,
+    id: role === 'expert' ? expertId : (payload.id || `usr-${Date.now()}`),
     email,
     password_hash: passwordHash,
     name: fullName,
@@ -154,12 +180,15 @@ async function registerUser(payload) {
     role,
     phone,
     company: payload.company || '',
-    title: payload.title || '',
-    field: payload.field || '',
+    title: payload.title || (role === 'expert' ? 'Senior Executive Advisor' : ''),
+    field: payload.field || (role === 'expert' ? 'Finance & Taxation' : ''),
     bio: payload.bio || '',
-    years: payload.years || 0,
-    baseRate: payload.baseRate || 799,
-    projectRate: payload.projectRate || 1000,
+    years: Number(payload.years) || 0,
+    baseRate: Number(payload.baseRate) || 600,
+    projectRate: Number(payload.projectRate) || 1000,
+    verified: false,
+    is_verified: false,
+    verificationStatus: 'pending',
     createdAt: new Date().toISOString()
   };
 
@@ -212,71 +241,127 @@ async function registerUser(payload) {
     console.warn('[AUTH] Supabase Auth creation note:', authErr.message);
   }
 
+  // 1. Insert/upsert into users table first so foreign keys (experts_user_id_fkey) are satisfied
+  let userRowCreated = false;
   try {
-    // Check if expert_profiles has duplicate email or phone
-    const epPhoneDigits = phone ? String(phone).replace(/\D/g, '') : '';
-    const epFilter = epPhoneDigits.length >= 8
-      ? `email.eq.${email},phone.eq.${phone}`
-      : `email.eq.${email}`;
-    const { data: existingEP } = await supabase
-      .from('expert_profiles')
-      .select('*')
-      .or(epFilter)
-      .maybeSingle();
-
-    if (existingEP) {
-      return {
-        status: 409,
-        body: {
-          success: false,
-          error: 'User already exists',
-          message: 'An account with this email or phone is already registered. Please sign in.'
-        }
-      };
+    const { error: sbUserError } = await supabase.from('users').upsert({
+      id: (authUserId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(authUserId)) ? authUserId : undefined,
+      email,
+      password_hash: passwordHash,
+      full_name: fullName,
+      role,
+      phone: phone || null,
+      is_verified: false
+    }, { onConflict: 'email' });
+    if (sbUserError) {
+      console.error('[AUTH] Supabase users upsert error:', sbUserError);
+    } else {
+      userRowCreated = true;
     }
+  } catch (sbUserErr) {
+    console.error('[AUTH] Supabase users upsert error:', sbUserErr);
+  }
 
-    // Insert into expert_profiles if expert role
+  try {
     if (role === 'expert') {
-      const expertProfilePayload = {
-        user_id: authUserId || undefined,
-        full_name: fullName,
+      const expertRecord = {
+        id: localRecord.id,
+        user_id: localRecord.id,
+        name: fullName,
+        field: payload.field || 'Finance & Taxation',
+        years_of_experience: Number(payload.years) || 0,
+        years: Number(payload.years) || 0,
+        company: payload.company || '',
+        base_rate: Number(payload.baseRate) || 600,
+        baseRate: Number(payload.baseRate) || 600,
+        admin_markup: 150,
+        adminMarkup: 150,
+        rate: (Number(payload.baseRate) || 600) + 150,
+        project_rate: Number(payload.projectRate) || 1000,
+        projectRate: Number(payload.projectRate) || 1000,
+        rating: 0,
+        total_sessions: 0,
+        sessions: 0,
+        verified: false,
+        is_verified: false,
+        verificationStatus: 'pending',
+        initials: fullName.split(' ').map((n) => n[0]).join('').toUpperCase().slice(0, 2) || 'EX',
+        title: payload.title || 'Senior Executive Advisor',
+        phone: phone || '',
         email,
-        phone: phone || null,
-        field: payload.field || 'Strategic Leadership',
-        company: payload.company || 'Enterprise Firm',
-        years: payload.years || 0,
-        base_rate: payload.baseRate || 799,
-        admin_markup: 0,
-        project_rate: payload.projectRate || 1000,
         bio: payload.bio || '',
-        status: 'pending_verification',
-        is_removed: false
+        skills: [payload.field || 'Finance & Taxation'],
+        documents: {
+          status: 'pending',
+          verificationStatus: 'pending',
+          items: {}
+        },
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
       };
 
-      const { data: epData, error: epErr } = await supabase
-        .from('expert_profiles')
-        .insert(expertProfilePayload)
-        .select()
-        .single();
+      const pendingRecord = {
+        id: localRecord.id,
+        expertId: localRecord.id,
+        name: fullName,
+        email,
+        phone: phone || '',
+        field: payload.field || 'Finance & Taxation',
+        company: payload.company || '',
+        title: payload.title || 'Senior Executive Advisor',
+        years: Number(payload.years) || 0,
+        baseRate: Number(payload.baseRate) || 600,
+        projectRate: Number(payload.projectRate) || 1000,
+        bio: payload.bio || '',
+        status: 'Pending Audit',
+        verificationStatus: 'pending',
+        verified: false,
+        is_verified: false,
+        submittedAt: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        documents: {}
+      };
 
-      if (!epErr && epData) {
-        localRecord.id = epData.id;
-        localRecord.expertId = epData.id;
-      } else if (epErr) {
-        console.warn('[AUTH] Note: expert_profiles insert pending migration:', epErr.message);
+      upsertLocalExpert(expertRecord);
+      upsertLocalPending(pendingRecord);
+
+      try {
+        const targetUserId = (userRowCreated && authUserId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(authUserId)) ? authUserId : null;
+        const { error: sbExpError } = await supabase.from('experts').upsert({
+          id: localRecord.id,
+          user_id: targetUserId,
+          name: fullName,
+          field: payload.field || 'Finance & Taxation',
+          years_of_experience: Number(payload.years) || 0,
+          base_rate: Number(payload.baseRate) || 600,
+          admin_markup: 150,
+          rate: (Number(payload.baseRate) || 600) + 150,
+          project_rate: Number(payload.projectRate) || 1000,
+          rating: 0,
+          total_sessions: 0,
+          verified: false,
+          initials: fullName.split(' ').map((n) => n[0]).join('').toUpperCase().slice(0, 2) || 'EX',
+          title: payload.title || 'Senior Executive Advisor',
+          phone: phone || null,
+          email,
+          bio: payload.bio || '',
+          skills: [payload.field || 'Finance & Taxation'],
+          documents: {
+            status: 'pending',
+            verificationStatus: 'pending',
+            is_verified: false,
+            company: payload.company || '',
+            items: {}
+          }
+        }, { onConflict: 'id' });
+        if (sbExpError) {
+          console.error('[AUTH] Supabase experts upsert error:', sbExpError);
+        }
+      } catch (sbExpErr) {
+        console.error('[AUTH] Supabase experts upsert error:', sbExpErr);
       }
     }
-
-    // Also insert into users table if exists
-    try {
-      await supabase.from('users').insert({
-        email,
-        password_hash: passwordHash,
-        full_name: fullName,
-        role,
-        phone: phone || null
-      });
-    } catch {}
 
     upsertLocalUser(localRecord);
     return {
@@ -309,6 +394,17 @@ async function loginUser(payload) {
     return { status: 400, body: { success: false, error: 'Email and password are required', message: 'Email and password are required' } };
   }
 
+  const { user: localUser, db } = findLocalUser(email);
+  const localExpert = (db?.experts || []).find((e) => String(e.email || '').toLowerCase() === email);
+
+  let supaExpert = null;
+  try {
+    const { data: se } = await supabase.from('experts').select('*').eq('email', email).maybeSingle();
+    if (se) supaExpert = se;
+  } catch {}
+
+  const isExpVerified = Boolean(supaExpert?.verified === true || localExpert?.verified === true);
+
   try {
     const { data: user, error } = await supabase.from('users').select('*').eq('email', email).maybeSingle();
     if (!error && user) {
@@ -316,13 +412,20 @@ async function loginUser(payload) {
       if (!valid) {
         return { status: 401, body: { success: false, error: 'Invalid credentials', message: 'Invalid credentials' } };
       }
-      const extras = findLocalUser(email).user || {};
+      const extras = { ...(localExpert || {}), ...(localUser || {}), ...(supaExpert || {}) };
+      if (isExpVerified) {
+        user.verified = true;
+        user.is_verified = true;
+        user.verificationStatus = 'approved';
+        extras.verified = true;
+        extras.is_verified = true;
+        extras.verificationStatus = 'approved';
+      }
       const mappedRole = isAdminEmail(email) ? 'admin' : (user.role || extras.role);
       return { status: 200, body: loginPayload({ ...user, role: mappedRole }, extras) };
     }
   } catch {}
 
-  const { user: localUser } = findLocalUser(email);
   if (!localUser) {
     return { status: 401, body: { success: false, error: 'MUST REGISTER FIRST', message: 'Account not found. MUST REGISTER FIRST.' } };
   }
@@ -331,7 +434,16 @@ async function loginUser(payload) {
     return { status: 401, body: { success: false, error: 'Invalid credentials', message: 'Invalid credentials' } };
   }
   const mappedRole = isAdminEmail(email) ? 'admin' : localUser.role;
-  return { status: 200, body: loginPayload({ ...localUser, role: mappedRole }, localUser) };
+  const extras = { ...(localExpert || {}), ...(localUser || {}), ...(supaExpert || {}) };
+  if (isExpVerified) {
+    localUser.verified = true;
+    localUser.is_verified = true;
+    localUser.verificationStatus = 'approved';
+    extras.verified = true;
+    extras.is_verified = true;
+    extras.verificationStatus = 'approved';
+  }
+  return { status: 200, body: loginPayload({ ...localUser, role: mappedRole }, extras) };
 }
 
 export async function handleApiMiddleware(req, res, next) {

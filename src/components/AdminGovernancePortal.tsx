@@ -37,7 +37,10 @@ import {
   Play,
   AlertCircle,
   BookOpen,
-  Edit3
+  Edit3,
+  Download,
+  Info,
+  FileQuestion
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -53,6 +56,17 @@ import {
 import confetti from 'canvas-confetti';
 import { ExpertDoc, mongoDB, getDocFile } from '../mongoDBService';
 import { DocumentViewerModal, DocumentViewerItem } from './DocumentViewerModal';
+import {
+  ExpertDocType,
+  ExpertDocumentItem as SupabaseExpertDoc,
+  REQUIRED_DOC_TYPES,
+  DOC_TYPE_META,
+  formatDocumentSize,
+  fetchExpertDocuments,
+  getDocumentSignedUrl,
+  updateDocumentAuditStatus,
+  checkAndPromoteVerifiedProfile
+} from '../services/expertDocumentsService';
 import { notificationService } from '../services/notificationService';
 import { useDomains } from '../context/DomainsContext';
 import type { DomainItem } from '../types/domain';
@@ -62,6 +76,15 @@ import { ExpertAvailabilityManager } from './ExpertAvailabilityManager';
 import { AdminProjectReviewDesk } from './AdminProjectReviewDesk';
 import { ProjectReviewWorkspace } from './ProjectReviewWorkspace';
 import { AdminBlogsDesk } from './AdminBlogsDesk';
+import {
+  fetchAllBookingsForAdmin,
+  updateBookingStatus,
+  deleteBooking,
+  subscribeToBookingsRealtime,
+  isAdminRoleDeleted,
+  recordRoleDeleted,
+  normalizeBooking
+} from '../services/consultationBookingService';
 
 
 
@@ -117,6 +140,352 @@ interface AdminGovernancePortalProps {
   onLogout?: () => void;
 }
 
+interface ExpertDocumentAuditModalProps {
+  expert: any;
+  initialSlot?: ExpertDocType;
+  onClose: () => void;
+  onApprove: (id: string) => Promise<void> | void;
+  onReject?: (item: any) => void;
+  isLight: boolean;
+}
+
+const ExpertDocumentAuditModal: React.FC<ExpertDocumentAuditModalProps> = ({
+  expert,
+  initialSlot = 'work_experience_cert',
+  onClose,
+  onApprove,
+  onReject,
+  isLight
+}) => {
+  const [activeSlot, setActiveSlot] = useState<ExpertDocType>(initialSlot);
+  const [documents, setDocuments] = useState<Record<ExpertDocType, any | null>>({
+    work_experience_cert: null,
+    offer_relieving_letter: null,
+    executive_cv: null
+  });
+  const [signedUrls, setSignedUrls] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState<boolean>(true);
+  const [resolvedUuid, setResolvedUuid] = useState<string>('');
+  const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+  const showFeedback = (message: string, type: 'success' | 'error' = 'success') => {
+    setFeedback({ message, type });
+    setTimeout(() => {
+      setFeedback(prev => prev?.message === message ? null : prev);
+    }, 4500);
+  };
+
+  // Helper: Load signed URL for a document file path
+  const resolveSignedUrl = async (slot: ExpertDocType, filePath: string) => {
+    if (!filePath) return;
+    try {
+      const url = await getDocumentSignedUrl(filePath, 3600);
+      setSignedUrls(prev => ({ ...prev, [slot]: url }));
+    } catch (err: any) {
+      console.warn(`[VIEWER] Could not generate signed URL for ${slot}:`, err?.message);
+    }
+  };
+
+  // Main loader: Fetch latest documents for this expert
+  const loadDocs = async (uuidToUse: string) => {
+    setLoading(true);
+    try {
+      // 1. Initial seed from expert prop if available
+      const seedDocs: Record<ExpertDocType, any | null> = {
+        work_experience_cert: expert?.documents?.work_experience_cert || expert?.documents?.items?.work_experience_cert || expert?.documents?.items?.expCert || (typeof expert?.documents?.expCert === 'object' ? expert?.documents?.expCert : (expert?.documents?.expCert ? { file_name: expert.documents.expCert, fileName: expert.documents.expCert, file_path: `${uuidToUse}/work_experience_cert/${expert.documents.expCert}` } : null)),
+        offer_relieving_letter: expert?.documents?.offer_relieving_letter || expert?.documents?.items?.offer_relieving_letter || expert?.documents?.items?.offerLetter || (typeof expert?.documents?.offerLetter === 'object' ? expert?.documents?.offerLetter : (expert?.documents?.offerLetter ? { file_name: expert.documents.offerLetter, fileName: expert.documents.offerLetter, file_path: `${uuidToUse}/offer_relieving_letter/${expert.documents.offerLetter}` } : null)),
+        executive_cv: expert?.documents?.executive_cv || expert?.documents?.items?.executive_cv || expert?.documents?.items?.resume || (typeof expert?.documents?.resume === 'object' ? expert?.documents?.resume : (expert?.documents?.resume ? { file_name: expert.documents.resume, fileName: expert.documents.resume, file_path: `${uuidToUse}/executive_cv/${expert.documents.resume}` } : null))
+      };
+
+      // 2. Fetch fresh from backend database & storage
+      if (uuidToUse) {
+        const res = await fetchExpertDocuments(uuidToUse);
+        if (res.success && res.documents) {
+          REQUIRED_DOC_TYPES.forEach(t => {
+            if (res.documents[t]) {
+              seedDocs[t] = res.documents[t];
+            }
+          });
+        }
+      }
+
+      setDocuments(seedDocs);
+
+      // 3. Resolve signed URLs for all found documents
+      for (const t of REQUIRED_DOC_TYPES) {
+        const d = seedDocs[t];
+        const fp = d?.file_path || d?.filePath;
+        if (fp) {
+          await resolveSignedUrl(t, fp);
+        }
+      }
+    } catch (err: any) {
+      console.error('[VIEWER] Document load error:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    let active = true;
+    const isUuid = (val: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val);
+    let foundUuid = '';
+
+    if (expert?.user_id && isUuid(expert.user_id)) foundUuid = expert.user_id;
+    else if (expert?.id && isUuid(expert.id)) foundUuid = expert.id;
+    else if (expert?.expertId && isUuid(expert.expertId)) foundUuid = expert.expertId;
+
+    async function resolveAndLoad() {
+      if (!foundUuid && expert?.email) {
+        try {
+          const { data: u } = await supabase.from('users').select('id').eq('email', expert.email.toLowerCase().trim()).maybeSingle();
+          if (u?.id && isUuid(u.id)) foundUuid = u.id;
+        } catch {}
+      }
+
+      if (!foundUuid) foundUuid = expert?.id || '';
+      if (active) {
+        setResolvedUuid(foundUuid);
+        await loadDocs(foundUuid);
+      }
+    }
+
+    resolveAndLoad();
+
+    // Setup Realtime listener on channel so expert's replaces/deletes update the viewer instantly
+    const channel = supabase.channel(`viewer-${expert?.id || 'live'}`);
+    channel
+      .on('broadcast', { event: 'document_uploaded' }, (e) => {
+        const p = e.payload;
+        if (p && (p.expertId === expert?.id || p.expertId === foundUuid || (expert?.email && p.email?.toLowerCase() === expert?.email?.toLowerCase()))) {
+          console.log('[VIEWER REALTIME] Document uploaded, refreshing viewer:', p);
+          loadDocs(foundUuid);
+        }
+      })
+      .on('broadcast', { event: 'document_deleted' }, (e) => {
+        const p = e.payload;
+        if (p && (p.expertId === expert?.id || p.expertId === foundUuid)) {
+          console.log('[VIEWER REALTIME] Document deleted, refreshing viewer:', p);
+          loadDocs(foundUuid);
+        }
+      })
+      .subscribe();
+
+    return () => {
+      active = false;
+      supabase.removeChannel(channel);
+    };
+  }, [expert?.id, expert?.email]);
+
+  const activeDoc = documents[activeSlot];
+  const activeUrl = signedUrls[activeSlot];
+  const activeMeta = DOC_TYPE_META[activeSlot];
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-black/85 backdrop-blur-md animate-fadeIn">
+      <div
+        className={`w-full max-w-4xl p-5 sm:p-6 rounded-2xl border shadow-2xl flex flex-col max-h-[92vh] ${
+          isLight ? "text-slate-900 bg-white border-slate-200" : "text-slate-100 bg-[#0E1520] border-amber-500/30"
+        }`}
+      >
+        {/* Top Header */}
+        <div className={`flex justify-between items-center pb-4 border-b shrink-0 ${isLight ? "border-slate-200" : "border-slate-800"}`}>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className={`text-lg sm:text-xl font-serif font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
+                Credential Document Audit Viewer
+              </span>
+              <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/30">
+                Live DB Sync
+              </span>
+            </div>
+            <p className={`text-xs mt-1 ${isLight ? "text-slate-600" : "text-slate-400"}`}>
+              Applicant: <span className="font-semibold">{expert.name}</span> · {expert.field || "Strategy"} · Ex-{expert.company || "Enterprise Firm"} ({expert.years || 0} yrs exp)
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className={`p-2 rounded-lg cursor-pointer transition-colors ${
+              isLight ? "text-slate-500 hover:text-slate-900 hover:bg-slate-100" : "text-slate-400 hover:text-white hover:bg-white/10"
+            }`}
+            title="Close viewer"
+          >
+            <X size={20} />
+          </button>
+        </div>
+
+        {/* 3 Document Slot Tabs */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 py-3 border-b border-slate-200/50 dark:border-white/5 shrink-0">
+          {REQUIRED_DOC_TYPES.map((t) => {
+            const meta = DOC_TYPE_META[t];
+            const d = documents[t];
+            const isUploaded = Boolean(d && (d.file_name || d.fileName || d.file_path || d.filePath));
+            const isActive = activeSlot === t;
+
+            return (
+              <button
+                key={t}
+                type="button"
+                onClick={() => setActiveSlot(t)}
+                className={`p-2.5 rounded-xl text-left border transition-all cursor-pointer flex flex-col justify-between gap-1.5 ${
+                  isActive
+                    ? (isLight ? "bg-amber-50 border-amber-400 shadow-sm" : "bg-amber-500/15 border-amber-500 text-white")
+                    : (isLight ? "bg-slate-50 border-slate-200 hover:bg-slate-100 text-slate-700" : "bg-white/5 border-white/10 hover:bg-white/10 text-slate-300")
+                }`}
+              >
+                <div className="flex items-center justify-between gap-1">
+                  <span className="text-xs font-bold truncate">{meta.title}</span>
+                  <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded border shrink-0 ${
+                    isUploaded
+                      ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
+                      : "bg-slate-500/10 text-slate-400 border-slate-500/30"
+                  }`}>
+                    {isUploaded ? "✓ (Uploaded)" : "(Not uploaded yet)"}
+                  </span>
+                </div>
+                <span className="text-[10px] text-slate-400 font-mono truncate">
+                  {isUploaded ? (d.file_name || d.fileName || 'PDF Document') : 'Slot empty'}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Inline PDF Viewer Area */}
+        <div className="flex-1 overflow-y-auto py-3 min-h-[360px] flex flex-col">
+          {loading ? (
+            <div className="m-auto py-16 text-center text-xs text-slate-400 flex flex-col items-center justify-center gap-2">
+              <RefreshCw size={24} className="animate-spin text-amber-500" />
+              <span>Fetching latest document credentials from Supabase Storage...</span>
+            </div>
+          ) : activeDoc ? (
+            <div className="flex-1 flex flex-col space-y-3">
+              {/* Document Meta & Toolbar */}
+              <div className={`p-3 rounded-xl border flex flex-wrap items-center justify-between gap-3 ${
+                isLight ? "bg-slate-50 border-slate-200" : "bg-[#111A27] border-white/10"
+              }`}>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <FileText size={16} className="text-amber-500 shrink-0" />
+                    <span className={`text-xs font-bold truncate ${isLight ? "text-slate-900" : "text-white"}`}>
+                      {activeDoc.file_name || activeDoc.fileName || `${activeMeta.title}.pdf`}
+                    </span>
+                    <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/15 px-2 py-0.5 rounded border border-emerald-500/30">
+                      Verified Slot
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 font-mono mt-0.5">
+                    {formatDocumentSize(activeDoc.file_size || activeDoc.fileSize || 500000)} · Uploaded: {new Date(activeDoc.uploaded_at || activeDoc.uploadedAt || new Date()).toLocaleDateString()}
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  {activeUrl && (
+                    <a
+                      href={activeUrl}
+                      download={activeDoc.file_name || activeDoc.fileName || `${activeMeta.title}.pdf`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 flex items-center gap-1.5 transition-colors cursor-pointer shadow-sm"
+                      title="Download PDF"
+                    >
+                      <Download size={13} /> Download PDF
+                    </a>
+                  )}
+                  {activeUrl && (
+                    <a
+                      href={activeUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold border flex items-center gap-1.5 transition-colors cursor-pointer ${
+                        isLight ? "bg-white hover:bg-slate-100 text-slate-700 border-slate-300" : "bg-white/10 hover:bg-white/15 text-slate-200 border-white/15"
+                      }`}
+                      title="Open in new window"
+                    >
+                      <ExternalLink size={13} /> Open Tab
+                    </a>
+                  )}
+                </div>
+              </div>
+
+              {/* PDF Preview Frame */}
+              <div className="flex-1 min-h-[380px] sm:min-h-[460px] rounded-xl overflow-hidden border border-slate-700/60 bg-slate-900 relative">
+                {activeUrl ? (
+                  <iframe
+                    src={activeUrl}
+                    title={activeMeta.title}
+                    className="w-full h-full min-h-[420px] sm:min-h-[480px] border-0 bg-white"
+                  />
+                ) : (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center text-slate-400">
+                    <RefreshCw size={24} className="animate-spin text-amber-500 mb-2" />
+                    <p className="text-xs">Generating secure PDF preview link...</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            /* Clear "Not uploaded yet" State */
+            <div className={`m-auto p-12 text-center rounded-2xl border flex flex-col items-center justify-center max-w-md ${
+              isLight ? "bg-slate-50 border-slate-200" : "bg-[#111A27]/60 border-white/10"
+            }`}>
+              <div className="w-16 h-16 rounded-full bg-slate-800/80 border border-slate-700 flex items-center justify-center mb-3 text-slate-400">
+                <FileQuestion size={32} />
+              </div>
+              <h3 className={`text-base font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
+                Not uploaded yet
+              </h3>
+              <p className={`text-xs mt-1 leading-relaxed ${isLight ? "text-slate-600" : "text-slate-400"}`}>
+                The expert has not uploaded their <span className="font-semibold text-amber-400">{activeMeta.title}</span> yet.
+              </p>
+              <p className="text-[11px] text-slate-500 mt-2 font-mono">
+                When the expert uploads or replaces this file in the Expert portal, this viewer will update automatically in real time.
+              </p>
+            </div>
+          )}
+        </div>
+
+        {/* Footer Actions */}
+        <div className={`flex flex-wrap items-center justify-between gap-3 pt-3 border-t shrink-0 ${isLight ? "border-slate-200" : "border-slate-800"}`}>
+          <button
+            type="button"
+            onClick={onClose}
+            className={`px-4 py-2 rounded-lg text-xs font-semibold cursor-pointer transition-colors ${
+              isLight ? "bg-slate-100 hover:bg-slate-200 text-slate-700" : "bg-white/10 hover:bg-white/15 text-slate-300"
+            }`}
+          >
+            Close Viewer
+          </button>
+
+          <div className="flex items-center gap-2">
+            {onReject && (
+              <button
+                type="button"
+                onClick={() => {
+                  onReject(expert);
+                }}
+                className="px-4 py-2 text-xs rounded-lg font-bold border transition-all cursor-pointer flex items-center gap-1.5 bg-rose-950/80 text-rose-300 hover:bg-rose-900 border-rose-800"
+              >
+                <AlertCircle size={14} /> Reject Submission
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={async () => {
+                await onApprove(expert.id);
+                onClose();
+              }}
+              className="px-5 py-2 text-xs rounded-lg font-bold bg-emerald-600 hover:bg-emerald-500 text-white transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-lg"
+            >
+              <Check size={14} /> Accept & Verify Expert
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
   setPage,
   experts: propExperts = [],
@@ -141,6 +510,20 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
   const [activeDesk, setActiveDesk] = useState<"kpi" | "kyc" | "pricing" | "spotlight" | "reviews" | "sessions" | "broadcast" | "diagnostics" | "expertise" | "availability" | "project_reviews" | "blogs">("kpi");
   const [adminInspectingReviewId, setAdminInspectingReviewId] = useState<string | null>(null);
   const [selectedAuditItem, setSelectedAuditItem] = useState<any | null>(null);
+  const [auditInitialSlot, setAuditInitialSlot] = useState<ExpertDocType>('work_experience_cert');
+  const [actionToast, setActionToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+
+  const showActionToast = (message: string, type: 'success' | 'error' | 'info' = 'success') => {
+    setActionToast({ message, type });
+    setTimeout(() => {
+      setActionToast(prev => prev?.message === message ? null : prev);
+    }, 4500);
+  };
+
+  const handleOpenViewer = (item: any, slot: ExpertDocType = 'work_experience_cert') => {
+    setSelectedAuditItem(item);
+    setAuditInitialSlot(slot);
+  };
 
   const [adminPreviewDoc, setAdminPreviewDoc] = useState<DocumentViewerItem | null>(null);
   const [expertSearch, setExpertSearch] = useState("");
@@ -195,112 +578,11 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
       config: { broadcast: { self: false } }
     });
 
-    // Handle incoming postgres_changes on expert_profiles
+    // Handle incoming postgres_changes on experts table
     channel
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'expert_profiles' }, (payload) => {
-        const newExp = payload.new;
-        console.log('[REALTIME] New expert registered (INSERT):', newExp);
-        if (newExp && !newExp.is_removed) {
-          setLocalPendingVerifications(prev => {
-            if (prev.some(p => p.id === newExp.id || (newExp.email && p.email?.toLowerCase() === newExp.email?.toLowerCase()))) {
-              return prev;
-            }
-            const mapped = {
-              id: newExp.id,
-              expertId: newExp.id,
-              name: newExp.full_name || 'Senior Professional',
-              email: newExp.email || '',
-              phone: newExp.phone || '',
-              field: newExp.field || 'Strategic Leadership',
-              company: newExp.company || 'Enterprise Firm',
-              years: newExp.years || 0,
-              baseRate: newExp.base_rate || 799,
-              projectRate: newExp.project_rate || 1000,
-              bio: newExp.bio || '',
-              status: 'Registered / Documents Pending',
-              verificationStatus: newExp.status || 'pending_verification',
-              submittedAt: newExp.created_at || new Date().toISOString(),
-              documents: {},
-              recentChanges: []
-            };
-            return [mapped, ...prev];
-          });
-          confetti({ particleCount: 30, spread: 45, origin: { y: 0.4 } });
-        }
-      })
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'expert_profiles' }, (payload) => {
-        const updated = payload.new as any;
-        console.log('[REALTIME] Expert updated (UPDATE):', updated);
-        if (!updated) return;
-
-        // If marked removed or approved, remove from KYC queue immediately
-        if (updated.is_removed || updated.status === 'approved' || updated.status === 'removed') {
-          setLocalPendingVerifications(prev => prev.filter(p => p.id !== updated.id));
-        } else {
-          setLocalPendingVerifications(prev => prev.map(p => {
-            if (p.id === updated.id) {
-              return {
-                ...p,
-                name: updated.full_name || p.name,
-                email: updated.email || p.email,
-                phone: updated.phone || p.phone,
-                field: updated.field || p.field,
-                company: updated.company || p.company,
-                years: updated.years ?? p.years,
-                baseRate: updated.base_rate ?? p.baseRate,
-                projectRate: updated.project_rate ?? p.projectRate,
-                bio: updated.bio || p.bio,
-                status: updated.status === 'pending_verification' ? 'Pending Audit' : updated.status,
-                verificationStatus: updated.status,
-                rejectionReason: updated.rejection_reason
-              };
-            }
-            return p;
-          }));
-        }
-      })
-      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'expert_profiles' }, (payload) => {
-        const oldId = (payload.old as any)?.id;
-        console.log('[REALTIME] Expert deleted (DELETE):', oldId);
-        if (oldId) {
-          setLocalPendingVerifications(prev => prev.filter(p => p.id !== oldId));
-        }
-      })
-      // Handle incoming postgres_changes on documents
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'documents' }, (payload) => {
-        const doc = payload.new as any;
-        console.log('[REALTIME] Document change (documents):', doc);
-        if (doc && doc.expert_id) {
-          setLocalPendingVerifications(prev => prev.map(p => {
-            if (p.id === doc.expert_id) {
-              const updatedDocs = { ...(p.documents || {}) };
-              updatedDocs[doc.document_type] = doc;
-              return {
-                ...p,
-                status: 'Pending Audit',
-                verificationStatus: 'pending_verification',
-                documents: updatedDocs
-              };
-            }
-            return p;
-          }));
-        }
-      })
-      // Handle incoming postgres_changes on expert_profile_changes
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'expert_profile_changes' }, (payload) => {
-        const change = payload.new as any;
-        console.log('[REALTIME] Profile change detected:', change);
-        if (change && change.expert_id) {
-          setRecentLiveChanges(prev => ({
-            ...prev,
-            [change.expert_id]: {
-              fieldName: change.field_name,
-              oldValue: change.old_value,
-              newValue: change.new_value,
-              timestamp: change.changed_at
-            }
-          }));
-        }
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'experts' }, (payload) => {
+        console.log('[REALTIME] Postgres change on experts table:', payload);
+        handleRefresh();
       })
       // Direct Realtime Broadcast Events for Zero-Latency Cross-Browser Sync
       .on('broadcast', { event: 'expert_registered' }, (e) => {
@@ -362,22 +644,90 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
       .on('broadcast', { event: 'document_uploaded' }, (e) => {
         const p = e.payload;
         console.log('[REALTIME BROADCAST] Document uploaded:', p);
-        if (p && p.expertId) {
-          if (p.documentType && p.document) {
-            setLocalPendingVerifications(prev => prev.map(item => {
-              if (item.id === p.expertId) {
-                const updatedDocs = { ...(item.documents || {}) };
+        if (p && (p.expertId || p.email)) {
+          setLocalPendingVerifications(prev => prev.map(item => {
+            const isMatch = item.id === p.expertId || item.expertId === p.expertId || (p.email && item.email?.toLowerCase() === p.email.toLowerCase());
+            if (isMatch) {
+              const updatedDocs = { ...(item.documents || {}) };
+              if (p.documentType && p.document) {
                 updatedDocs[p.documentType] = p.document;
+                if (p.documentType === 'work_experience_cert') updatedDocs.expCert = p.document.file_name || p.document.fileName;
+                if (p.documentType === 'offer_relieving_letter') updatedDocs.offerLetter = p.document.file_name || p.document.fileName;
+                if (p.documentType === 'executive_cv') updatedDocs.resume = p.document.file_name || p.document.fileName;
+              }
+              const isResubmit = p.isResubmission || item.status === 'Rejected' || item.verificationStatus === 'rejected';
+              return {
+                ...item,
+                status: isResubmit ? 'Pending Review (Re-submitted)' : 'Pending Review',
+                verificationStatus: 'pending_verification',
+                rejected: false,
+                rejectionReason: isResubmit ? null : item.rejectionReason,
+                documents: updatedDocs
+              };
+            }
+            return item;
+          }));
+          handleRefresh();
+        }
+      })
+      .on('broadcast', { event: 'document_deleted' }, (e) => {
+        const p = e.payload;
+        console.log('[REALTIME BROADCAST] Document deleted:', p);
+        if (p && (p.expertId || p.email)) {
+          setLocalPendingVerifications(prev => prev.map(item => {
+            const isMatch = item.id === p.expertId || item.expertId === p.expertId || (p.email && item.email?.toLowerCase() === p.email.toLowerCase());
+            if (isMatch) {
+              const updatedDocs = { ...(item.documents || {}) };
+              if (p.docType) {
+                delete updatedDocs[p.docType];
+                if (p.docType === 'work_experience_cert') delete updatedDocs.expCert;
+                if (p.docType === 'offer_relieving_letter') delete updatedDocs.offerLetter;
+                if (p.docType === 'executive_cv') delete updatedDocs.resume;
+              }
+              return {
+                ...item,
+                status: 'Registered / Documents Pending',
+                documents: updatedDocs
+              };
+            }
+            return item;
+          }));
+          handleRefresh();
+        }
+      })
+      .on('broadcast', { event: 'expert_status_changed' }, (e) => {
+        const p = e.payload;
+        console.log('[REALTIME BROADCAST] Expert status changed:', p);
+        if (p && (p.expertId || p.email)) {
+          const isApproved = p.status === 'approved' || p.status === 'Verified' || p.isApproved;
+          const isRejected = p.status === 'rejected' || p.status === 'Rejected' || p.status === 'changes_requested' || p.isRejected;
+          if (isApproved) {
+            setLocalPendingVerifications(prev => prev.filter(item => item.id !== p.expertId && item.expertId !== p.expertId && (!p.email || item.email?.toLowerCase() !== p.email.toLowerCase())));
+          } else if (isRejected) {
+            setLocalPendingVerifications(prev => prev.map(item => {
+              const isMatch = item.id === p.expertId || item.expertId === p.expertId || (p.email && item.email?.toLowerCase() === p.email.toLowerCase());
+              if (isMatch) {
                 return {
                   ...item,
-                  status: 'Pending Audit',
-                  documents: updatedDocs
+                  status: 'Rejected',
+                  verificationStatus: 'rejected',
+                  rejected: true,
+                  verified: false,
+                  rejectionReason: p.rejectionReason || item.rejectionReason
                 };
               }
               return item;
             }));
           }
           handleRefresh();
+        }
+      })
+      .on('broadcast', { event: 'expert_deleted' }, (e) => {
+        const p = e.payload;
+        console.log('[REALTIME BROADCAST] Expert deleted:', p);
+        if (p && p.expertId) {
+          setLocalPendingVerifications(prev => prev.filter(item => item.id !== p.expertId && item.expertId !== p.expertId));
+          if (selectedAuditItem?.id === p.expertId) setSelectedAuditItem(null);
         }
       })
       .subscribe((status) => {
@@ -931,210 +1281,19 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
   const [newSessRate, setNewSessRate] = useState(600);
   const [newSessIsLive, setNewSessIsLive] = useState(false);
 
+  // FIX 5: Remove INITIAL_SESSIONS_ADMIN mock array. Supabase bookings table is the single source of truth.
+  // localStorage is strictly an ephemeral read cache overwritten by Supabase bookings fetch.
   const [platformSessions, setPlatformSessions] = useState<any[]>(() => {
     try {
       const saved = localStorage.getItem("app_platform_sessions");
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
+          return parsed.filter((s) => s && s.id && !s.deletedByAdmin && !isAdminRoleDeleted(s.id) && !String(s.id).startsWith("sess-live-") && !String(s.id).startsWith("sess-sched-") && !String(s.id).startsWith("sess-comp-"));
         }
       }
     } catch {}
-    return [
-      {
-        id: "sess-live-1",
-        client: "Raj (Nexus Tech Innovations)",
-        clientEmail: "raj@nexustech.in",
-        expert: "JK (Senior Logistics & Advisory Expert)",
-        expertEmail: "jk@registry.com",
-        topic: "Warehouse Logistics & Freight Fleet Bottleneck Audit",
-        when: "Today (Live)",
-        type: "Hourly Consultation",
-        rate: 1500,
-        payout: 1200,
-        status: "Live — Call In Progress",
-        isLive: true,
-        completed: false,
-        meetUrl: "https://meet.google.com/qwe-rtyu-iop",
-        meetCode: "qwe-rtyu-iop",
-        startedAt: "Active for 24 mins",
-        reviewed: false,
-        payoutTransferred: false
-      },
-      {
-        id: "sess-live-2",
-        client: "Priya Sharma (FinCorp Partners)",
-        clientEmail: "priya@fincorp.com",
-        expert: "Sunita Rao (Former CFO)",
-        expertEmail: "sunita.rao@registry.com",
-        topic: "Corporate Tax Exposure & ESOP Valuation Structuring",
-        when: "Today (Live)",
-        type: "Hourly Consultation",
-        rate: 750,
-        payout: 600,
-        status: "Live — Meeting Connected",
-        isLive: true,
-        completed: false,
-        meetUrl: "https://meet.google.com/abc-defg-hij",
-        meetCode: "abc-defg-hij",
-        startedAt: "Active for 12 mins",
-        reviewed: false,
-        payoutTransferred: false
-      },
-      {
-        id: "sess-sched-1",
-        client: "Vikramaditya Singh (Northwind Retail)",
-        clientEmail: "vikram@northwindretail.com",
-        expert: "JK (Senior Logistics & Advisory Expert)",
-        expertEmail: "jk@registry.com",
-        topic: "Multi-Hub Distribution Route Scheduling & Vendor Terms",
-        when: "2026-09-13, 04:00 PM",
-        type: "Hourly Consultation",
-        rate: 600,
-        payout: 500,
-        status: "Confirmed — Meet Link Sent",
-        isLive: false,
-        completed: false,
-        meetUrl: "https://meet.google.com/jkl-zxcv-bnm",
-        meetCode: "jkl-zxcv-bnm",
-        reviewed: false,
-        payoutTransferred: false
-      },
-      {
-        id: "sess-sched-2",
-        client: "Aditi Rao (Zeta Media)",
-        clientEmail: "aditi@zetamedia.in",
-        expert: "Meera Chatterjee (Senior Brand Director)",
-        expertEmail: "meera.c@registry.com",
-        topic: "D2C Brand Retention & Growth Launch Strategy",
-        when: "2026-09-14, 11:00 AM",
-        type: "Project Advisory",
-        rate: 2100,
-        payout: 1750,
-        status: "Confirmed — Meet Link Scheduled",
-        isLive: false,
-        completed: false,
-        meetUrl: "https://meet.google.com/mno-pqrs-tuv",
-        meetCode: "mno-pqrs-tuv",
-        reviewed: false,
-        payoutTransferred: false
-      },
-      {
-        id: "sess-sched-3",
-        client: "Siddharth Verma (EdTech Labs)",
-        clientEmail: "siddharth@edtechlabs.org",
-        expert: "Anjali Menon (Mathematics Pedagogy Specialist)",
-        expertEmail: "anjali.menon@registry.com",
-        topic: "K-12 Pedagogy Standard & Olympiad Math Design",
-        when: "2026-09-15, 02:30 PM",
-        type: "Hourly Consultation",
-        rate: 400,
-        payout: 300,
-        status: "Pending Expert Meet Link",
-        isLive: false,
-        completed: false,
-        meetUrl: "",
-        meetCode: "",
-        reviewed: false,
-        payoutTransferred: false
-      },
-      {
-        id: "sess-comp-1",
-        client: "Raj",
-        clientEmail: "raj@nexustech.in",
-        expert: "JK",
-        expertEmail: "jk@registry.com",
-        topic: "Freight Fleet Cost Rationalization",
-        when: "2026-09-11, 02:00 PM",
-        completedAt: "2026-09-11 03:00 PM",
-        type: "Hourly Consultation",
-        rate: 1500,
-        payout: 1200,
-        status: "Completed",
-        isLive: false,
-        completed: true,
-        meetUrl: "https://meet.google.com/qwe-rtyu-iop",
-        reviewed: true,
-        payoutTransferred: true
-      },
-      {
-        id: "sess-comp-2",
-        client: "Vikramaditya Singh",
-        clientEmail: "vikram@northwindretail.com",
-        expert: "JK",
-        expertEmail: "jk@registry.com",
-        topic: "GST Audits & Compliance Reconciliation",
-        when: "2026-09-07, 03:00 PM",
-        completedAt: "2026-09-07 04:00 PM",
-        type: "Hourly Consultation",
-        rate: 600,
-        payout: 500,
-        status: "Completed",
-        isLive: false,
-        completed: true,
-        meetUrl: "https://meet.google.com/jkl-zxcv-bnm",
-        reviewed: true,
-        payoutTransferred: true
-      },
-      {
-        id: "sess-comp-3",
-        client: "Priya Sharma",
-        clientEmail: "priya@fincorp.com",
-        expert: "Sunita Rao",
-        expertEmail: "sunita.rao@registry.com",
-        topic: "Corporate GST Structuring & Valuation Readiness",
-        when: "2026-09-01, 10:00 AM",
-        completedAt: "2026-09-01 11:15 AM",
-        type: "Hourly Consultation",
-        rate: 750,
-        payout: 600,
-        status: "Completed",
-        isLive: false,
-        completed: true,
-        meetUrl: "https://meet.google.com/abc-defg-hij",
-        reviewed: true,
-        payoutTransferred: true
-      },
-      {
-        id: "sess-comp-4",
-        client: "Kavita Nair (Aura Wellness)",
-        clientEmail: "kavita@aurawellness.in",
-        expert: "Krishnan Iyer",
-        expertEmail: "krishnan.iyer@registry.com",
-        topic: "Executive POSH Policy & Leadership Restructuring",
-        when: "2026-09-09, 05:00 PM",
-        completedAt: "2026-09-09 06:00 PM",
-        type: "Hourly Consultation",
-        rate: 650,
-        payout: 500,
-        status: "Completed",
-        isLive: false,
-        completed: true,
-        meetUrl: "https://meet.google.com/xyz-uvwx-rst",
-        reviewed: false,
-        payoutTransferred: true
-      },
-      {
-        id: "sess-comp-5",
-        client: "Harsh Vardhan (Zenith Logistics)",
-        clientEmail: "harsh@zenithlogistics.in",
-        expert: "Vikram Deshpande",
-        expertEmail: "vikram.d@registry.com",
-        topic: "Plant Shop-Floor Lean Six Sigma Overhaul",
-        when: "2026-09-10, 11:30 AM",
-        completedAt: "2026-09-10 01:00 PM",
-        type: "Project Advisory",
-        rate: 2250,
-        payout: 1800,
-        status: "Completed",
-        isLive: false,
-        completed: true,
-        meetUrl: "https://meet.google.com/uvw-xyz1-234",
-        reviewed: false,
-        payoutTransferred: false
-      }
-    ];
+    return [];
   });
 
   const syncPlatformSessions = (updated: any[]) => {
@@ -1149,15 +1308,102 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
     }
   };
 
-  // Dynamically scan and merge any bookings from client_upcoming_* and expert_accepted_sessions_*
+  // Dynamically scan and merge any bookings from client_upcoming_*, expert_accepted_sessions_*, and Supabase
   useEffect(() => {
+    // 1. Initial Authoritative Fetch from Supabase bookings table
+    const loadAuthoritativeSupabaseBookings = async () => {
+      try {
+        const sbBookings = await fetchAllBookingsForAdmin();
+        const mapped = sbBookings
+          .filter(b => !b.deletedByAdmin && !isAdminRoleDeleted(b.id))
+          .map(b => ({
+            ...b,
+            status: b.status === 'pending' ? 'Pending Expert Acceptance' : b.status,
+            isLive: b.status?.toLowerCase().includes('live') || b.isLive === true,
+            completed: b.status?.toLowerCase().includes('complete') || b.completed === true
+          }));
+        setPlatformSessions(mapped);
+        localStorage.setItem("app_platform_sessions", JSON.stringify(mapped));
+      } catch (err) {
+        console.warn('[ADMIN PORTAL] Supabase initial fetch note:', err);
+      }
+    };
+
+    loadAuthoritativeSupabaseBookings();
+
+    // 2. Real-time subscription to Supabase bookings table
+    const unsubRealtime = subscribeToBookingsRealtime({
+      channelName: 'admin-portal-bookings-realtime',
+      onInsert: (newBooking) => {
+        if (newBooking.deletedByAdmin || isAdminRoleDeleted(newBooking.id)) {
+          return;
+        }
+        console.log('[ADMIN REALTIME] Incoming booking inserted in Supabase:', newBooking);
+        setPlatformSessions(prev => {
+          if (prev.some(s => s.id === newBooking.id)) return prev;
+          const isDone = newBooking.status?.toLowerCase().includes('complete') || newBooking.completed === true;
+          const isLiveNow = !isDone && (newBooking.status?.toLowerCase().includes('live') || newBooking.isLive === true);
+          const mapped = {
+            ...newBooking,
+            status: newBooking.status === 'pending' ? 'Pending Expert Acceptance' : newBooking.status,
+            isLive: isLiveNow,
+            completed: isDone,
+            meetUrl: newBooking.meet_link || newBooking.meeting_link || newBooking.meetUrl || ''
+          };
+          const next = [mapped, ...prev];
+          localStorage.setItem("app_platform_sessions", JSON.stringify(next));
+          return next;
+        });
+      },
+      onUpdate: (updatedBooking) => {
+        if (updatedBooking.deletedByAdmin || isAdminRoleDeleted(updatedBooking.id)) {
+          setPlatformSessions(prev => {
+            const next = prev.filter(s => s.id !== updatedBooking.id);
+            localStorage.setItem("app_platform_sessions", JSON.stringify(next));
+            return next;
+          });
+          return;
+        }
+        console.log('[ADMIN REALTIME] Booking status updated in Supabase:', updatedBooking);
+        setPlatformSessions(prev => {
+          const isDone = updatedBooking.status?.toLowerCase().includes('complete') || updatedBooking.completed === true;
+          const isLiveNow = !isDone && (updatedBooking.status?.toLowerCase().includes('live') || updatedBooking.isLive === true);
+          const mapped = {
+            ...updatedBooking,
+            status: updatedBooking.status === 'pending' ? 'Pending Expert Acceptance' : updatedBooking.status,
+            isLive: isLiveNow,
+            completed: isDone,
+            meetUrl: updatedBooking.meet_link || updatedBooking.meeting_link || updatedBooking.meetUrl || ''
+          };
+          const idx = prev.findIndex(s => s.id === mapped.id);
+          let next: any[];
+          if (idx >= 0) {
+            next = [...prev];
+            next[idx] = { ...next[idx], ...mapped };
+          } else {
+            next = [mapped, ...prev];
+          }
+          localStorage.setItem("app_platform_sessions", JSON.stringify(next));
+          return next;
+        });
+      },
+      onDelete: (deletedId) => {
+        console.log('[ADMIN REALTIME] Booking deleted from Supabase:', deletedId);
+        setPlatformSessions(prev => {
+          const next = prev.filter(s => s.id !== deletedId);
+          localStorage.setItem("app_platform_sessions", JSON.stringify(next));
+          return next;
+        });
+      }
+    });
+
     const scanAllActiveSessions = () => {
       try {
         const deletedIds = new Set<string>();
-        const savedGlobal = localStorage.getItem("app_deleted_sessions");
-        if (savedGlobal) {
+        const savedAdmin = localStorage.getItem("admin_deleted_sessions");
+        if (savedAdmin) {
           try {
-            const parsed = JSON.parse(savedGlobal);
+            const parsed = JSON.parse(savedAdmin);
             if (Array.isArray(parsed)) parsed.forEach((id: string) => deletedIds.add(id));
           } catch {}
         }
@@ -1179,11 +1425,11 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
                   if (Array.isArray(arr)) {
                     arr.forEach((b: any) => {
                       if (b && b.id && !deletedIds.has(b.id)) {
-                        if (b.status?.toLowerCase().includes("decline")) {
+                        if (b.status?.toLowerCase().includes("decline") || b.status?.toLowerCase().includes("reject")) {
                           if (map.has(b.id)) {
                             map.set(b.id, {
                               ...map.get(b.id),
-                              status: "Declined by Expert",
+                              status: "Rejected",
                               completed: false,
                               isLive: false
                             });
@@ -1348,14 +1594,76 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
       } catch {}
     };
 
+    const handleBookingUpdateEvent = (detail: any) => {
+      if (!detail) return;
+      const bId = String(detail.id || detail.bookingId || '');
+      if (!bId || isAdminRoleDeleted(bId)) return;
+      console.log('[ADMIN REALTIME] Processing booking update event:', detail);
+      setPlatformSessions(prev => {
+        const isDone = String(detail.status || '').toLowerCase().includes('complete') || detail.completed === true;
+        const isLiveNow = !isDone && (String(detail.status || '').toLowerCase().includes('live') || detail.isLive === true);
+        const meetUrl = detail.meetUrl || detail.meet_link || detail.meeting_link || '';
+        const idx = prev.findIndex(s => s.id === bId);
+        let next: any[];
+        if (idx >= 0) {
+          next = [...prev];
+          next[idx] = {
+            ...next[idx],
+            ...detail,
+            status: detail.status || next[idx].status,
+            isLive: isLiveNow,
+            completed: isDone,
+            meetUrl: meetUrl || next[idx].meetUrl || ''
+          };
+        } else {
+          next = [normalizeBooking({ ...detail, id: bId }), ...prev];
+        }
+        localStorage.setItem("app_platform_sessions", JSON.stringify(next));
+        return next;
+      });
+    };
+
+    const handleBookingDecision = (e: any) => {
+      handleBookingUpdateEvent(e.detail);
+    };
+
+    const handleCustomBookingUpdated = (e: any) => {
+      handleBookingUpdateEvent(e.detail);
+    };
+
+    let bcUpdates: BroadcastChannel | null = null;
+    let bcDecisions: BroadcastChannel | null = null;
+    try {
+      if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+        bcUpdates = new BroadcastChannel('mentora_booking_updates');
+        bcUpdates.onmessage = (event) => {
+          if (event.data) handleBookingUpdateEvent(event.data);
+        };
+        bcDecisions = new BroadcastChannel('mentora_booking_decisions');
+        bcDecisions.onmessage = (event) => {
+          if (event.data) handleBookingUpdateEvent(event.data);
+        };
+      }
+    } catch {}
+
     scanAllActiveSessions();
+    window.addEventListener("booking_decision_updated", handleBookingDecision);
+    window.addEventListener("booking_updated", handleCustomBookingUpdated);
     window.addEventListener("storage", scanAllActiveSessions);
     window.addEventListener("mongo_kv_updated", scanAllActiveSessions);
     window.addEventListener("mongo_db_updated", scanAllActiveSessions);
     window.addEventListener("app_platform_sessions_updated", scanAllActiveSessions);
-    const scanTimer = setInterval(scanAllActiveSessions, 2500);
+    const scanTimer = setInterval(() => {
+      scanAllActiveSessions();
+      loadAuthoritativeSupabaseBookings();
+    }, 2500);
 
     return () => {
+      unsubRealtime();
+      bcUpdates?.close();
+      bcDecisions?.close();
+      window.removeEventListener("booking_decision_updated", handleBookingDecision);
+      window.removeEventListener("booking_updated", handleCustomBookingUpdated);
       window.removeEventListener("storage", scanAllActiveSessions);
       window.removeEventListener("mongo_kv_updated", scanAllActiveSessions);
       window.removeEventListener("mongo_db_updated", scanAllActiveSessions);
@@ -1429,7 +1737,9 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
       }
       return s;
     });
+    setPlatformSessions(updated);
     syncPlatformSessions(updated);
+    updateBookingStatus(sessId, 'completed', {}, { userRole: 'admin' }).catch(() => {});
 
     // Sync to all client_upcoming_* keys
     for (let i = 0; i < localStorage.length; i++) {
@@ -1507,7 +1817,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
     alert(`✅ Consultation Marked Completed!\nClient invited to rate expert, and payout disbursed.`);
   };
 
-  // Action: Admin deletes session
+  // Action: Admin deletes session (Soft delete for Admin Portal only)
   const handleDeleteSession = (sessId: string) => {
     const target = platformSessions.find(s => s.id === sessId);
     if (!confirm(`Are you sure you want to delete session "${target?.topic || sessId}"? This will remove it from all active records.`)) {
@@ -1515,39 +1825,20 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
     }
 
     try {
-      const savedGlobal = localStorage.getItem("app_deleted_sessions");
-      const existingGlobal = savedGlobal ? JSON.parse(savedGlobal) : [];
-      const nextGlobal = Array.from(new Set([...existingGlobal, sessId]));
-      localStorage.setItem("app_deleted_sessions", JSON.stringify(nextGlobal));
-      mongoDB.syncKv("app_deleted_sessions", nextGlobal);
+      const savedAdmin = localStorage.getItem("admin_deleted_sessions");
+      const existingAdmin = savedAdmin ? JSON.parse(savedAdmin) : [];
+      const nextAdmin = Array.from(new Set([...existingAdmin, sessId]));
+      localStorage.setItem("admin_deleted_sessions", JSON.stringify(nextAdmin));
+      mongoDB.syncKv("admin_deleted_sessions", nextAdmin);
     } catch {}
+
+    recordRoleDeleted(sessId, 'admin');
 
     const updated = platformSessions.filter(s => s.id !== sessId);
     syncPlatformSessions(updated);
-
-    try {
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (key && (key.startsWith("client_upcoming_") || key.startsWith("expert_accepted_sessions_"))) {
-          const raw = localStorage.getItem(key);
-          if (raw) {
-            try {
-              const arr = JSON.parse(raw);
-              if (Array.isArray(arr)) {
-                const filtered = arr.filter((item: any) => item && item.id !== sessId);
-                if (filtered.length !== arr.length) {
-                  localStorage.setItem(key, JSON.stringify(filtered));
-                  mongoDB.syncKv(key, filtered);
-                }
-              }
-            } catch {}
-          }
-        }
-      }
-    } catch {}
+    deleteBooking(sessId, { userRole: 'admin' }).catch(() => {});
 
     if (typeof window !== "undefined") {
-      window.dispatchEvent(new CustomEvent("mongo_kv_updated", { detail: { key: "client_upcoming" } }));
       window.dispatchEvent(new CustomEvent("mongo_kv_updated", { detail: { key: "app_platform_sessions" } }));
       window.dispatchEvent(new CustomEvent("app_platform_sessions_updated"));
       window.dispatchEvent(new Event("storage"));
@@ -1624,7 +1915,9 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
       }
       return s;
     });
+    setPlatformSessions(updated);
     syncPlatformSessions(updated);
+    updateBookingStatus(sessId, 'live', { meet_link: meetUrl }, { userRole: 'admin' }).catch(() => {});
 
     alert(`🔴 Session Moved to LIVE Now!\n\nClient: ${target.client}\nExpert: ${target.expert}\nGoogle Meet: ${meetUrl}\n\nBoth participants and Admin can join the active Google Meet consultation.`);
   };
@@ -1717,33 +2010,55 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
     setIsSubmittingAction(true);
     try {
       const item = localPendingVerifications.find((v) => v.id === id) || pendingVerifications.find((v) => v.id === id);
-      // 1. Call approve-document API endpoint on Supabase backend
-      await fetch('/api/admin/approve-document', {
+      // 1. Call approve-expert API endpoint on Supabase backend
+      const res = await fetch('/api/admin/approve-expert', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ expertId: id, adminId: 'admin' })
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-id': 'admin',
+          'x-admin-token': 'admin-session-token'
+        },
+        body: JSON.stringify({ expertId: id, email: item?.email, adminId: 'admin' })
       });
+      const data = await res.json();
+      if (!data.success) {
+        throw new Error(data.error || 'Failed to approve expert');
+      }
 
-      // 2. Broadcast realtime status update to Expert Portal
+      // 2. Broadcast realtime status update to Expert Portal & Client Portal
       try {
         const ch = supabase.channel('admin-kyc-desk');
         ch.send({
           type: 'broadcast',
           event: 'expert_status_changed',
-          payload: { expertId: id, email: item?.email, status: 'approved' }
+          payload: {
+            expertId: id,
+            email: item?.email,
+            status: 'Verified',
+            verificationStatus: 'approved',
+            isApproved: true
+          }
         });
       } catch {}
 
-      // 3. Move applicant into "Expert Rates & Markups" (Desk 03)
+      // 3. Move applicant into "Expert Rates & Markups" (Desk 03) & make live
       if (item && onApproveVerification) {
-        await onApproveVerification(item);
+        await onApproveVerification({
+          ...item,
+          verified: true,
+          verificationStatus: 'approved',
+          rejected: false
+        });
       }
 
       // Remove from KYC queue immediately
-      setLocalPendingVerifications(prev => prev.filter(p => p.id !== id));
+      setLocalPendingVerifications(prev => prev.filter(p => p.id !== id && p.expertId !== id));
+      if (selectedAuditItem?.id === id) setSelectedAuditItem(null);
+
       confetti({ particleCount: 50, spread: 50, origin: { y: 0.5 } });
+      showActionToast(`Expert "${item?.name || 'Professional'}" verified & moved to Expert Rate & Markup desk!`, 'success');
     } catch (err: any) {
-      alert(`Approval error: ${err?.message || 'Failed to approve'}`);
+      showActionToast(`Approval error: ${err?.message || 'Failed to approve'}`, 'error');
     } finally {
       setIsSubmittingAction(false);
     }
@@ -1751,23 +2066,25 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
 
   const handleOpenRejectModal = (item: any) => {
     setRejectModalItem(item);
-    setRejectReasonText(item?.rejectionReason || "");
+    setRejectReasonText(item?.rejectionReason || "Your submission has been rejected because the uploaded documents were not valid. Please upload valid documents and re-apply.");
   };
 
   const handleConfirmReject = async () => {
     if (!rejectModalItem) return;
-    if (!rejectReasonText.trim()) {
-      alert("⚠️ Mandatory rejection reason is required.");
-      return;
-    }
+    const cleanReason = rejectReasonText.trim() || "Your submission has been rejected because the uploaded documents were not valid. Please upload valid documents and re-apply.";
+
     setIsSubmittingAction(true);
     try {
-      const cleanReason = rejectReasonText.trim();
-      const res = await fetch('/api/admin/reject-document', {
+      const res = await fetch('/api/admin/reject-expert', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-id': 'admin',
+          'x-admin-token': 'admin-session-token'
+        },
         body: JSON.stringify({
           expertId: rejectModalItem.id,
+          email: rejectModalItem.email,
           reason: cleanReason,
           adminId: 'admin'
         })
@@ -1786,68 +2103,92 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
           payload: {
             expertId: rejectModalItem.id,
             email: rejectModalItem.email,
-            status: 'changes_requested',
+            status: 'Rejected',
+            verificationStatus: 'rejected',
+            isRejected: true,
             rejectionReason: cleanReason
           }
         });
       } catch {}
 
-      // Update local state to show rejection reason / status
+      // Update local state in KYC queue (keep card in queue, show red Rejected badge)
       setLocalPendingVerifications(prev => prev.map(p => {
-        if (p.id === rejectModalItem.id) {
+        if (p.id === rejectModalItem.id || (rejectModalItem.email && p.email?.toLowerCase() === rejectModalItem.email?.toLowerCase())) {
           return {
             ...p,
-            status: 'Changes Requested',
-            verificationStatus: 'changes_requested',
+            status: 'Rejected',
+            verificationStatus: 'rejected',
+            rejected: true,
+            verified: false,
             rejectionReason: cleanReason
           };
         }
         return p;
       }));
 
+      // Update parent state so expert is marked unverified/rejected everywhere
+      if (onDemoteToAuditQueue) {
+        onDemoteToAuditQueue(rejectModalItem.id);
+      }
+
       setRejectModalItem(null);
       setRejectReasonText("");
-      alert("✅ Rejection reason saved and transmitted to Expert Portal in real time!");
+      showActionToast("Applicant marked as Rejected and notified to re-upload documents.", 'info');
     } catch (err: any) {
-      alert(`Rejection error: ${err?.message || 'Failed to reject applicant'}`);
+      showActionToast(`Rejection error: ${err?.message || 'Failed to reject applicant'}`, 'error');
     } finally {
       setIsSubmittingAction(false);
     }
   };
 
-  const handleRemoveExpert = async (id: string, name: string) => {
-    if (!window.confirm(`Are you sure you want to remove applicant "${name}" from the verification queue? (Soft Delete)`)) {
+  const handleDeleteExpert = async (id: string, name: string) => {
+    if (!window.confirm("This will permanently delete this profile. Continue?")) {
       return;
     }
     setIsSubmittingAction(true);
     try {
-      await fetch('/api/admin/remove-expert', {
+      const res = await fetch('/api/admin/delete-expert', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-id': 'admin',
+          'x-admin-token': 'admin-session-token'
+        },
         body: JSON.stringify({ expertId: id, adminId: 'admin' })
       });
+      const data = await res.json();
+      if (!data.success) {
+        throw new Error(data.error || 'Failed to delete expert');
+      }
 
-      // Broadcast realtime removal
+      // Broadcast realtime deletion
       try {
         const ch = supabase.channel('admin-kyc-desk');
         ch.send({
           type: 'broadcast',
-          event: 'expert_status_changed',
-          payload: { expertId: id, status: 'removed' }
+          event: 'expert_deleted',
+          payload: { expertId: id }
         });
       } catch {}
 
       // Remove from local list immediately
-      setLocalPendingVerifications(prev => prev.filter(p => p.id !== id));
+      setLocalPendingVerifications(prev => prev.filter(p => p.id !== id && p.expertId !== id));
+      if (selectedAuditItem?.id === id) setSelectedAuditItem(null);
       if (onDeleteExpert) onDeleteExpert(id);
+
+      showActionToast(`Profile "${name}" permanently deleted from database and storage.`, 'success');
     } catch (err: any) {
-      alert(`Removal error: ${err?.message || 'Failed to remove expert'}`);
+      showActionToast(`Deletion error: ${err?.message || 'Failed to delete expert'}`, 'error');
     } finally {
       setIsSubmittingAction(false);
     }
   };
 
-  const filteredExperts = experts.filter((e) => {
+  const handleRemoveExpert = handleDeleteExpert;
+
+  const verifiedExperts = experts.filter((e) => e.verified === true && e.verificationStatus !== "pending" && e.verificationStatus !== "rejected" && !(e as any).rejected);
+
+  const filteredExperts = verifiedExperts.filter((e) => {
     if (!expertSearch.trim()) return true;
     const q = expertSearch.toLowerCase();
     return e.name.toLowerCase().includes(q) || (e.field && e.field.toLowerCase().includes(q)) || (e.company && e.company.toLowerCase().includes(q));
@@ -1855,9 +2196,9 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
 
   const pendingReviewsCount = (Array.isArray(platformReviews) ? platformReviews : []).filter((r) => !r?.visibleToExpert).length;
 
-  const liveSessionsList = platformSessions.filter(s => !s.completed && (s.isLive || s.status?.toLowerCase().includes("live")));
-  const scheduledSessionsList = platformSessions.filter(s => !s.completed && !s.isLive && !s.status?.toLowerCase().includes("live"));
-  const completedSessionsList = platformSessions.filter(s => s.completed || s.status?.toLowerCase().includes("completed"));
+  const liveSessionsList = platformSessions.filter(s => !s.completed && !s.status?.toLowerCase().includes("complete") && (s.isLive || s.status?.toLowerCase().includes("live")));
+  const scheduledSessionsList = platformSessions.filter(s => !s.completed && !s.status?.toLowerCase().includes("complete"));
+  const completedSessionsList = platformSessions.filter(s => s.completed || s.status?.toLowerCase().includes("complete"));
 
   return (
     <div className={`min-h-screen flex flex-col font-sans selection:bg-amber-500 selection:text-black ${isLight ? "text-slate-900" : "text-slate-100"}`} style={{ background: T.ink2 }}>
@@ -1900,93 +2241,10 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
               </p>
             </div>
           </div>
-
-          <div className="hidden md:flex items-center gap-2 pl-4 border-l" style={{ borderColor: T.lineInk }}>
-            <button
-              onClick={onOpenMongoModal}
-              className={`text-[11px] px-3 py-1.5 rounded-md font-mono flex items-center gap-1.5 cursor-pointer transition-all shadow-sm ${
-                isLight 
-                  ? "bg-emerald-100 text-emerald-800 border border-emerald-300 hover:bg-emerald-200" 
-                  : "bg-emerald-950/80 text-emerald-300 border border-emerald-600/70 hover:bg-emerald-900"
-              }`}
-              title="Inspect MongoDB connection details"
-            >
-              <Database size={13} className="animate-pulse" />
-              <span>MongoDB Atlas: Connected</span>
-            </button>
-            <div className={`flex items-center gap-1.5 text-[11px] font-medium px-2 py-1 ${isLight ? "text-slate-600" : "text-slate-400"}`}>
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-              <span>System: 100% Operational</span>
-            </div>
-          </div>
         </div>
 
         {/* Executive Right Controls */}
         <div className="flex items-center gap-3">
-          {/* Quick Bridge Buttons to All Portals */}
-          <div className="hidden xl:flex items-center gap-1.5">
-            <button
-              onClick={() => setPage("landing")}
-              className="text-xs px-2.5 py-1 rounded font-medium flex items-center gap-1 cursor-pointer transition-all border hover:border-amber-400"
-              style={{
-                background: isLight ? "#F1F5F9" : "rgba(255,255,255,0.04)",
-                borderColor: isLight ? "#CBD5E1" : "rgba(201,160,99,0.35)",
-                color: isLight ? "#92400E" : T.brassLight
-              }}
-              title="Public Home"
-            >
-              <ExternalLink size={12} /> Home
-            </button>
-            <button
-              onClick={() => setPage("client")}
-              className="text-xs px-2.5 py-1 rounded font-medium flex items-center gap-1 cursor-pointer transition-all border hover:border-amber-400"
-              style={{
-                background: isLight ? "#F1F5F9" : "rgba(255,255,255,0.04)",
-                borderColor: isLight ? "#CBD5E1" : "rgba(201,160,99,0.35)",
-                color: isLight ? "#92400E" : T.brassLight
-              }}
-              title="Client Advisory Portal"
-            >
-              Client
-            </button>
-            <button
-              onClick={() => setPage("expert")}
-              className="text-xs px-2.5 py-1 rounded font-medium flex items-center gap-1 cursor-pointer transition-all border hover:border-amber-400"
-              style={{
-                background: isLight ? "#F1F5F9" : "rgba(255,255,255,0.04)",
-                borderColor: isLight ? "#CBD5E1" : "rgba(201,160,99,0.35)",
-                color: isLight ? "#92400E" : T.brassLight
-              }}
-              title="Expert Consultation Portal"
-            >
-              Expert
-            </button>
-            <button
-              onClick={() => setPage("about")}
-              className="text-xs px-2.5 py-1 rounded font-medium flex items-center gap-1 cursor-pointer transition-all border hover:border-amber-400"
-              style={{
-                background: isLight ? "#F1F5F9" : "rgba(255,255,255,0.04)",
-                borderColor: isLight ? "#CBD5E1" : "rgba(201,160,99,0.35)",
-                color: isLight ? "#92400E" : T.brassLight
-              }}
-              title="About Mentora"
-            >
-              About
-            </button>
-            <button
-              onClick={() => setPage("blogs")}
-              className="text-xs px-2.5 py-1 rounded font-medium flex items-center gap-1 cursor-pointer transition-all border hover:border-amber-400"
-              style={{
-                background: isLight ? "#F1F5F9" : "rgba(255,255,255,0.04)",
-                borderColor: isLight ? "#CBD5E1" : "rgba(201,160,99,0.35)",
-                color: isLight ? "#92400E" : T.brassLight
-              }}
-              title="Blogs & Articles"
-            >
-              Blogs
-            </button>
-          </div>
-
           {/* Theme Toggle Button (☀️ Light / 🌙 Dark) */}
           <button
             type="button"
@@ -2100,9 +2358,9 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
               <ShieldCheck size={16} />
               <span>Document Audit & KYC</span>
             </div>
-            {localPendingVerifications.length > 0 && (
+            {localPendingVerifications.filter(p => !p.verified && p.verificationStatus !== 'approved' && p.status !== 'Approved').length > 0 && (
               <span className="text-[10px] px-1.5 py-0.5 rounded-full font-bold bg-amber-500 text-slate-950">
-                {localPendingVerifications.length}
+                {localPendingVerifications.filter(p => !p.verified && p.verificationStatus !== 'approved' && p.status !== 'Approved').length}
               </span>
             )}
           </button>
@@ -2122,7 +2380,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
               <IndianRupee size={16} />
               <span>Expert Rates & Markups</span>
             </div>
-            <span className={`text-[10px] font-mono ${isLight ? "text-slate-500" : "text-slate-400"}`}>{experts.length}</span>
+            <span className={`text-[10px] font-mono ${isLight ? "text-slate-500" : "text-slate-400"}`}>{verifiedExperts.length}</span>
           </button>
 
           <button
@@ -2522,91 +2780,54 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
                       {realtimeSyncStatus === 'connected' ? 'Realtime Sync Active' : realtimeSyncStatus === 'reconnecting' ? 'Reconnecting to Supabase...' : 'Sync Offline'}
                     </div>
                   </div>
-                  <h1 className={`text-2xl sm:text-3xl font-serif font-bold mt-1 ${isLight ? "text-slate-900" : "text-white"}`}>
-                    Senior Professional KYC Verification Queue ({localPendingVerifications.length})
-                  </h1>
+                  {(() => {
+                    const unverifiedPending = localPendingVerifications.filter(p => !p.verified && p.verificationStatus !== 'approved' && p.status !== 'Approved');
+                    return (
+                      <h1 className={`text-2xl sm:text-3xl font-serif font-bold mt-1 ${isLight ? "text-slate-900" : "text-white"}`}>
+                        Senior Professional KYC Verification Queue ({unverifiedPending.length})
+                      </h1>
+                    );
+                  })()}
                   <p className={`text-xs sm:text-sm mt-1 ${isLight ? "text-slate-600" : "text-slate-400"}`}>
                     Real-time synchronized audit queue. Inspect uploaded work certificates, relieving letters, and CV documents before publishing profiles.
                   </p>
                 </div>
-
-                <div className="flex items-center gap-2">
-                  {/* Status Filter */}
-                  <select
-                    value={statusFilter}
-                    onChange={(e) => setStatusFilter(e.target.value)}
-                    className={`px-3 py-2 rounded-lg text-sm ${
-                      isLight ? 'bg-white border-gray-300 text-slate-900' : 'bg-gray-800 border-gray-700 text-white'
-                    }`}
-                  >
-                    <option value="all">All Status</option>
-                    <option value="pending_verification">Pending Verification</option>
-                    <option value="submitted">Submitted</option>
-                    <option value="under_review">Under Review</option>
-                    <option value="changes_requested">Changes Requested</option>
-                    <option value="rejected">Rejected</option>
-                  </select>
-
-                  {/* Refresh Button */}
-                  <button
-                    onClick={handleRefresh}
-                    disabled={isRefreshing}
-                    className={`px-3 py-2 rounded-lg text-sm flex items-center gap-2 ${
-                      isLight ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-blue-600 hover:bg-blue-700 text-white'
-                    } disabled:opacity-50`}
-                  >
-                    {isRefreshing ? 'Refreshing...' : '🔄 Refresh'}
-                  </button>
-
-                  {onResetPendingQueue && (
-                    <button
-                      onClick={async () => {
-                        await onResetPendingQueue();
-                        confetti({ particleCount: 40, spread: 50 });
-                      }}
-                      className={`self-start sm:self-auto text-xs px-3.5 py-2 rounded-lg font-semibold border transition-all flex items-center gap-1.5 cursor-pointer shadow-md ${
-                        isLight
-                          ? "bg-white hover:bg-slate-100 text-amber-800 border-slate-300"
-                          : "bg-slate-800 hover:bg-slate-700 text-amber-300 border-slate-700"
-                      }`}
-                    >
-                      <Plus size={14} /> Add Sample Applicants
-                    </button>
-                  )}
-                </div>
               </div>
 
-              {localPendingVerifications.length === 0 ? (
-                <div className="p-12 rounded-2xl border text-center space-y-3" style={{ background: T.cardBg, borderColor: T.lineInk }}>
-                  <CheckCircle2 className={`w-12 h-12 mx-auto ${isLight ? "text-emerald-600" : "text-emerald-400"}`} />
-                  <h3 className={`text-lg font-bold ${isLight ? "text-slate-900" : "text-white"}`}>KYC Verification Queue is Clear</h3>
-                  <p className={`text-xs max-w-md mx-auto ${isLight ? "text-slate-600" : "text-slate-400"}`}>
-                    All senior professionals who registered and submitted documents have been audited and verified. Newly registered experts will appear here instantly.
-                  </p>
-                  {onResetPendingQueue && (
-                    <button
-                      onClick={onResetPendingQueue}
-                      className="mt-2 text-xs px-4 py-2 rounded-lg font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 transition-all cursor-pointer shadow"
-                    >
-                      Restore Verification Samples
-                    </button>
-                  )}
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  {localPendingVerifications
-                    .filter((item, idx, arr) => arr.findIndex(x => x.id === item.id || (item.email && x.email?.toLowerCase() === item.email?.toLowerCase())) === idx)
-                    .map((p) => {
-                      const docCount = p.documents ? Object.keys(p.documents).length : 0;
-                      const isPendingDocs = p.status === 'Registered / Documents Pending' || (docCount === 0 && p.verificationStatus !== 'approved');
-                      const liveChange = recentLiveChanges[p.id];
+              {(() => {
+                const unverifiedPending = localPendingVerifications.filter(p => !p.verified && p.verificationStatus !== 'approved' && p.status !== 'Approved');
+                if (unverifiedPending.length === 0) {
+                  return (
+                    <div className="p-12 rounded-2xl border text-center space-y-3" style={{ background: T.cardBg, borderColor: T.lineInk }}>
+                      <CheckCircle2 className={`w-12 h-12 mx-auto ${isLight ? "text-emerald-600" : "text-emerald-400"}`} />
+                      <h3 className={`text-lg font-bold ${isLight ? "text-slate-900" : "text-white"}`}>KYC Verification Queue is Clear</h3>
+                      <p className={`text-xs max-w-md mx-auto ${isLight ? "text-slate-600" : "text-slate-400"}`}>
+                        All senior professionals who registered and submitted documents have been audited and verified. Newly registered experts will appear here instantly.
+                      </p>
+                    </div>
+                  );
+                }
 
-                      return (
-                        <div
-                          key={p.id}
-                          className="p-5 rounded-2xl border shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-4 transition-all hover:border-amber-500/50 space-y-3 md:space-y-0"
-                          style={{ background: T.cardBg, borderColor: T.lineInk }}
-                        >
+                return (
+                  <div className="space-y-4">
+                    {unverifiedPending
+                      .filter((item, idx, arr) => arr.findIndex(x => x.id === item.id || (item.email && x.email?.toLowerCase() === item.email?.toLowerCase())) === idx)
+                      .map((p) => {
+                        const workCert = p.documents?.work_experience_cert || p.documents?.expCert || p.documents?.items?.work_experience_cert || p.documents?.items?.expCert;
+                        const offerLetter = p.documents?.offer_relieving_letter || p.documents?.offerLetter || p.documents?.items?.offer_relieving_letter || p.documents?.items?.offerLetter;
+                        const execCv = p.documents?.executive_cv || p.documents?.resume || p.documents?.items?.executive_cv || p.documents?.items?.resume;
+                        const docCount = (workCert ? 1 : 0) + (offerLetter ? 1 : 0) + (execCv ? 1 : 0);
+                        const isRejected = p.status === 'Rejected' || p.verificationStatus === 'rejected' || p.rejected === true || p.status === 'Changes Requested';
+                        const isResubmitted = p.status === 'Pending Review (Re-submitted)' || String(p.status).includes('Re-submitted');
+                        const isPendingDocs = !isRejected && !isResubmitted && (p.status === 'Registered / Documents Pending' || (docCount === 0 && p.verificationStatus !== 'approved'));
+                        const liveChange = recentLiveChanges[p.id];
+
+                        return (
+                          <div
+                            key={p.id}
+                            className="p-5 rounded-2xl border shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-4 transition-all hover:border-amber-500/50 space-y-3 md:space-y-0"
+                            style={{ background: T.cardBg, borderColor: T.lineInk }}
+                          >
                           <div className="space-y-2 flex-1 min-w-0">
                             <div className="flex items-center gap-2.5 flex-wrap">
                               <span className={`text-base font-bold ${isLight ? "text-slate-900" : "text-white"}`}>{p.name}</span>
@@ -2624,15 +2845,24 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
                                   {p.phone}
                                 </span>
                               )}
-                              <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${
-                                isPendingDocs
-                                  ? isLight ? "bg-amber-50 text-amber-800 border-amber-300" : "bg-amber-950/60 text-amber-300 border-amber-700"
-                                  : p.verificationStatus === 'changes_requested' || p.status === 'Changes Requested'
-                                  ? isLight ? "bg-rose-50 text-rose-800 border-rose-300" : "bg-rose-950/80 text-rose-300 border-rose-800"
-                                  : isLight ? "bg-amber-100 text-amber-900 border-amber-300" : "bg-amber-950/80 text-amber-300 border-amber-800/80"
-                              }`}>
-                                {isPendingDocs ? "Registered / Documents Pending" : p.status || "Awaiting Audit"}
-                              </span>
+                              {/* Status Badge */}
+                              {isRejected ? (
+                                <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded border bg-rose-950/80 text-rose-400 border-rose-600 flex items-center gap-1 shadow-xs">
+                                  <AlertCircle size={11} className="text-rose-400" /> Rejected
+                                </span>
+                              ) : isResubmitted ? (
+                                <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded border bg-indigo-950/80 text-indigo-300 border-indigo-600 flex items-center gap-1 shadow-xs">
+                                  <RefreshCw size={11} className="animate-spin" /> Pending Review (Re-submitted)
+                                </span>
+                              ) : isPendingDocs ? (
+                                <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded border bg-slate-800 text-slate-400 border-slate-700">
+                                  Registered / Documents Pending
+                                </span>
+                              ) : (
+                                <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded border bg-amber-950/80 text-amber-300 border-amber-600 flex items-center gap-1 shadow-xs">
+                                  <Clock size={11} /> Pending Review
+                                </span>
+                              )}
                             </div>
 
                             <p className={`text-xs ${isLight ? "text-slate-700" : "text-slate-300"}`}>
@@ -2657,81 +2887,108 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
                               </div>
                             )}
 
+                            {/* Clickable Real-Time Document Chips */}
                             <div className="flex flex-wrap gap-2 pt-1">
-                              <span className={`text-[11px] px-2.5 py-1 rounded font-mono border flex items-center gap-1 ${
-                                p.documents?.expCert
-                                  ? isLight ? "bg-emerald-50 border-emerald-300 text-emerald-800" : "bg-slate-900 border-emerald-700 text-emerald-300"
-                                  : isLight ? "bg-slate-100 border-slate-300 text-slate-500" : "bg-slate-900 border-slate-700 text-slate-500"
-                              }`}>
-                                <FileText size={12} /> Work Cert PDF {p.documents?.expCert ? "✓" : "(Missing)"}
-                              </span>
-                              <span className={`text-[11px] px-2.5 py-1 rounded font-mono border flex items-center gap-1 ${
-                                p.documents?.offerLetter
-                                  ? isLight ? "bg-emerald-50 border-emerald-300 text-emerald-800" : "bg-slate-900 border-emerald-700 text-emerald-300"
-                                  : isLight ? "bg-slate-100 border-slate-300 text-slate-500" : "bg-slate-900 border-slate-700 text-slate-500"
-                              }`}>
-                                <FileCheck size={12} /> Relieving Letter PDF {p.documents?.offerLetter ? "✓" : "(Missing)"}
-                              </span>
-                              <span className={`text-[11px] px-2.5 py-1 rounded font-mono border flex items-center gap-1 ${
-                                p.documents?.resume
-                                  ? isLight ? "bg-emerald-50 border-emerald-300 text-emerald-800" : "bg-slate-900 border-emerald-700 text-emerald-300"
-                                  : isLight ? "bg-slate-100 border-slate-300 text-slate-500" : "bg-slate-900 border-slate-700 text-slate-500"
-                              }`}>
-                                <FileText size={12} /> Executive CV Dossier {p.documents?.resume ? "✓" : "(Missing)"}
-                              </span>
+                              {workCert ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenViewer(p, 'work_experience_cert')}
+                                  className="text-[11px] px-2.5 py-1 rounded font-mono border flex items-center gap-1 bg-emerald-950/70 border-emerald-600 text-emerald-300 hover:bg-emerald-900 cursor-pointer transition-colors shadow-xs"
+                                  title="Click to view Work Experience Certificate"
+                                >
+                                  <FileText size={12} /> Work Cert PDF (Uploaded)
+                                </button>
+                              ) : (
+                                <span
+                                  className="text-[11px] px-2.5 py-1 rounded font-mono border flex items-center gap-1 bg-slate-900 border-slate-700 text-slate-500 cursor-not-allowed"
+                                  title="Not uploaded yet"
+                                >
+                                  <FileText size={12} /> Work Cert PDF (Missing)
+                                </span>
+                              )}
+
+                              {offerLetter ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenViewer(p, 'offer_relieving_letter')}
+                                  className="text-[11px] px-2.5 py-1 rounded font-mono border flex items-center gap-1 bg-emerald-950/70 border-emerald-600 text-emerald-300 hover:bg-emerald-900 cursor-pointer transition-colors shadow-xs"
+                                  title="Click to view Relieving Letter"
+                                >
+                                  <FileCheck size={12} /> Relieving Letter PDF (Uploaded)
+                                </button>
+                              ) : (
+                                <span
+                                  className="text-[11px] px-2.5 py-1 rounded font-mono border flex items-center gap-1 bg-slate-900 border-slate-700 text-slate-500 cursor-not-allowed"
+                                  title="Not uploaded yet"
+                                >
+                                  <FileCheck size={12} /> Relieving Letter PDF (Missing)
+                                </span>
+                              )}
+
+                              {execCv ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenViewer(p, 'executive_cv')}
+                                  className="text-[11px] px-2.5 py-1 rounded font-mono border flex items-center gap-1 bg-emerald-950/70 border-emerald-600 text-emerald-300 hover:bg-emerald-900 cursor-pointer transition-colors shadow-xs"
+                                  title="Click to view Executive CV Dossier"
+                                >
+                                  <FileText size={12} /> Executive CV Dossier (Uploaded)
+                                </button>
+                              ) : (
+                                <span
+                                  className="text-[11px] px-2.5 py-1 rounded font-mono border flex items-center gap-1 bg-slate-900 border-slate-700 text-slate-500 cursor-not-allowed"
+                                  title="Not uploaded yet"
+                                >
+                                  <FileText size={12} /> Executive CV Dossier (Missing)
+                                </span>
+                              )}
                             </div>
                           </div>
 
+                          {/* 4 Action Buttons: View Document, Accept, Reject, Delete */}
                           <div className="flex flex-wrap items-center gap-2 pt-2 md:pt-0 shrink-0">
                             <button
-                              onClick={() => setSelectedAuditItem(p)}
+                              onClick={() => handleOpenViewer(p, 'work_experience_cert')}
                               className={`px-3.5 py-2 text-xs rounded-lg font-bold border transition-all flex items-center gap-1.5 cursor-pointer ${
                                 isLight 
                                   ? "bg-white text-slate-800 hover:bg-slate-100 border-slate-300 shadow-sm" 
                                   : "bg-slate-800 text-slate-200 hover:bg-slate-700 border-slate-700"
                               }`}
-                              title="View Documents"
+                              title="View Document"
                             >
-                              <Eye size={13} /> View Documents
+                              <Eye size={13} /> View Document
                             </button>
                             <button
                               onClick={() => handleApprove(p.id)}
                               disabled={isSubmittingAction}
                               className="px-4 py-2 text-xs rounded-lg font-bold bg-emerald-600 hover:bg-emerald-500 text-white transition-all flex items-center gap-1.5 cursor-pointer shadow-lg disabled:opacity-50"
-                              title="Approve & Move to Expert Rates & Markups"
+                              title="Accept"
                             >
                               <Check size={14} /> Accept
                             </button>
                             <button
                               onClick={() => handleOpenRejectModal(p)}
                               disabled={isSubmittingAction}
-                              className={`px-3 py-2 text-xs rounded-lg font-bold border transition-all cursor-pointer flex items-center gap-1 ${
-                                isLight 
-                                  ? "bg-amber-50 text-amber-800 hover:bg-amber-100 border-amber-300" 
-                                  : "bg-amber-950/80 text-amber-300 hover:bg-amber-900 border-amber-800"
-                              }`}
-                              title="Reject with mandatory reason"
+                              className="px-3 py-2 text-xs rounded-lg font-bold border transition-all cursor-pointer flex items-center gap-1 bg-rose-950/80 text-rose-300 hover:bg-rose-900 border-rose-800"
+                              title="Reject"
                             >
                               <AlertCircle size={13} /> Reject
                             </button>
                             <button
-                              onClick={() => handleRemoveExpert(p.id, p.name)}
+                              onClick={() => handleDeleteExpert(p.id, p.name)}
                               disabled={isSubmittingAction}
-                              className={`px-2.5 py-2 text-xs rounded-lg font-bold border transition-all cursor-pointer flex items-center gap-1 ${
-                                isLight 
-                                  ? "bg-rose-50 text-rose-800 hover:bg-rose-100 border-rose-300" 
-                                  : "bg-rose-950/80 text-rose-300 hover:bg-rose-900 border-rose-800"
-                              }`}
-                              title="Remove from queue (soft delete)"
+                              className="px-2.5 py-2 text-xs rounded-lg font-bold border transition-all cursor-pointer flex items-center gap-1 bg-slate-900 text-rose-400 hover:bg-rose-950 border-rose-900/60"
+                              title="Delete"
                             >
-                              <Trash2 size={13} /> Remove
+                              <Trash2 size={13} /> Delete
                             </button>
                           </div>
                         </div>
                       );
                     })}
-                </div>
-              )}
+                  </div>
+                );
+              })()}
 
               {/* Mandatory Rejection Reason Modal */}
               {rejectModalItem && (
@@ -2794,7 +3051,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
                 <div>
                   <span className="text-xs uppercase font-bold tracking-widest text-amber-500">Desk 03 • Commercial Rules</span>
                   <h1 className={`text-2xl sm:text-3xl font-serif font-bold mt-1 ${isLight ? "text-slate-900" : "text-white"}`}>
-                    Expert Directory & Platform Profit Markups ({experts.length})
+                    Expert Directory & Platform Profit Markups ({verifiedExperts.length})
                   </h1>
                   <p className={`text-xs sm:text-sm mt-1 ${isLight ? "text-slate-600" : "text-slate-400"}`}>
                     Adjust base pay and platform margins. The client hourly rate is dynamically computed and saved to MongoDB.
@@ -3280,9 +3537,9 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
               );
             });
 
-            const liveList = filteredSessions.filter(s => !s.completed && (s.isLive || s.status?.toLowerCase().includes("live")));
-            const scheduledList = filteredSessions.filter(s => !s.completed && !s.isLive && !s.status?.toLowerCase().includes("live"));
-            const completedList = filteredSessions.filter(s => s.completed || s.status?.toLowerCase().includes("completed"));
+            const liveList = filteredSessions.filter(s => !s.completed && !s.status?.toLowerCase().includes("complete") && (s.isLive || s.status?.toLowerCase().includes("live")));
+            const scheduledList = filteredSessions.filter(s => !s.completed && !s.status?.toLowerCase().includes("complete"));
+            const completedList = filteredSessions.filter(s => s.completed || s.status?.toLowerCase().includes("complete"));
 
             const totalCompleted = completedList.length;
             const reviewedCount = completedList.filter(s => getSessionReviewStatus(s).hasReview).length;
@@ -3650,17 +3907,36 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
                                   <CalendarDays size={13} />
                                   Scheduled: {s.when}
                                 </span>
+                                {(s.isLive || s.status?.toLowerCase().includes("live")) && (
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-rose-500 text-white shadow-sm animate-pulse">
+                                    🔴 LIVE
+                                  </span>
+                                )}
                                 <span className={`text-[10px] px-2 py-0.5 rounded font-bold border ${
-                                  s.status?.toLowerCase().includes("sent") || s.meetUrl
+                                  s.status?.toLowerCase().includes("sent") || s.meetUrl || s.status?.toLowerCase().includes("accept")
                                     ? isLight ? "bg-emerald-100 text-emerald-900 border-emerald-300" : "bg-emerald-950 text-emerald-300 border-emerald-700"
-                                    : isLight ? "bg-slate-100 text-slate-700 border-slate-300" : "bg-slate-800 text-slate-400 border-slate-700"
+                                    : s.status?.toLowerCase().includes("reject") || s.status?.toLowerCase().includes("decline")
+                                      ? isLight ? "bg-rose-100 text-rose-900 border-rose-300" : "bg-rose-950 text-rose-300 border-rose-700"
+                                      : s.status?.toLowerCase().includes("pending")
+                                        ? isLight ? "bg-amber-100 text-amber-900 border-amber-300" : "bg-amber-950 text-amber-300 border-amber-800"
+                                        : isLight ? "bg-slate-100 text-slate-700 border-slate-300" : "bg-slate-800 text-slate-400 border-slate-700"
                                 }`}>
-                                  {s.status}
+                                  {s.status?.toLowerCase() === 'pending' ? 'Pending Expert Acceptance' : s.status}
                                 </span>
+                                {s.status && (s.status.toLowerCase().includes("accept") || s.status.toLowerCase().includes("confirm")) && (
+                                  <span className="text-[10px] font-semibold text-emerald-400 bg-emerald-950/60 border border-emerald-500/30 px-2 py-0.5 rounded-md flex items-center gap-1 shadow-sm">
+                                    <Check size={11} className="text-emerald-400 shrink-0" /> Expert accepted this request.
+                                  </span>
+                                )}
+                                {s.status && (s.status.toLowerCase().includes("reject") || s.status.toLowerCase().includes("decline")) && (
+                                  <span className="text-[10px] font-semibold text-rose-400 bg-rose-950/60 border border-rose-500/30 px-2 py-0.5 rounded-md flex items-center gap-1 shadow-sm">
+                                    <X size={11} className="text-rose-400 shrink-0" /> Expert rejected this request.
+                                  </span>
+                                )}
                               </div>
 
                               <span className={`text-xs font-mono font-bold ${isLight ? "text-slate-700" : "text-slate-300"}`}>
-                                Package: {s.type} · Value: ₹{s.rate}
+                                Package: {s.type || s.package_type || "Hourly Consultation"} · Value: ₹{s.rate || s.value || s.price || 600} · Duration: {s.duration_minutes || s.duration || 60} mins
                               </span>
                             </div>
 
@@ -3697,15 +3973,15 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
                             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2 border-t" style={{ borderColor: T.lineInk }}>
                               <div className="flex items-center gap-2">
                                 {s.meetUrl ? (
-                                  <div className="flex items-center gap-2 text-xs text-emerald-500 font-mono font-bold">
+                                  <div className="flex items-center gap-2 text-xs text-emerald-500 font-mono font-bold flex-wrap">
                                     <Video size={14} className="shrink-0" />
-                                    <span className="truncate">Meet Link Ready: {s.meetUrl}</span>
+                                    <span className="truncate select-all">{s.meetUrl}</span>
                                     <button
-                                      onClick={() => window.open(s.meetUrl, "_blank")}
-                                      className="px-2.5 py-1 text-xs rounded-lg font-bold bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer shadow flex items-center gap-1 font-sans transition-all shrink-0"
+                                      onClick={() => window.open(s.meetUrl, "_blank", "noopener,noreferrer")}
+                                      className="px-2.5 py-1 text-xs rounded-lg font-bold bg-[#1a73e8] hover:bg-[#1557b0] text-white cursor-pointer shadow flex items-center gap-1 font-sans transition-all shrink-0"
                                       title="Join Google Meet in New Tab"
                                     >
-                                      <ExternalLink size={12} /> Join Meet ↗
+                                      <ExternalLink size={12} /> Join Meeting ↗
                                     </button>
                                     <button
                                       onClick={() => {
@@ -3721,10 +3997,26 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
                                     </button>
                                   </div>
                                 ) : (
-                                  <span className={`text-xs flex items-center gap-1.5 ${isLight ? "text-amber-700" : "text-amber-400"}`}>
-                                    <Clock size={13} />
-                                    Pending Google Meet Link Generation by Expert
-                                  </span>
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className={`text-xs flex items-center gap-1.5 ${isLight ? "text-amber-700" : "text-amber-400"}`}>
+                                      <Clock size={13} />
+                                      {s.status?.toLowerCase().includes("pending")
+                                        ? "Pending Expert Acceptance — Awaiting confirmation"
+                                        : s.status?.toLowerCase().includes("reject") || s.status?.toLowerCase().includes("decline")
+                                          ? "Consultation Request Rejected by Expert"
+                                          : "Pending Google Meet Link Generation by Expert"}
+                                    </span>
+                                    {s.status && (s.status.toLowerCase().includes("accept") || s.status.toLowerCase().includes("confirm")) && (
+                                      <span className="text-[11px] font-medium text-emerald-400 bg-emerald-950/40 border border-emerald-500/30 px-2 py-0.5 rounded flex items-center gap-1 shadow-sm">
+                                        <Check size={11} /> Expert accepted this request.
+                                      </span>
+                                    )}
+                                    {s.status && (s.status.toLowerCase().includes("reject") || s.status.toLowerCase().includes("decline")) && (
+                                      <span className="text-[11px] font-medium text-rose-400 bg-rose-950/40 border border-rose-500/30 px-2 py-0.5 rounded flex items-center gap-1 shadow-sm">
+                                        <X size={11} /> Expert rejected this request.
+                                      </span>
+                                    )}
+                                  </div>
                                 )}
                               </div>
 
@@ -3795,11 +4087,17 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
                               style={{ background: T.cardBg, borderColor: T.lineInk }}
                             >
                               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-                                <div className="flex items-center gap-2">
+                                <div className="flex items-center gap-2 flex-wrap">
                                   <span className="inline-flex items-center gap-1 text-xs font-bold px-2.5 py-0.5 rounded-full bg-emerald-600 text-white shadow-sm">
                                     ✓ Completed Session
                                   </span>
                                   <span className={`text-[11px] font-mono ${isLight ? "text-slate-500" : "text-slate-400"}`}>
+                                    Scheduled: {s.when}
+                                  </span>
+                                  <span className={`text-[11px] font-mono px-2 py-0.5 rounded border ${isLight ? "bg-slate-100 text-slate-700 border-slate-300" : "bg-slate-800 text-slate-300 border-slate-700"}`}>
+                                    Duration: {s.duration_minutes || s.duration || 60} mins
+                                  </span>
+                                  <span className={`text-[11px] font-mono opacity-80 ${isLight ? "text-slate-500" : "text-slate-400"}`}>
                                     Concluded: {s.completedAt || s.when}
                                   </span>
                                 </div>
@@ -4998,314 +5296,29 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
 
 
       {/* ==============================================================
-          PDF DOCUMENT INSPECTION AUDIT MODAL
+          PDF DOCUMENT INSPECTION AUDIT MODAL (SUPABASE WORKFLOW)
       ============================================================== */}
       {selectedAuditItem && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-fadeIn">
-          <div
-            className={`w-full max-w-xl p-6 rounded-2xl border shadow-2xl space-y-5 ${isLight ? "text-slate-900" : "text-slate-100"}`}
-            style={{
-              background: isLight ? "#FFFFFF" : "#0E1520",
-              borderColor: isLight ? "#CBD5E1" : "rgba(201,160,99,0.35)"
-            }}
-          >
-            <div className={`flex justify-between items-center pb-3 border-b ${isLight ? "border-slate-200" : "border-slate-800"}`}>
-              <div>
-                <span className={`text-lg font-serif font-bold block ${isLight ? "text-slate-900" : "text-white"}`}>
-                  Document Verification Audit
-                </span>
-                <span className={`text-xs ${isLight ? "text-slate-600" : "text-slate-400"}`}>
-                  Applicant: {selectedAuditItem.name} ({selectedAuditItem.field} · {selectedAuditItem.years} Years Exp)
-                </span>
-              </div>
-              <button
-                onClick={() => setSelectedAuditItem(null)}
-                className={`p-1 cursor-pointer transition-colors ${isLight ? "text-slate-500 hover:text-slate-900" : "text-slate-400 hover:text-white"}`}
-              >
-                <X size={18} />
-              </button>
-            </div>
+        <ExpertDocumentAuditModal
+          expert={selectedAuditItem}
+          initialSlot={auditInitialSlot}
+          onClose={() => setSelectedAuditItem(null)}
+          onApprove={handleApprove}
+          onReject={handleOpenRejectModal}
+          isLight={isLight}
+        />
+      )}
 
-            {(() => {
-              const auditDocsRecord = selectedAuditItem
-                ? (mongoDB.getExpertDocuments(selectedAuditItem.id) ||
-                   (selectedAuditItem.email ? mongoDB.getExpertDocuments(selectedAuditItem.email) : null) ||
-                   (selectedAuditItem.name ? mongoDB.getExpertDocuments(selectedAuditItem.name) : null) ||
-                   (selectedAuditItem.id ? mongoDB.getExpertDocuments(selectedAuditItem.id.toLowerCase().trim()) : null) ||
-                   (selectedAuditItem.name ? mongoDB.getExpertDocuments(selectedAuditItem.name.toLowerCase().trim()) : null))
-                : null;
-
-              const pendingItems = (selectedAuditItem?.documents as any)?.items;
-
-              const findDirectBinary = (fn?: string, slot?: string) => {
-                if (typeof window === "undefined") return undefined;
-                try {
-                  if (fn) {
-                    const cleanFn = fn.toLowerCase().trim();
-                    const b = localStorage.getItem(`doc_bin_${cleanFn}`) || sessionStorage.getItem(`doc_bin_${cleanFn}`);
-                    if (b && (b.startsWith("data:") || b.startsWith("/uploaded_docs/"))) return b;
-                  }
-                  if (slot && selectedAuditItem?.id) {
-                    const b = localStorage.getItem(`doc_bin_${selectedAuditItem.id}_${slot}`) || sessionStorage.getItem(`doc_bin_${selectedAuditItem.id}_${slot}`);
-                    if (b && (b.startsWith("data:") || b.startsWith("/uploaded_docs/"))) return b;
-                  }
-                  if (slot && selectedAuditItem?.name) {
-                    const cleanName = selectedAuditItem.name.toLowerCase().trim();
-                    const b = localStorage.getItem(`doc_bin_${cleanName}_${slot}`) || sessionStorage.getItem(`doc_bin_${cleanName}_${slot}`);
-                    if (b && (b.startsWith("data:") || b.startsWith("/uploaded_docs/"))) return b;
-                  }
-                  if (slot && selectedAuditItem?.email) {
-                    const cleanEmail = selectedAuditItem.email.toLowerCase().trim();
-                    const b = localStorage.getItem(`doc_bin_${cleanEmail}_${slot}`) || sessionStorage.getItem(`doc_bin_${cleanEmail}_${slot}`);
-                    if (b && (b.startsWith("data:") || b.startsWith("/uploaded_docs/"))) return b;
-                  }
-                } catch {}
-                return undefined;
-              };
-
-              const expCertDocMeta = typeof selectedAuditItem.documents?.expCert === 'object' ? selectedAuditItem.documents.expCert : null;
-              const expCertFileName = auditDocsRecord?.docs?.expCert?.fileName || pendingItems?.expCert?.fileName || expCertDocMeta?.file_name || expCertDocMeta?.fileName || (typeof selectedAuditItem.documents?.expCert === 'string' ? selectedAuditItem.documents?.expCert : undefined) || `${selectedAuditItem.name.replace(/\s+/g, "_")}_Work_Experience.pdf`;
-              const expCertFileData = auditDocsRecord?.docs?.expCert?.fileData || pendingItems?.expCert?.fileData || findDirectBinary(expCertFileName, "expCert");
-              const expCertFilePath = expCertDocMeta?.file_path || expCertDocMeta?.filePath || auditDocsRecord?.docs?.expCert?.filePath;
-
-              const expCertDoc = {
-                id: auditDocsRecord?.docs?.expCert?.id || pendingItems?.expCert?.id || `doc-${selectedAuditItem.id}-1`,
-                type: "expCert" as const,
-                title: "Work Experience & Tenure Certificate",
-                fileName: expCertFileName,
-                filePath: expCertFilePath,
-                fileSize: auditDocsRecord?.docs?.expCert?.fileSize || pendingItems?.expCert?.fileSize || expCertDocMeta?.file_size || "1.8 MB",
-                uploadedAt: auditDocsRecord?.docs?.expCert?.uploadedAt || expCertDocMeta?.uploaded_at || auditDocsRecord?.updatedAt || selectedAuditItem.applied || "Recently submitted",
-                fileData: expCertFileData,
-                expertId: selectedAuditItem.id,
-                expertName: selectedAuditItem.name,
-                expertEmail: selectedAuditItem.email || "",
-                status: "Pending Audit" as const
-              };
-
-              const offerLetterDocMeta = typeof selectedAuditItem.documents?.offerLetter === 'object' ? selectedAuditItem.documents.offerLetter : null;
-              const offerLetterFileName = auditDocsRecord?.docs?.offerLetter?.fileName || pendingItems?.offerLetter?.fileName || offerLetterDocMeta?.file_name || offerLetterDocMeta?.fileName || (typeof selectedAuditItem.documents?.offerLetter === 'string' ? selectedAuditItem.documents?.offerLetter : undefined) || `${selectedAuditItem.name.replace(/\s+/g, "_")}_Relieving_Letter.pdf`;
-              const offerLetterFileData = auditDocsRecord?.docs?.offerLetter?.fileData || pendingItems?.offerLetter?.fileData || findDirectBinary(offerLetterFileName, "offerLetter");
-              const offerLetterFilePath = offerLetterDocMeta?.file_path || offerLetterDocMeta?.filePath || auditDocsRecord?.docs?.offerLetter?.filePath;
-
-              const offerLetterDoc = {
-                id: auditDocsRecord?.docs?.offerLetter?.id || pendingItems?.offerLetter?.id || `doc-${selectedAuditItem.id}-2`,
-                type: "offerLetter" as const,
-                title: "Company Relieving / Promotion Letter",
-                fileName: offerLetterFileName,
-                filePath: offerLetterFilePath,
-                fileSize: auditDocsRecord?.docs?.offerLetter?.fileSize || pendingItems?.offerLetter?.fileSize || offerLetterDocMeta?.file_size || "950 KB",
-                uploadedAt: auditDocsRecord?.docs?.offerLetter?.uploadedAt || offerLetterDocMeta?.uploaded_at || auditDocsRecord?.updatedAt || selectedAuditItem.applied || "Recently submitted",
-                fileData: offerLetterFileData,
-                expertId: selectedAuditItem.id,
-                expertName: selectedAuditItem.name,
-                expertEmail: selectedAuditItem.email || "",
-                status: "Pending Audit" as const
-              };
-
-              const resumeDocMeta = typeof selectedAuditItem.documents?.resume === 'object' ? selectedAuditItem.documents.resume : null;
-              const resumeFileName = auditDocsRecord?.docs?.resume?.fileName || pendingItems?.resume?.fileName || resumeDocMeta?.file_name || resumeDocMeta?.fileName || (typeof selectedAuditItem.documents?.resume === 'string' ? selectedAuditItem.documents?.resume : undefined) || `${selectedAuditItem.name.replace(/\s+/g, "_")}_Executive_CV.pdf`;
-              const resumeFileData = auditDocsRecord?.docs?.resume?.fileData || pendingItems?.resume?.fileData || findDirectBinary(resumeFileName, "resume");
-              const resumeFilePath = resumeDocMeta?.file_path || resumeDocMeta?.filePath || auditDocsRecord?.docs?.resume?.filePath;
-
-              const resumeDoc = {
-                id: auditDocsRecord?.docs?.resume?.id || pendingItems?.resume?.id || `doc-${selectedAuditItem.id}-3`,
-                type: "resume" as const,
-                title: "Executive Dossier & Bio Resume",
-                fileName: resumeFileName,
-                filePath: resumeFilePath,
-                fileSize: auditDocsRecord?.docs?.resume?.fileSize || pendingItems?.resume?.fileSize || resumeDocMeta?.file_size || "2.4 MB",
-                uploadedAt: auditDocsRecord?.docs?.resume?.uploadedAt || resumeDocMeta?.uploaded_at || auditDocsRecord?.updatedAt || selectedAuditItem.applied || "Recently submitted",
-                fileData: resumeFileData,
-                expertId: selectedAuditItem.id,
-                expertName: selectedAuditItem.name,
-                expertEmail: selectedAuditItem.email || "",
-                status: "Pending Audit" as const
-              };
-
-              const formatDate = (dateStr?: string) => {
-                if (!dateStr) return "Recently uploaded";
-                if (dateStr.includes("T")) {
-                  try { return new Date(dateStr).toLocaleDateString(); } catch {}
-                }
-                return dateStr;
-              };
-
-              const openAdminPreview = async (doc: any, slotType: "expCert" | "offerLetter" | "resume") => {
-                let fileData = doc.fileData;
-                const filePath = doc.filePath || doc.file_path;
-
-                // 1. Try Supabase Storage signed URL if filePath exists
-                if (filePath && (!fileData || (!fileData.startsWith("data:") && !fileData.startsWith("blob:") && !fileData.includes("supabase.co")))) {
-                  try {
-                    const sRes = await fetch(`/api/documents/signed-url?filePath=${encodeURIComponent(filePath)}`);
-                    if (sRes.ok) {
-                      const sData = await sRes.json();
-                      if (sData.signedUrl) {
-                        fileData = sData.signedUrl;
-                      }
-                    }
-                  } catch (e) {
-                    console.warn("Signed URL fetch failed:", e);
-                  }
-                }
-
-                // 2. Direct static server check (same authoritative file reference as Expert Portal)
-                if (doc.fileName && (!fileData || !fileData.startsWith("data:"))) {
-                  try {
-                    const staticUrl = `/uploaded_docs/${encodeURIComponent(doc.fileName)}`;
-                    const chk = await fetch(staticUrl, { method: "HEAD" });
-                    if (chk.ok) {
-                      fileData = staticUrl;
-                    }
-                  } catch {}
-                }
-
-                if (!fileData || (!fileData.startsWith("data:") && !fileData.startsWith("/") && !fileData.startsWith("http") && !fileData.startsWith("blob:"))) {
-                  fileData = (await getDocFile(doc.id, {
-                    id: doc.id,
-                    type: slotType,
-                    title: doc.title,
-                    fileName: doc.fileName,
-                    expertId: doc.expertId || selectedAuditItem?.id,
-                    expertName: doc.expertName || selectedAuditItem?.name,
-                    expertEmail: doc.expertEmail || selectedAuditItem?.email,
-                    status: doc.status || "Pending Audit"
-                  })) || undefined;
-                }
-                setAdminPreviewDoc({
-                  id: doc.id,
-                  title: doc.title,
-                  fileName: doc.fileName,
-                  fileSize: doc.fileSize,
-                  fileData,
-                  uploadedAt: doc.uploadedAt,
-                  status: doc.status || "Pending Audit",
-                  expertName: doc.expertName || selectedAuditItem?.name,
-                  expertEmail: doc.expertEmail || selectedAuditItem?.email,
-                  expertField: selectedAuditItem?.field
-                });
-              };
-
-              return (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <p className={`text-xs font-bold uppercase tracking-wider ${isLight ? "text-amber-800" : "text-amber-400"}`}>
-                      Uploaded Verification PDF Documents
-                    </p>
-                    <span className="text-[10px] font-mono text-emerald-500 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-                      Single Source of Truth (Database Synced)
-                    </span>
-                  </div>
-
-                  <div className={`p-3 border rounded-xl flex items-center justify-between ${
-                    isLight ? "bg-slate-50 border-slate-200" : "bg-slate-900 border-slate-800"
-                  }`}>
-                    <div className="flex items-center gap-2.5 min-w-0 pr-2">
-                      <FileText size={18} className={isLight ? "text-amber-600 shrink-0" : "text-amber-400 shrink-0"} />
-                      <div className="min-w-0">
-                        <p className={`text-xs font-bold truncate ${isLight ? "text-slate-900" : "text-white"}`}>
-                          Work Experience & Tenure Certificate
-                        </p>
-                        <p className={`text-[11px] font-mono truncate ${isLight ? "text-slate-500" : "text-slate-400"}`}>
-                          {expCertDoc.fileName}
-                        </p>
-                        <p className="text-[10px] text-amber-500 font-mono">
-                          {expCertDoc.fileSize || "1.8 MB"} · Uploaded: {formatDate(expCertDoc.uploadedAt)}
-                        </p>
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => openAdminPreview(expCertDoc, "expCert")}
-                      className={`text-xs font-bold flex items-center gap-1 cursor-pointer shrink-0 transition-colors ${
-                        isLight ? "text-amber-800 hover:text-amber-950" : "text-amber-300 hover:text-white"
-                      }`}
-                      title="View Document"
-                    >
-                      <Eye size={13} /> View Document
-                    </button>
-                  </div>
-
-                  <div className={`p-3 border rounded-xl flex items-center justify-between ${
-                    isLight ? "bg-slate-50 border-slate-200" : "bg-slate-900 border-slate-800"
-                  }`}>
-                    <div className="flex items-center gap-2.5 min-w-0 pr-2">
-                      <FileCheck size={18} className={isLight ? "text-emerald-600 shrink-0" : "text-emerald-400 shrink-0"} />
-                      <div className="min-w-0">
-                        <p className={`text-xs font-bold truncate ${isLight ? "text-slate-900" : "text-white"}`}>
-                          Company Relieving / Promotion Letter
-                        </p>
-                        <p className={`text-[11px] font-mono truncate ${isLight ? "text-slate-500" : "text-slate-400"}`}>
-                          {offerLetterDoc.fileName}
-                        </p>
-                        <p className="text-[10px] text-emerald-500 font-mono">
-                          {offerLetterDoc.fileSize || "950 KB"} · Uploaded: {formatDate(offerLetterDoc.uploadedAt)}
-                        </p>
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => openAdminPreview(offerLetterDoc, "offerLetter")}
-                      className={`text-xs font-bold flex items-center gap-1 cursor-pointer shrink-0 transition-colors ${
-                        isLight ? "text-amber-800 hover:text-amber-950" : "text-amber-300 hover:text-white"
-                      }`}
-                      title="View Document"
-                    >
-                      <Eye size={13} /> View Document
-                    </button>
-                  </div>
-
-                  <div className={`p-3 border rounded-xl flex items-center justify-between ${
-                    isLight ? "bg-slate-50 border-slate-200" : "bg-slate-900 border-slate-800"
-                  }`}>
-                    <div className="flex items-center gap-2.5 min-w-0 pr-2">
-                      <FileText size={18} className={isLight ? "text-sky-600 shrink-0" : "text-sky-400 shrink-0"} />
-                      <div className="min-w-0">
-                        <p className={`text-xs font-bold truncate ${isLight ? "text-slate-900" : "text-white"}`}>
-                          Executive Dossier & Bio Resume
-                        </p>
-                        <p className={`text-[11px] font-mono truncate ${isLight ? "text-slate-500" : "text-slate-400"}`}>
-                          {resumeDoc.fileName}
-                        </p>
-                        <p className="text-[10px] text-sky-500 font-mono">
-                          {resumeDoc.fileSize || "2.4 MB"} · Uploaded: {formatDate(resumeDoc.uploadedAt)}
-                        </p>
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => openAdminPreview(resumeDoc, "resume")}
-                      className={`text-xs font-bold flex items-center gap-1 cursor-pointer shrink-0 transition-colors ${
-                        isLight ? "text-amber-800 hover:text-amber-950" : "text-amber-300 hover:text-white"
-                      }`}
-                      title="View Document"
-                    >
-                      <Eye size={13} /> View Document
-                    </button>
-                  </div>
-                </div>
-              );
-            })()}
-
-            <div className={`p-3 rounded-xl text-xs space-y-1 border ${
-              isLight ? "bg-amber-50/80 border-amber-200" : "bg-slate-900/80 border-slate-800"
-            }`}>
-              <p className={`font-semibold ${isLight ? "text-amber-950" : "text-white"}`}>Audit Summary & Validity Check:</p>
-              <p className={isLight ? "text-slate-700" : "text-slate-400"}>
-                Verified senior corporate executive credentials at {selectedAuditItem.company || "Enterprise Firm"} for {selectedAuditItem.years} years. Ready for verified platform badge.
-              </p>
-            </div>
-
-            <div className={`flex gap-2 pt-2 border-t ${isLight ? "border-slate-200" : "border-slate-800"}`}>
-              <button
-                onClick={() => {
-                  handleApprove(selectedAuditItem.id);
-                  setSelectedAuditItem(null);
-                }}
-                className="w-full py-2.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-lg"
-              >
-                <Check size={14} /> Approve Documents & Grant Verified Badge
-              </button>
-            </div>
-          </div>
+      {actionToast && (
+        <div className={`fixed bottom-6 right-6 z-50 px-4 py-3 rounded-xl shadow-2xl border flex items-center gap-2.5 text-xs font-semibold backdrop-blur-md animate-fadeIn ${
+          actionToast.type === 'error'
+            ? 'bg-rose-950/95 text-rose-200 border-rose-500/50'
+            : actionToast.type === 'info'
+            ? 'bg-amber-950/95 text-amber-200 border-amber-500/50'
+            : 'bg-emerald-950/95 text-emerald-200 border-emerald-500/50'
+        }`}>
+          {actionToast.type === 'error' ? <AlertCircle size={16} /> : actionToast.type === 'info' ? <Info size={16} /> : <CheckCircle2 size={16} />}
+          <span>{actionToast.message}</span>
         </div>
       )}
 

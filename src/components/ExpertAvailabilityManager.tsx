@@ -63,6 +63,7 @@ export const ExpertAvailabilityManager: React.FC<ExpertAvailabilityManagerProps>
   const [editingSlotId, setEditingSlotId] = useState<string | null>(null);
   const [editStartTime, setEditStartTime] = useState<string>('');
   const [editEndTime, setEditEndTime] = useState<string>('');
+  const [editDuration, setEditDuration] = useState<number>(60);
   const [editStatus, setEditStatus] = useState<'AVAILABLE' | 'DISABLED'>('AVAILABLE');
 
   // Filter for upcoming list
@@ -136,6 +137,35 @@ export const ExpertAvailabilityManager: React.FC<ExpertAvailabilityManagerProps>
       const endMin = startMin + durationMinutes;
       if (endMin <= 23 * 60 + 59) {
         setEndTime(minutesToTimeString(endMin));
+      }
+    }
+  };
+
+  // Handlers for Edit Form
+  const handleEditStartTimeChange = (newStart: string) => {
+    setEditStartTime(newStart);
+    const startMin = parseTimeToMinutes(newStart);
+    if (startMin !== null) {
+      const endMin = startMin + editDuration;
+      if (endMin <= 23 * 60 + 59) {
+        setEditEndTime(minutesToTimeString(endMin));
+      }
+    }
+  };
+
+  const handleEditEndTimeChange = (newEnd: string) => {
+    setEditEndTime(newEnd);
+    const dur = calculateDuration(editStartTime, newEnd);
+    setEditDuration(dur);
+  };
+
+  const handleEditDurationSelect = (durMinutes: number) => {
+    setEditDuration(durMinutes);
+    const startMin = parseTimeToMinutes(editStartTime);
+    if (startMin !== null) {
+      const endMin = startMin + durMinutes;
+      if (endMin <= 23 * 60 + 59) {
+        setEditEndTime(minutesToTimeString(endMin));
       }
     }
   };
@@ -253,20 +283,23 @@ export const ExpertAvailabilityManager: React.FC<ExpertAvailabilityManagerProps>
     if (startMin >= endMin) {
       return `Start time (${sTime}) must be strictly earlier than end time (${eTime}).`;
     }
-    if (isSlotInPast(dateStr, sTime)) {
+    // Only check past start time when creating a new slot, allowing edits to today's existing slots
+    if (!excludeSlotId && isSlotInPast(dateStr, sTime)) {
       return `Cannot configure time slot that has already passed today (${sTime}).`;
     }
 
-    // Check overlap / duplicate
-    const duplicate = availabilities.find(a => 
-      a.id !== excludeSlotId &&
-      a.expertId === expertId &&
-      a.availabilityDate === dateStr &&
-      a.startTime === sTime &&
-      a.endTime === eTime
-    );
-    if (duplicate) {
-      return `A slot for ${sTime} – ${eTime} on this date already exists.`;
+    // Interval Overlap Validation: slot [startMin, endMin] overlaps [otherStart, otherEnd] if startMin < otherEnd && endMin > otherStart
+    const overlapping = availabilities.find(a => {
+      if (a.id === excludeSlotId) return false;
+      if (a.expertId !== expertId || a.availabilityDate !== dateStr) return false;
+      const otherStart = parseTimeToMinutes(a.startTime);
+      const otherEnd = parseTimeToMinutes(a.endTime);
+      if (otherStart === null || otherEnd === null) return false;
+      return startMin < otherEnd && endMin > otherStart;
+    });
+
+    if (overlapping) {
+      return `Time slot (${sTime} – ${eTime}) overlaps with existing slot ${overlapping.startTime} – ${overlapping.endTime}.`;
     }
 
     return null;
@@ -365,16 +398,23 @@ export const ExpertAvailabilityManager: React.FC<ExpertAvailabilityManagerProps>
       return;
     }
     const nextStatus = slot.status === 'AVAILABLE' ? 'DISABLED' : 'AVAILABLE';
+    const updatedSlot: ExpertAvailabilityDoc = {
+      ...slot,
+      status: nextStatus,
+      updatedAt: new Date().toISOString()
+    };
+
+    // Immediate UI update
+    setAvailabilities(prev => prev.map(s => s.id === slot.id ? updatedSlot : s));
+
     try {
-      await mongoDB.saveAvailability({
-        ...slot,
-        status: nextStatus
-      });
+      await mongoDB.saveAvailability(updatedSlot);
       setFeedback({ type: 'success', text: `Slot updated to ${nextStatus === 'AVAILABLE' ? 'Available' : 'Unavailable'}` });
       await fetchAvailabilities();
       if (onAvailabilityChange) onAvailabilityChange();
     } catch {
       setFeedback({ type: 'error', text: 'Failed to update slot status.' });
+      await fetchAvailabilities();
     }
   };
 
@@ -384,16 +424,19 @@ export const ExpertAvailabilityManager: React.FC<ExpertAvailabilityManagerProps>
       setFeedback({ type: 'error', text: 'Booked slots cannot be deleted by expert while active.' });
       return;
     }
-    if (!confirm(`Are you sure you want to delete slot ${slot.startTime} – ${slot.endTime} on ${slot.availabilityDate}?`)) {
+    if (!confirm(`Delete ${slot.startTime} – ${slot.endTime}?`)) {
       return;
     }
     try {
+      // Immediate UI update
+      setAvailabilities(prev => prev.filter(s => s.id !== slot.id));
       await mongoDB.deleteAvailability(slot.id);
-      setFeedback({ type: 'success', text: 'Availability slot deleted successfully.' });
+      setFeedback({ type: 'success', text: `Slot ${slot.startTime} – ${slot.endTime} deleted successfully.` });
       await fetchAvailabilities();
       if (onAvailabilityChange) onAvailabilityChange();
-    } catch {
-      setFeedback({ type: 'error', text: 'Failed to delete availability slot.' });
+    } catch (err: any) {
+      setFeedback({ type: 'error', text: err?.message || 'Failed to delete availability slot.' });
+      await fetchAvailabilities();
     }
   };
 
@@ -406,19 +449,26 @@ export const ExpertAvailabilityManager: React.FC<ExpertAvailabilityManagerProps>
       return;
     }
 
+    const updatedSlot: ExpertAvailabilityDoc = {
+      ...slot,
+      startTime: editStartTime,
+      endTime: editEndTime,
+      status: editStatus,
+      updatedAt: new Date().toISOString()
+    };
+
+    // Immediate UI update & close edit form
+    setAvailabilities(prev => prev.map(s => s.id === slot.id ? updatedSlot : s));
+    setEditingSlotId(null);
+
     try {
-      await mongoDB.saveAvailability({
-        ...slot,
-        startTime: editStartTime,
-        endTime: editEndTime,
-        status: editStatus
-      });
-      setEditingSlotId(null);
-      setFeedback({ type: 'success', text: 'Slot updated successfully.' });
+      await mongoDB.saveAvailability(updatedSlot);
+      setFeedback({ type: 'success', text: `Slot updated to ${editStartTime} – ${editEndTime} successfully.` });
       await fetchAvailabilities();
       if (onAvailabilityChange) onAvailabilityChange();
-    } catch {
-      setFeedback({ type: 'error', text: 'Failed to update slot.' });
+    } catch (err: any) {
+      setFeedback({ type: 'error', text: err?.message || 'Failed to update slot.' });
+      await fetchAvailabilities();
     }
   };
 
@@ -811,12 +861,16 @@ export const ExpertAvailabilityManager: React.FC<ExpertAvailabilityManagerProps>
                       >
                         <div className="flex items-center justify-between">
                           <span className="text-xs font-black uppercase tracking-wider text-amber-500 flex items-center gap-1.5">
-                            <Edit3 size={13} /> Edit Time Slot
+                            <Edit3 size={13} /> Edit Time Slot ({editDuration} mins)
                           </span>
                           <button
                             type="button"
-                            onClick={() => setEditingSlotId(null)}
-                            className="text-xs opacity-60 hover:opacity-100 cursor-pointer text-slate-400 hover:text-white"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setEditingSlotId(null);
+                            }}
+                            aria-label="Cancel editing slot"
+                            className="text-xs opacity-60 hover:opacity-100 cursor-pointer text-slate-400 hover:text-white transition-opacity px-2 py-1 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
                           >
                             Cancel
                           </button>
@@ -827,9 +881,9 @@ export const ExpertAvailabilityManager: React.FC<ExpertAvailabilityManagerProps>
                             <label className="text-[10px] font-bold uppercase block mb-1 opacity-80">Start Time</label>
                             <select
                               value={editStartTime}
-                              onChange={(e) => setEditStartTime(e.target.value)}
+                              onChange={(e) => handleEditStartTimeChange(e.target.value)}
                               className={`w-full text-xs p-2.5 rounded-xl border outline-none font-semibold ${
-                                isLight ? 'bg-white border-slate-300 text-slate-900' : 'bg-[#0B111A] border-white/15 text-white'
+                                isLight ? 'bg-white border-slate-300 text-slate-900 focus:border-amber-500' : 'bg-[#0B111A] border-white/15 text-white focus:border-amber-500'
                               }`}
                             >
                               {standardTimeOptions.map(t => (
@@ -842,9 +896,9 @@ export const ExpertAvailabilityManager: React.FC<ExpertAvailabilityManagerProps>
                             <label className="text-[10px] font-bold uppercase block mb-1 opacity-80">End Time</label>
                             <select
                               value={editEndTime}
-                              onChange={(e) => setEditEndTime(e.target.value)}
+                              onChange={(e) => handleEditEndTimeChange(e.target.value)}
                               className={`w-full text-xs p-2.5 rounded-xl border outline-none font-semibold ${
-                                isLight ? 'bg-white border-slate-300 text-slate-900' : 'bg-[#0B111A] border-white/15 text-white'
+                                isLight ? 'bg-white border-slate-300 text-slate-900 focus:border-amber-500' : 'bg-[#0B111A] border-white/15 text-white focus:border-amber-500'
                               }`}
                             >
                               {standardTimeOptions.map(t => (
@@ -859,7 +913,7 @@ export const ExpertAvailabilityManager: React.FC<ExpertAvailabilityManagerProps>
                               value={editStatus}
                               onChange={(e) => setEditStatus(e.target.value as any)}
                               className={`w-full text-xs p-2.5 rounded-xl border outline-none font-semibold ${
-                                isLight ? 'bg-white border-slate-300 text-slate-900' : 'bg-[#0B111A] border-white/15 text-white'
+                                isLight ? 'bg-white border-slate-300 text-slate-900 focus:border-amber-500' : 'bg-[#0B111A] border-white/15 text-white focus:border-amber-500'
                               }`}
                             >
                               <option value="AVAILABLE">Available</option>
@@ -868,14 +922,44 @@ export const ExpertAvailabilityManager: React.FC<ExpertAvailabilityManagerProps>
                           </div>
                         </div>
 
-                        <div className="flex justify-end gap-2 pt-1">
-                          <button
-                            type="button"
-                            onClick={() => handleSaveEdit(slot)}
-                            className="px-4 py-2 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 cursor-pointer transition-colors shadow-md flex items-center gap-1.5"
-                          >
-                            <Save size={13} /> Save Changes
-                          </button>
+                        {/* Duration Preset & Action Controls */}
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2 border-t border-white/5">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-[10px] font-bold uppercase text-slate-400">Duration Preset:</span>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              {[30, 45, 60, 90, 120].map((dur) => (
+                                <button
+                                  key={dur}
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleEditDurationSelect(dur);
+                                  }}
+                                  className={`text-xs px-2.5 py-1 rounded-lg border font-mono transition-all cursor-pointer ${
+                                    editDuration === dur
+                                      ? 'bg-amber-500 text-slate-950 font-bold border-amber-400 shadow-sm'
+                                      : (isLight ? 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100' : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10')
+                                  }`}
+                                >
+                                  {dur} mins
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div className="flex justify-end gap-2 shrink-0">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleSaveEdit(slot);
+                              }}
+                              aria-label="Save slot changes"
+                              className="px-4 py-2 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 cursor-pointer transition-colors shadow-md flex items-center gap-1.5 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+                            >
+                              <Save size={13} /> Save Changes
+                            </button>
+                          </div>
                         </div>
                       </div>
                     );
@@ -889,10 +973,10 @@ export const ExpertAvailabilityManager: React.FC<ExpertAvailabilityManagerProps>
                           ? (isLight ? 'bg-amber-50/70 border-amber-300 shadow-sm' : 'bg-[#152233] border-amber-500/40')
                           : isAvailable
                           ? (isLight ? 'bg-white border-slate-200 hover:border-emerald-400 shadow-sm' : 'bg-[#0E1724] border-white/10 hover:border-emerald-500/40')
-                          : (isLight ? 'bg-slate-100 border-slate-200 opacity-60' : 'bg-[#0B111A] border-white/5 opacity-60')
+                          : (isLight ? 'bg-slate-100 border-slate-200 shadow-sm' : 'bg-[#0B111A] border-white/5')
                       }`}
                     >
-                      <div className="flex items-center gap-3.5">
+                      <div className={`flex items-center gap-3.5 ${!isAvailable && !isBooked ? 'opacity-70' : ''}`}>
                         <div className={`w-3 h-3 rounded-full shrink-0 ${
                           isAvailable ? 'bg-emerald-400 animate-pulse shadow-sm shadow-emerald-400/50' : isBooked ? 'bg-amber-400 shadow-sm shadow-amber-400/50' : 'bg-slate-500'
                         }`} />
@@ -929,34 +1013,50 @@ export const ExpertAvailabilityManager: React.FC<ExpertAvailabilityManagerProps>
 
                       <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
                         {isBooked ? (
-                          <span className="text-[11px] font-bold px-3 py-1 rounded-xl bg-amber-500/10 text-amber-400 border border-amber-500/20 flex items-center gap-1">
+                          <span className="text-[11px] font-bold px-3 py-1 rounded-xl bg-amber-500/10 text-amber-400 border border-amber-500/20 flex items-center gap-1 h-9">
                             <Video size={12} /> Meet Reserved
                           </span>
                         ) : (
                           <>
                             <button
                               type="button"
-                              onClick={() => {
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                e.preventDefault();
                                 setEditingSlotId(slot.id);
                                 setEditStartTime(slot.startTime);
                                 setEditEndTime(slot.endTime);
+                                setEditDuration(calculateDuration(slot.startTime, slot.endTime));
                                 setEditStatus(slot.status === 'AVAILABLE' ? 'AVAILABLE' : 'DISABLED');
                               }}
-                              className={`p-2 rounded-xl border text-xs font-semibold cursor-pointer transition-colors ${
-                                isLight ? 'hover:bg-slate-100 border-slate-200 text-slate-700' : 'hover:bg-white/10 border-white/10 text-slate-300'
-                              }`}
+                              aria-label={`Edit slot ${slot.startTime} to ${slot.endTime}`}
                               title="Edit slot timing"
+                              className={`w-9 h-9 flex items-center justify-center rounded-xl border text-xs font-semibold cursor-pointer transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 ${
+                                isLight 
+                                  ? 'hover:bg-slate-100 border-slate-200 text-slate-700 hover:text-slate-900 focus-visible:ring-offset-white' 
+                                  : 'hover:bg-white/10 border-white/10 text-slate-300 hover:text-white hover:border-white/25 focus-visible:ring-offset-[#0B111A]'
+                              }`}
                             >
                               <Edit3 size={14} />
                             </button>
 
                             <button
                               type="button"
-                              onClick={() => handleToggleStatus(slot)}
-                              className={`px-3 py-1.5 rounded-xl border text-xs font-bold cursor-pointer transition-all ${
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                e.preventDefault();
+                                handleToggleStatus(slot);
+                              }}
+                              aria-label={`${isAvailable ? 'Disable' : 'Enable'} slot ${slot.startTime} to ${slot.endTime}`}
+                              title={isAvailable ? 'Mark slot as unavailable' : 'Mark slot as available'}
+                              className={`w-20 h-9 flex items-center justify-center rounded-xl border text-xs font-bold cursor-pointer transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 ${
                                 isAvailable
-                                  ? (isLight ? 'border-amber-300 text-amber-700 hover:bg-amber-50' : 'border-amber-500/40 text-amber-400 hover:bg-amber-950/40')
-                                  : (isLight ? 'border-emerald-300 text-emerald-700 hover:bg-emerald-50' : 'border-emerald-500/40 text-emerald-400 hover:bg-emerald-950/40')
+                                  ? (isLight 
+                                      ? 'border-amber-300 text-amber-700 hover:bg-amber-50 hover:border-amber-400 focus-visible:ring-offset-white' 
+                                      : 'border-amber-500/40 text-amber-400 hover:bg-amber-950/40 hover:border-amber-400 focus-visible:ring-offset-[#0B111A]')
+                                  : (isLight 
+                                      ? 'border-emerald-300 text-emerald-700 hover:bg-emerald-50 hover:border-emerald-400 focus-visible:ring-offset-white' 
+                                      : 'border-emerald-500/40 text-emerald-400 hover:bg-emerald-950/40 hover:border-emerald-400 focus-visible:ring-offset-[#0B111A]')
                               }`}
                             >
                               {isAvailable ? 'Disable' : 'Enable'}
@@ -964,11 +1064,18 @@ export const ExpertAvailabilityManager: React.FC<ExpertAvailabilityManagerProps>
 
                             <button
                               type="button"
-                              onClick={() => handleDeleteSlot(slot)}
-                              className={`p-2 rounded-xl border text-xs font-semibold cursor-pointer transition-colors ${
-                                isLight ? 'text-rose-700 hover:bg-rose-50 border-rose-200' : 'text-rose-400 hover:bg-rose-950/40 border-rose-500/30'
-                              }`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                e.preventDefault();
+                                handleDeleteSlot(slot);
+                              }}
+                              aria-label={`Delete slot ${slot.startTime} to ${slot.endTime}`}
                               title="Delete slot"
+                              className={`w-9 h-9 flex items-center justify-center rounded-xl border text-xs font-semibold cursor-pointer transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 focus-visible:ring-offset-2 ${
+                                isLight 
+                                  ? 'text-rose-700 hover:bg-rose-50 border-rose-200 hover:border-rose-400 focus-visible:ring-offset-white' 
+                                  : 'text-rose-400 hover:bg-rose-950/40 border-rose-500/30 hover:border-rose-400 hover:text-rose-300 focus-visible:ring-offset-[#0B111A]'
+                              }`}
                             >
                               <Trash2 size={14} />
                             </button>

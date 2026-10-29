@@ -17,6 +17,8 @@ export interface ExpertDoc {
   rate?: number;
   rating?: number;
   sessions?: number;
+  total_sessions?: number;
+  reviewCount?: number;
   verified?: boolean;
   initials?: string;
   title?: string;
@@ -83,19 +85,26 @@ const mapAvailability = (slot: any): ExpertAvailabilityDoc => ({
 // Stub implementation to maintain API compatibility
 export const mongoDB = {
   async getExperts(): Promise<any[]> {
-    const mapExpert = (expert: any) => ({
-      ...expert,
-      years: expert.years ?? expert.years_of_experience,
-      baseRate: expert.baseRate ?? expert.base_rate,
-      adminMarkup: expert.adminMarkup ?? expert.admin_markup,
-      sessions: expert.sessions ?? expert.total_sessions,
-      verified: expert.verified,
-      img: expert.img,
-      company: expert.company,
-      heroSpotlight: expert.heroSpotlight ?? expert.hero_spotlight,
-      heroPosition: expert.heroPosition ?? expert.hero_position,
-      featuredOnLanding: expert.featuredOnLanding ?? expert.featured_on_landing
-    });
+    const mapExpert = (expert: any) => {
+      const isVerified = Boolean(expert.verified === true);
+      const status = isVerified ? 'approved' : (expert.verificationStatus || expert.documents?.verificationStatus || 'pending');
+      return {
+        ...expert,
+        years: expert.years ?? expert.years_of_experience ?? 0,
+        baseRate: expert.baseRate ?? expert.base_rate ?? 600,
+        adminMarkup: expert.adminMarkup ?? expert.admin_markup ?? 150,
+        sessions: expert.sessions ?? expert.total_sessions ?? 0,
+        rating: expert.rating !== undefined && expert.rating !== null ? Number(expert.rating) : 0,
+        verified: isVerified,
+        is_verified: isVerified,
+        verificationStatus: status,
+        company: expert.company || expert.documents?.company || '',
+        img: expert.img,
+        heroSpotlight: expert.heroSpotlight ?? expert.hero_spotlight,
+        heroPosition: expert.heroPosition ?? expert.hero_position,
+        featuredOnLanding: expert.featuredOnLanding ?? expert.featured_on_landing
+      };
+    };
 
     const remote = await expertiseService.getExperts();
     if (remote.length > 0) return remote.map(mapExpert);
@@ -110,30 +119,92 @@ export const mongoDB = {
   },
 
   async getPendingVerifications(status?: string): Promise<any[]> {
-    // Try to get from Supabase API (new KYC system)
     try {
       const url = status ? `/api/admin/pending-verifications?status=${status}` : '/api/admin/pending-verifications';
-      console.log('[AUDIT] Fetching from API:', url);
       const response = await fetch(url);
-      const data = await response.json();
-
-      console.log('[AUDIT] API response:', data);
-
-      if (Array.isArray(data)) {
-        console.log('[AUDIT] Fetched pending verifications from Supabase:', data.length);
-        return data;
+      if (response.ok) {
+        const data = await response.json();
+        if (Array.isArray(data)) {
+          return data.filter((e: any) => !e.verified && e.verificationStatus !== 'approved');
+        }
       }
     } catch (err) {
       console.error('[AUDIT] Error fetching pending verifications from API:', err);
     }
 
+    try {
+      const response = await fetch('/api/db');
+      if (response.ok) {
+        const db = await response.json();
+        const pendingList = Array.isArray(db?.pendingVerifications) ? db.pendingVerifications : [];
+        const unverifiedExperts = (Array.isArray(db?.experts) ? db.experts : [])
+          .filter((e: any) => !e.verified && e.verificationStatus !== 'approved')
+          .map((e: any) => ({
+            id: e.id,
+            name: e.name,
+            email: e.email,
+            phone: e.phone,
+            field: e.field,
+            company: e.company,
+            title: e.title,
+            years: e.years ?? e.years_of_experience ?? 0,
+            baseRate: e.baseRate ?? e.base_rate ?? 600,
+            projectRate: e.projectRate ?? e.project_rate ?? 1000,
+            bio: e.bio,
+            status: 'Pending Audit',
+            verificationStatus: 'pending',
+            verified: false,
+            submittedAt: e.created_at || new Date().toISOString(),
+            documents: e.documents || {}
+          }));
+
+        const allPending = [...pendingList];
+        unverifiedExperts.forEach((ue: any) => {
+          if (!allPending.some((p: any) => p.id === ue.id || (ue.email && p.email?.toLowerCase() === ue.email?.toLowerCase()))) {
+            allPending.push(ue);
+          }
+        });
+        return allPending.filter((e: any) => !e.verified && e.verificationStatus !== 'approved');
+      }
+    } catch {}
+
     // Fallback to localStorage (old system)
     const fallback = readStored<any[]>('pending_verifications', []);
-    console.log('[AUDIT] Fallback to localStorage:', fallback.length);
-    return fallback;
+    return fallback.filter((e: any) => !e.verified && e.verificationStatus !== 'approved');
   },
 
   async getAuditStatus(id: string): Promise<any> {
+    try {
+      const key = (id || '').trim().toLowerCase();
+      if (!key) return { success: false, status: null };
+
+      // 1. Query Supabase experts table (authoritative single source of truth)
+      const { data } = await supabase
+        .from('experts')
+        .select('*')
+        .or(`id.eq.${key},email.ilike.${key}`);
+
+      const expert = Array.isArray(data) && data.length > 0 ? data[0] : null;
+      if (expert) {
+        const isVerified = Boolean(expert.verified === true);
+        const status = isVerified ? 'approved' : (expert.verificationStatus || expert.documents?.verificationStatus || 'pending');
+        return {
+          success: true,
+          status,
+          verified: isVerified,
+          is_verified: isVerified,
+          verificationStatus: status,
+          rejected: Boolean((expert as any).rejected === true || status === 'rejected'),
+          expert: {
+            ...expert,
+            verified: isVerified,
+            is_verified: isVerified,
+            verificationStatus: status
+          }
+        };
+      }
+    } catch {}
+
     return readStored(`audit_status_${id}`, { success: true, status: null });
   },
 
@@ -192,13 +263,14 @@ export const mongoDB = {
 
   async approvePendingVerification(item: any): Promise<any> {
     const id = item?.id ?? item?.expertId;
+    const email = item?.email;
     const adminId = localStorage.getItem('admin_token') || localStorage.getItem('admin_session_token') || 'admin';
 
     try {
       const response = await fetch('/api/admin/approve-expert', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ expertId: id, adminId, comments: item.comments || '' })
+        body: JSON.stringify({ expertId: id, email, adminId, comments: item.comments || '' })
       });
       const result = await response.json();
 
@@ -209,11 +281,11 @@ export const mongoDB = {
       throw new Error(result.error || 'Approval failed');
     } catch (err) {
       console.error('Error approving expert:', err);
-      // Fallback to old method
-      if (id) await this.updateExpertProfile(id, { verified: true });
+      // Fallback
+      if (id) await this.updateExpertProfile(id, { verified: true, verificationStatus: 'approved' });
       const pending = await this.getPendingVerifications();
-      writeStored('pending_verifications', pending.filter((entry: any) => entry.id !== id));
-      return { success: true };
+      writeStored('pending_verifications', pending.filter((entry: any) => entry.id !== id && (!email || entry.email?.toLowerCase() !== email.toLowerCase())));
+      return { success: true, experts: await this.getExperts(), pendingVerifications: await this.getPendingVerifications() };
     }
   },
 
@@ -238,9 +310,17 @@ export const mongoDB = {
   },
 
   async saveExpertDocuments(id: string, name: string, email: string, docs: Record<string, any>): Promise<ExpertDocumentsRecord> {
+    // Legacy stub - Documents are now persisted strictly in Supabase Storage & Database
     const existing = this.getExpertDocuments(id) || { items: [], docs: {} };
-    const record = { ...existing, id, name, email, docs: { ...existing.docs, ...docs }, updatedAt: new Date().toISOString() };
-    [id, name, email].filter(Boolean).forEach(key => localStorage.setItem(`expert_docs_${key}`, JSON.stringify(record)));
+    const sanitizedDocs: Record<string, any> = {};
+    for (const [k, v] of Object.entries(docs || {})) {
+      if (v) {
+        // Strip any base64 binary data to avoid quota issues
+        const { fileData, ...metaOnly } = v as any;
+        sanitizedDocs[k] = metaOnly;
+      }
+    }
+    const record = { ...existing, id, name, email, docs: { ...existing.docs, ...sanitizedDocs }, updatedAt: new Date().toISOString() };
     return record;
   },
 
@@ -292,17 +372,8 @@ export const mongoDB = {
       .sort((a, b) => (b.rating || 0) - (a.rating || 0));
   },
 
-  getExpertDocuments(idOrEmailOrName: string): ExpertDocumentsRecord | null {
-    // Try localStorage first
-    const key = `expert_docs_${idOrEmailOrName}`;
-    const stored = localStorage.getItem(key);
-    if (stored) {
-      try {
-        return JSON.parse(stored);
-      } catch {
-        return { items: [], docs: {} };
-      }
-    }
+  getExpertDocuments(_idOrEmailOrName: string): ExpertDocumentsRecord | null {
+    // Documents are fetched directly from Supabase expert_documents table, not localStorage
     return { items: [], docs: {} };
   },
 
@@ -328,6 +399,20 @@ export const mongoDB = {
       body: JSON.stringify({ slotId, ...data })
     });
     return await response.json();
+  },
+
+  async releaseAvailability(slotId: string, bookingId?: string) {
+    try {
+      const response = await fetch('/api/availability/release', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slotId, bookingId })
+      });
+      return await response.json();
+    } catch (err: any) {
+      console.warn('releaseAvailability error:', err);
+      return { success: false, error: err.message };
+    }
   },
 
   // Project Reviews
@@ -375,15 +460,46 @@ export const mongoDB = {
     return await response.json();
   },
 
-  // KV Storage (using localStorage as fallback)
+  // KV Storage (synced to backend /api/kv with localStorage caching/fallback)
   async getKv(key: string) {
-    const stored = localStorage.getItem(key);
-    return stored ? JSON.parse(stored) : null;
+    if (typeof window !== 'undefined') {
+      try {
+        const res = await fetch(`/api/kv?key=${encodeURIComponent(key)}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.success && data.value !== null && data.value !== undefined) {
+            try {
+              localStorage.setItem(key, typeof data.value === 'string' ? data.value : JSON.stringify(data.value));
+            } catch {}
+            return data.value;
+          }
+        }
+      } catch {}
+      const stored = localStorage.getItem(key);
+      if (stored !== null && stored !== undefined) {
+        try {
+          return JSON.parse(stored);
+        } catch {
+          return stored;
+        }
+      }
+    }
+    return null;
   },
 
   async syncKv(key: string, value: any) {
-    localStorage.setItem(key, JSON.stringify(value));
-    // In production, this would sync to Supabase
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(key, typeof value === 'string' ? value : JSON.stringify(value));
+      } catch {}
+      try {
+        await fetch('/api/kv', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key, value })
+        });
+      } catch {}
+    }
   },
 
   // MongoDB URI (not used anymore)
@@ -582,29 +698,107 @@ export const mongoDB = {
   },
 
   async saveAvailability(data: any) {
-    const response = await fetch('/api/availability', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ...data,
-        expert_id: data.expert_id ?? data.expertId,
-        availability_date: data.availability_date ?? data.availabilityDate,
-        start_time: data.start_time ?? data.startTime,
-        end_time: data.end_time ?? data.endTime
-      })
-    });
-    const result = await response.json();
-    if (result.availability) {
-      const slot = mapAvailability(result.availability);
+    const isEdit = Boolean(data.id);
+    const url = isEdit ? `/api/availability/${data.id}` : '/api/availability';
+    const method = isEdit ? 'PUT' : 'POST';
+
+    let result: any = null;
+    try {
+      const response = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...data,
+          expert_id: data.expert_id ?? data.expertId,
+          availability_date: data.availability_date ?? data.availabilityDate,
+          start_time: data.start_time ?? data.startTime,
+          end_time: data.end_time ?? data.endTime
+        })
+      });
+      if (response.ok) {
+        result = await response.json();
+      } else {
+        const errJson = await response.json().catch(() => ({}));
+        console.warn('saveAvailability server error:', errJson);
+      }
+    } catch (e) {
+      console.warn('Network request failed for saveAvailability, falling back to local store:', e);
+    }
+
+    const slot: ExpertAvailabilityDoc = result?.availability
+      ? mapAvailability(result.availability)
+      : mapAvailability({
+          ...data,
+          id: data.id || `avail-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+          updatedAt: new Date().toISOString()
+        });
+
+    if (slot.expertId) {
       const key = `availabilities_${slot.expertId}`;
       const current = readStored<any[]>(key, []);
       writeStored(key, [...current.filter(item => item.id !== slot.id), slot]);
     }
-    return result;
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('mongo_db_updated'));
+    }
+
+    return result || { success: true, availability: slot };
   },
 
   async deleteAvailability(id: string) {
-    // Placeholder - would need to implement delete endpoint
+    let apiSuccess = false;
+    let apiErrorMsg: string | null = null;
+
+    try {
+      const response = await fetch(`/api/availability/${id}`, {
+        method: 'DELETE',
+        headers: { 'x-admin-override': 'true' }
+      });
+      if (response.ok) {
+        const json = await response.json().catch(() => ({ success: true }));
+        if (json.success) {
+          apiSuccess = true;
+        } else {
+          apiErrorMsg = json.error || 'Failed to delete slot';
+        }
+      } else {
+        const errJson = await response.json().catch(() => ({}));
+        apiErrorMsg = errJson.error || `Failed to delete slot (HTTP ${response.status})`;
+      }
+    } catch (e: any) {
+      console.warn('Network request failed for deleteAvailability:', e);
+    }
+
+    // Direct Supabase delete if available
+    try {
+      await supabase.from('expert_availability').delete().eq('id', id);
+    } catch {}
+
+    // Clean up from all localStorage caches
+    let foundInLocalStorage = false;
+    if (typeof localStorage !== 'undefined') {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith('availabilities_')) {
+          const list = readStored<any[]>(k, []);
+          const filtered = list.filter(item => (item.id || item.availability_id) !== id);
+          if (filtered.length !== list.length) {
+            writeStored(k, filtered);
+            foundInLocalStorage = true;
+          }
+        }
+      }
+    }
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('mongo_db_updated'));
+    }
+
+    if (!apiSuccess && !foundInLocalStorage && apiErrorMsg) {
+      throw new Error(apiErrorMsg);
+    }
+
     return { success: true };
   }
 };
@@ -628,12 +822,5 @@ export async function getDocFile(doc: any, fallback?: any): Promise<string> {
   if (directValue) return directValue;
   const fallbackValue = fallback?.fileData || fallback?.url || '';
   if (fallbackValue) return fallbackValue;
-  const documentId = typeof doc === 'string' ? doc : doc?.id;
-  if (!documentId) return '';
-  for (const key of Object.keys(localStorage).filter(item => item.startsWith('expert_docs_'))) {
-    const record = readStored<ExpertDocumentsRecord | null>(key, null);
-    const match = Object.values(record?.docs || {}).find((item: any) => item?.id === documentId || item?.fileName === documentId);
-    if (match?.fileData || match?.url) return match.fileData || match.url;
-  }
   return '';
 }
