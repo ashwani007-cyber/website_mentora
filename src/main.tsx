@@ -3,6 +3,12 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
 import { DomainsProvider } from './context/DomainsContext'
+import ServiceStatusBanner from './components/ServiceStatusBanner'
+import { installWriteInvalidation } from './lib/requestCache'
+
+// Clear cached reads automatically after any successful save to our /api server,
+// so users always see the data they just saved (see src/lib/requestCache.ts).
+installWriteInvalidation()
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -111,6 +117,8 @@ createRoot(document.getElementById('root')!).render(
     <RootErrorBoundary>
       <DomainsProvider>
         <App />
+        {/* Friendly notice when Supabase is restricted (402) or paused, instead of a broken page */}
+        <ServiceStatusBanner />
       </DomainsProvider>
     </RootErrorBoundary>
   </StrictMode>,

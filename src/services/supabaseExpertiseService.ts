@@ -1,5 +1,80 @@
 // Supabase-based Expertise Service
 import { supabase } from '../supabaseClient';
+import { cached, invalidate, wroteRecently } from '../lib/requestCache';
+import { COLUMNS } from '../lib/columns';
+
+// ---------------------------------------------------------------------------
+// EGRESS NOTES (why this file looks the way it does)
+// - Expert lists are read through the database function get_experts_list(), which returns
+//   every expert WITHOUT the heavy base64 file data that used to live in experts.documents.
+//   (SQL: supabase/egress-fix/01_slim_read_functions.sql)
+// - If that function is not installed yet, we fall back to a plain list query WITHOUT the documents
+//   column (COLUMNS.EXPERT_LIST), so nothing breaks and the response stays small.
+// - Results are cached for EXPERTS_TTL_MS and concurrent callers share one request.
+// - Every write calls invalidate('experts') so the next read is fresh (no stale data).
+// ---------------------------------------------------------------------------
+const EXPERTS_TTL_MS = 60_000;
+
+/** True when PostgREST says the RPC function doesn't exist (SQL not run yet). */
+const isMissingFunction = (error: any) =>
+  !!error && (error.code === 'PGRST202' || error.code === '42883' || /could not find the function/i.test(error.message || ''));
+
+/** Logs a failed Supabase call clearly instead of hiding it. */
+const logSupabaseError = (where: string, error: any) => {
+  if (error) console.error(`[experts] ${where} failed:`, error.message || error, error.code ? `(code ${error.code})` : '');
+};
+
+async function loadExpertsSlim(fresh = false): Promise<Expert[] | null> {
+  // 1) Preferred: our server's cached list (/api/experts/list). It is cached for 60 s on the server
+  //    and by the CDN, so most page loads don't touch the database at all. Right after this browser
+  //    saved something we add ?fresh=… so the user sees their own change immediately.
+  try {
+    const res = await fetch(fresh || wroteRecently() ? `/api/experts/list?fresh=${Date.now()}` : '/api/experts/list');
+    if (res.ok) {
+      const list = await res.json();
+      if (Array.isArray(list)) return list as Expert[];
+    }
+  } catch {
+    /* server unreachable → read Supabase directly below */
+  }
+
+  // 2) Fallback: read the slim list straight from Supabase.
+  const { data, error } = await supabase.rpc('get_experts_list', undefined, { get: true });
+  if (!error) return Array.isArray(data) ? (data as Expert[]) : [];
+  if (!isMissingFunction(error)) {
+    logSupabaseError('get_experts_list', error);
+    return null;
+  }
+  // Fallback (SQL function not installed yet): list columns only, never the heavy documents JSON.
+  const res = await supabase.from('experts').select(COLUMNS.EXPERT_LIST).order('created_at', { ascending: false }).limit(500);
+  if (res.error) {
+    logSupabaseError('select experts', res.error);
+    return null;
+  }
+  return res.data as Expert[];
+}
+
+async function loadExpertSlimByKey(key: string): Promise<Expert | null> {
+  const { data, error } = await supabase.rpc('get_expert_by_key', { p_key: key }, { get: true });
+  if (!error) return (data as Expert) || null;
+  if (!isMissingFunction(error)) {
+    logSupabaseError('get_expert_by_key', error);
+    return null;
+  }
+  // Fallback (SQL function not installed yet): same lookup the app used before.
+  const res = await supabase.from('experts').select(COLUMNS.EXPERT_WITH_DOCUMENTS).or(`id.eq.${key},email.ilike.${key}`).limit(1);
+  if (res.error) logSupabaseError('select expert', res.error);
+  return (Array.isArray(res.data) && res.data[0] as Expert) || null;
+}
+
+/** Cached, slim expert-by-id-or-email lookup used by status checks and login. */
+export async function getExpertSlimByKey(key: string, opts: { force?: boolean } = {}): Promise<Expert | null> {
+  const clean = (key || '').trim();
+  if (!clean) return null;
+  const cacheKey = `experts:one:${clean.toLowerCase()}`;
+  if (opts.force) invalidate(cacheKey);
+  return cached(cacheKey, 15_000, () => loadExpertSlimByKey(clean));
+}
 
 export interface Expert {
   id: string;
@@ -72,16 +147,16 @@ export const expertiseService = {
   },
 
   // Get all experts
-  async getExperts(): Promise<Expert[]> {
+  // Slim + cached. Pass { force: true } right after a save to skip the cache.
+  async getExperts(opts: { force?: boolean } = {}): Promise<Expert[]> {
     try {
-      const { data, error } = await supabase
-        .from('experts')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-      if (error) {
-        return await this.getLocalExperts();
-      }
+      if (opts.force) invalidate('experts:list');
+      const data = await cached('experts:list', EXPERTS_TTL_MS, async () => {
+        const rows = await loadExpertsSlim(opts.force === true);
+        // Don't cache a failure — throw so the next call retries.
+        if (rows === null) throw new Error('experts list unavailable');
+        return rows;
+      });
       if (Array.isArray(data) && data.length > 0) return data;
       return await this.getLocalExperts();
     } catch {
@@ -92,13 +167,8 @@ export const expertiseService = {
   // Get single expert
   async getExpert(id: string): Promise<Expert | null> {
     try {
-      const { data, error } = await supabase
-        .from('experts')
-        .select('*')
-        .eq('id', id)
-        .single();
-
-      if (!error && data) return data;
+      const data = await getExpertSlimByKey(id);
+      if (data) return data;
     } catch {}
 
     try {
@@ -114,14 +184,15 @@ export const expertiseService = {
     try {
       let query = supabase
         .from('expert_availability')
-        .select('*')
+        .select('id, expert_id, availability_date, start_time, end_time, status, booking_id, client_id, client_name, created_at, updated_at')
         .eq('expert_id', expertId);
 
       if (date) {
         query = query.eq('availability_date', date);
       }
 
-      const { data, error } = await query;
+      // Stable order + a safety cap (one expert's calendar is far below 500 slots).
+      const { data, error } = await query.order('availability_date', { ascending: true }).order('start_time', { ascending: true }).limit(500);
       if (!error && data && data.length > 0) return data;
       return await this.getLocalAvailability(expertId, date);
     } catch {
@@ -165,11 +236,17 @@ export const expertiseService = {
       const { data, error } = await supabase
         .from('experts')
         .insert(expert)
-        .select()
+        .select('id') // only the id comes back; the full row can be large
         .single();
 
-      if (!error && data) return data;
-    } catch {}
+      if (!error && data) {
+        invalidate('experts');
+        return (await getExpertSlimByKey(data.id, { force: true })) || ({ ...expert, id: data.id } as Expert);
+      }
+      logSupabaseError('createExpert (direct, will try server API next)', error);
+    } catch (err) {
+      logSupabaseError('createExpert (direct, will try server API next)', err);
+    }
 
     try {
       const res = await fetch('/api/experts', {
@@ -192,11 +269,17 @@ export const expertiseService = {
         .from('experts')
         .update({ ...updates, updated_at: new Date().toISOString() })
         .eq('id', id)
-        .select()
+        .select('id') // only the id comes back; the full row can be large
         .single();
 
-      if (!error && data) return data;
-    } catch {}
+      if (!error && data) {
+        invalidate('experts');
+        return (await getExpertSlimByKey(id, { force: true })) || ({ ...updates, id } as Expert);
+      }
+      logSupabaseError('updateExpert (direct, will try server API next)', error);
+    } catch (err) {
+      logSupabaseError('updateExpert (direct, will try server API next)', err);
+    }
 
     try {
       const res = await fetch('/api/experts/markup', {
@@ -205,10 +288,14 @@ export const expertiseService = {
         body: JSON.stringify({ id, ...updates })
       });
       if (res.ok) {
+        invalidate('experts');
         const json = await res.json();
         return json.expert || json;
       }
-    } catch {}
+      console.error('[experts] updateExpert via server API failed: HTTP', res.status);
+    } catch (err) {
+      console.error('[experts] updateExpert via server API failed:', err);
+    }
     return null;
   },
 

@@ -1,3 +1,4 @@
+import { startVisibleInterval } from '../lib/polling'; // egress-safe polling (skips hidden tabs)
 import React, { useState, useEffect, useRef } from 'react';
 import {
   FileText, ShieldCheck, IndianRupee, Video, MessageSquare, History, Save,
@@ -17,6 +18,7 @@ export const AdminProjectReviewDesk: React.FC<AdminProjectReviewDeskProps> = ({
   onInspectReview
 }) => {
   const [reviews, setReviews] = useState<ProjectReviewRecord[]>([]);
+  const [activityEvents, setActivityEvents] = useState<any[]>([]); // admin audit feed (latest 100)
   const [isLoading, setIsLoading] = useState(true);
   const [activeSubTab, setActiveSubTab] = useState<
     'requests' | 'active' | 'completed' | 'meetings' | 'financials' | 'audit' | 'pricing'
@@ -113,13 +115,14 @@ export const AdminProjectReviewDesk: React.FC<AdminProjectReviewDeskProps> = ({
     window.addEventListener('platform_fee_updated', handlePricingUpdate);
     window.addEventListener('mongo_db_updated', handlePricingUpdate);
     window.addEventListener('storage', handlePricingUpdate);
-    const pollInterval = setInterval(loadPricingAndFees, 2000);
+    // EGRESS FIX: was every 2 s; pricing changes also arrive via the events above.
+    const stopPricingPoll = startVisibleInterval(loadPricingAndFees, 60_000);
     return () => {
       window.removeEventListener('project_review_updated', handlePricingUpdate);
       window.removeEventListener('platform_fee_updated', handlePricingUpdate);
       window.removeEventListener('mongo_db_updated', handlePricingUpdate);
       window.removeEventListener('storage', handlePricingUpdate);
-      clearInterval(pollInterval);
+      stopPricingPoll();
     };
   }, []);
 
@@ -173,8 +176,14 @@ export const AdminProjectReviewDesk: React.FC<AdminProjectReviewDeskProps> = ({
 
   const loadReviews = async () => {
     try {
-      const list = await mongoDB.getProjectReviews({ includeArchived: true });
+      // Lists arrive as small summaries (no chat / activity timeline). The audit tab gets its
+      // events from a separate, server-computed feed of the latest 100 events.
+      const [list, events] = await Promise.all([
+        mongoDB.getProjectReviews({ includeArchived: true }),
+        mongoDB.getProjectReviewActivity(100)
+      ]);
       setReviews(Array.isArray(list) ? list : (Array.isArray((list as any)?.projectReviews) ? (list as any).projectReviews : []));
+      setActivityEvents(Array.isArray(events) ? events : []);
     } catch (e) {
       console.error('Failed to load project reviews for admin:', e);
       setReviews([]);
@@ -185,13 +194,14 @@ export const AdminProjectReviewDesk: React.FC<AdminProjectReviewDeskProps> = ({
 
   useEffect(() => {
     loadReviews();
-    const interval = setInterval(loadReviews, 3000);
+    // EGRESS FIX: was every 3 s.
+    const stopReviewsPoll = startVisibleInterval(loadReviews, 60_000);
     const handleUpdate = () => loadReviews();
     window.addEventListener('project_review_updated', handleUpdate);
     window.addEventListener('storage', handleUpdate);
 
     return () => {
-      clearInterval(interval);
+      stopReviewsPoll();
       window.removeEventListener('project_review_updated', handleUpdate);
       window.removeEventListener('storage', handleUpdate);
     };
@@ -232,16 +242,11 @@ export const AdminProjectReviewDesk: React.FC<AdminProjectReviewDeskProps> = ({
     }))
   );
 
-  // All activity events flattened
-  const allAuditEvents = filteredReviews
-    .flatMap((r) =>
-      (r.activityTimeline || []).map((a) => ({
-        ...a,
-        reviewId: r.projectReviewId,
-        clientName: r.clientName,
-        expertName: r.expertName
-      }))
-    )
+  // All activity events, newest first. They come from the server feed (latest 100) and are
+  // limited to the reviews currently shown by the filters.
+  const visibleReviewIds = new Set(filteredReviews.map((r) => r.projectReviewId));
+  const allAuditEvents = activityEvents
+    .filter((a) => visibleReviewIds.has(a.reviewId))
     .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
   // Metrics
@@ -542,7 +547,7 @@ export const AdminProjectReviewDesk: React.FC<AdminProjectReviewDeskProps> = ({
                       </span>
                     </td>
                     <td className="p-3.5 font-mono text-slate-400">
-                      {r.chat?.length || 0} messages
+                      {r.chat?.length ?? r.chatCount ?? 0} messages
                     </td>
                     <td className="p-3.5 text-right">
                       <button

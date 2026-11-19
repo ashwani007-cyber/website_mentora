@@ -21,12 +21,13 @@ export function normalizeBookingStatus(rawStatus?: string | null): BookingStatus
   if (!rawStatus) return BOOKING_STATUS.PENDING;
   const s = rawStatus.toLowerCase().trim();
 
+  // Check pending first so "Pending Expert Acceptance" is never misidentified as "accepted"
+  if (s.includes('pending') || s === 'awaiting') return BOOKING_STATUS.PENDING;
   if (s.includes('live')) return BOOKING_STATUS.LIVE;
   if (s.includes('complete')) return BOOKING_STATUS.COMPLETED;
   if (s.includes('reject') || s.includes('decline')) return BOOKING_STATUS.REJECTED;
   if (s.includes('accept') || s.includes('confirm')) return BOOKING_STATUS.ACCEPTED;
   if (s.includes('cancel')) return BOOKING_STATUS.CANCELLED;
-  if (s.includes('pending')) return BOOKING_STATUS.PENDING;
 
   return BOOKING_STATUS.PENDING;
 }

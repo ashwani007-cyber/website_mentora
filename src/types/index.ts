@@ -416,6 +416,8 @@ export interface ProjectReviewWalletTransaction {
 }
 
 export interface ProjectReviewRecord {
+  /** Number of chat messages. Set on list rows, which leave out the full chat to save data. */
+  chatCount?: number;
   projectReviewId: string;
   clientId: string;
   clientName: string;

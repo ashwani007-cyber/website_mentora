@@ -1,4 +1,6 @@
 import { supabase } from '../supabaseClient';
+import { COLUMNS, PAGE } from '../lib/columns';
+import { sendRealtimeBroadcast } from '../lib/realtimeBroadcast';
 import {
   BOOKING_STATUS,
   BookingStatus,
@@ -100,6 +102,7 @@ export interface ConsultationBooking {
   status: BookingStatus | string;
   meet_link?: string | null;
   meeting_link?: string | null;
+  meeting_link_sent_at?: string | null;
   notes?: string | null;
   created_at?: string;
   updated_at?: string;
@@ -238,6 +241,7 @@ export function normalizeBooking(row: any): ConsultationBooking {
     status: rawStatus,
     meet_link: meetUrl || null,
     meeting_link: meetUrl || null,
+    meeting_link_sent_at: row.meeting_link_sent_at || null,
     notes: row.notes || topic,
     created_at: row.created_at || new Date().toISOString(),
     updated_at: row.updated_at || new Date().toISOString(),
@@ -387,7 +391,7 @@ export async function createConsultationBooking(
     const { data, error } = await supabase
       .from('bookings')
       .insert(sbPayload)
-      .select()
+      .select(COLUMNS.BOOKING)
       .maybeSingle();
 
     console.log('📡 [BOOKINGS INSERT] Direct Supabase Response/Error:', { data, error: error?.message });
@@ -496,9 +500,39 @@ export async function fetchClientBookings(
   clientEmail?: string,
   bookingIds?: string[]
 ): Promise<ConsultationBooking[]> {
+  const cleanEmail = (clientEmail || '').toLowerCase().trim();
+  const cleanId = (clientId || '').trim();
+
+  // 1. Primary Read Path: Call backend endpoint /api/bookings
   try {
-    const cleanEmail = (clientEmail || '').toLowerCase().trim();
-    let query = supabase.from('bookings').select('*');
+    const params = new URLSearchParams();
+    if (cleanId) params.append('clientId', cleanId);
+    if (cleanEmail) params.append('clientEmail', cleanEmail);
+    params.append('role', 'client');
+
+    const res = await fetch(`/api/bookings?${params.toString()}`, {
+      headers: {
+        'x-user-id': cleanId,
+        'x-user-email': cleanEmail,
+        'x-user-role': 'client'
+      }
+    });
+    if (res.ok) {
+      const json = await res.json();
+      const list = json.bookings || json.data;
+      if (json.success && Array.isArray(list)) {
+        const normalized = list.map(normalizeBooking);
+        return normalized.filter(b => !b.deletedByClient && !isClientRoleDeleted(b.id, cleanEmail));
+      }
+    }
+  } catch (apiErr: any) {
+    console.warn('[BOOKINGS SERVICE] /api/bookings endpoint fetch failed, falling back:', apiErr.message);
+  }
+
+  // 2. Direct Supabase Query fallback
+  try {
+    // Only real booking columns (never select('*')); newest first, capped — see src/lib/columns.ts
+    let query = supabase.from('bookings').select(COLUMNS.BOOKING);
 
     const validIds = Array.isArray(bookingIds) ? bookingIds.filter(Boolean) : [];
 
@@ -506,28 +540,39 @@ export async function fetchClientBookings(
       query = query.or(`client_email.ilike.${cleanEmail},id.in.(${validIds.join(',')})`);
     } else if (validIds.length > 0) {
       query = query.in('id', validIds);
-    } else if (clientId && cleanEmail) {
-      query = query.or(`client_id.eq.${clientId},client_email.ilike.${cleanEmail}`);
+    } else if (cleanId && cleanEmail) {
+      query = query.or(`client_id.eq.${cleanId},client_email.ilike.${cleanEmail}`);
     } else if (cleanEmail) {
       query = query.ilike('client_email', cleanEmail);
-    } else if (clientId) {
-      query = query.eq('client_id', clientId);
+    } else if (cleanId) {
+      query = query.eq('client_id', cleanId);
     }
 
-    query = query.order('created_at', { ascending: false });
+    query = query.order('created_at', { ascending: false }).order('id', { ascending: true }).limit(PAGE.BOOKINGS);
 
     const { data, error } = await query;
-    if (error) {
-      console.warn('[BOOKINGS SERVICE] Error fetching client bookings:', error.message);
-      return [];
+    if (!error && Array.isArray(data)) {
+      const normalized = data.map(normalizeBooking);
+      return normalized.filter(b => !b.deletedByClient && !isClientRoleDeleted(b.id, cleanEmail));
     }
-
-    const normalized = (data || []).map(normalizeBooking);
-    return normalized.filter(b => !b.deletedByClient && !isClientRoleDeleted(b.id, cleanEmail));
-  } catch (err: any) {
-    console.error('[BOOKINGS SERVICE] fetchClientBookings error:', err);
-    return [];
+  } catch (sbErr: any) {
+    console.warn('[BOOKINGS SERVICE] Supabase direct query fallback note:', sbErr.message);
   }
+
+  // 3. Ephemeral local storage cache fallback
+  try {
+    if (typeof localStorage !== 'undefined' && cleanEmail) {
+      const localRaw = localStorage.getItem(`client_upcoming_${cleanEmail}`);
+      if (localRaw) {
+        const parsed = JSON.parse(localRaw);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed.map(normalizeBooking).filter(b => !b.deletedByClient && !isClientRoleDeleted(b.id, cleanEmail));
+        }
+      }
+    }
+  } catch {}
+
+  return [];
 }
 
 /**
@@ -539,14 +584,55 @@ export async function fetchExpertBookings(
   statusFilter?: 'pending' | 'accepted' | 'all',
   expertUserId?: string
 ): Promise<ConsultationBooking[]> {
+  const cleanEmail = (expertEmail || '').toLowerCase().trim();
+  const cleanId = (expertId || '').trim();
+  const cleanUserId = (expertUserId || '').trim();
+
+  console.log('🔍 [EXPERT PORTAL FETCH] Query params:', { expertId: cleanId, expertEmail: cleanEmail, expertUserId: cleanUserId, statusFilter });
+
+  // 1. Primary Read Path: Call backend endpoint /api/bookings
   try {
-    const cleanEmail = (expertEmail || '').toLowerCase().trim();
-    const cleanId = (expertId || '').trim();
-    const cleanUserId = (expertUserId || '').trim();
+    const params = new URLSearchParams();
+    if (cleanId) params.append('expertId', cleanId);
+    if (cleanEmail) params.append('expertEmail', cleanEmail);
+    if (cleanUserId) params.append('expertUserId', cleanUserId);
+    params.append('role', 'expert');
 
-    console.log('🔍 [EXPERT PORTAL FETCH] Query params:', { expertId: cleanId, expertEmail: cleanEmail, expertUserId: cleanUserId, statusFilter });
+    const res = await fetch(`/api/bookings?${params.toString()}`, {
+      headers: {
+        'x-user-id': cleanId || cleanUserId,
+        'x-user-email': cleanEmail,
+        'x-user-role': 'expert'
+      }
+    });
+    if (res.ok) {
+      const json = await res.json();
+      const list = json.bookings || json.data;
+      if (json.success && Array.isArray(list)) {
+        let normalized = list.map(normalizeBooking);
+        normalized = normalized.filter(b => !b.deletedByExpert && !isExpertRoleDeleted(b.id, cleanEmail));
+        if (statusFilter === 'pending') {
+          return normalized.filter(b => {
+            const st = (b.status || '').toLowerCase();
+            return st === 'pending' || st.includes('pending');
+          });
+        } else if (statusFilter === 'accepted') {
+          return normalized.filter(b => {
+            const st = (b.status || '').toLowerCase();
+            return st === 'accepted' || st.includes('accept') || st.includes('confirmed');
+          });
+        }
+        return normalized;
+      }
+    }
+  } catch (apiErr: any) {
+    console.warn('[EXPERT PORTAL FETCH] /api/bookings endpoint fetch failed, falling back:', apiErr.message);
+  }
 
-    let query = supabase.from('bookings').select('*');
+  // 2. Direct Supabase Query fallback
+  try {
+    // Only real booking columns (never select('*')); newest first, capped — see src/lib/columns.ts
+    let query = supabase.from('bookings').select(COLUMNS.BOOKING);
 
     const orClauses: string[] = [];
     if (cleanId) orClauses.push(`expert_id.eq.${cleanId}`);
@@ -563,53 +649,96 @@ export async function fetchExpertBookings(
       query = query.or('status.eq.accepted,status.ilike.%accepted%,status.ilike.%confirmed%');
     }
 
-    query = query.order('created_at', { ascending: false });
+    query = query.order('created_at', { ascending: false }).order('id', { ascending: true }).limit(PAGE.BOOKINGS);
 
     const { data, error } = await query;
-
-    console.log('📦 [EXPERT PORTAL FETCH] Result count & rows:', {
-      count: data ? data.length : 0,
-      error: error?.message,
-      rows: (data || []).map(r => ({ id: r.id, client: r.client_name, status: r.status, topic: r.topic || r.notes }))
-    });
-
-    if (error) {
-      console.warn('[EXPERT PORTAL FETCH] Error fetching expert bookings:', error.message);
-      return [];
+    if (!error && Array.isArray(data)) {
+      const normalized = data.map(normalizeBooking);
+      return normalized.filter(b => !b.deletedByExpert && !isExpertRoleDeleted(b.id, cleanEmail));
     }
-
-    const normalized = (data || []).map(normalizeBooking);
-    return normalized.filter(b => !b.deletedByExpert && !isExpertRoleDeleted(b.id, cleanEmail));
-  } catch (err: any) {
-    console.error('[EXPERT PORTAL FETCH] Unexpected error:', err);
-    return [];
+  } catch (sbErr: any) {
+    console.warn('[EXPERT PORTAL FETCH] Supabase direct query fallback note:', sbErr.message);
   }
+
+  // 3. Ephemeral local storage cache fallback
+  try {
+    if (typeof localStorage !== 'undefined' && cleanEmail) {
+      const accRaw = localStorage.getItem(`expert_accepted_sessions_${cleanEmail}`);
+      const reqRaw = localStorage.getItem(`expert_requests_${cleanEmail}`);
+      const accList = accRaw ? JSON.parse(accRaw) : [];
+      const reqList = reqRaw ? JSON.parse(reqRaw) : [];
+      const combined = [...(Array.isArray(accList) ? accList : []), ...(Array.isArray(reqList) ? reqList : [])];
+      if (combined.length > 0) {
+        const normalized = combined.map(normalizeBooking).filter(b => !b.deletedByExpert && !isExpertRoleDeleted(b.id, cleanEmail));
+        if (statusFilter === 'pending') {
+          return normalized.filter(b => (b.status || '').toLowerCase().includes('pending'));
+        } else if (statusFilter === 'accepted') {
+          return normalized.filter(b => (b.status || '').toLowerCase().includes('accept') || (b.status || '').toLowerCase().includes('confirmed'));
+        }
+        return normalized;
+      }
+    }
+  } catch {}
+
+  return [];
 }
 
 /**
  * Fetches all bookings across the platform for the Admin Ops Desk.
  */
 export async function fetchAllBookingsForAdmin(): Promise<ConsultationBooking[]> {
+  console.log('🔍 [ADMIN PORTAL FETCH] Fetching all bookings for Admin Ops Desk...');
+
+  // 1. Primary Read Path: Call backend endpoint /api/bookings?role=admin
   try {
-    console.log('🔍 [ADMIN PORTAL FETCH] Fetching all bookings for Admin Ops Desk...');
+    const res = await fetch('/api/bookings?role=admin', {
+      headers: {
+        'x-user-role': 'admin'
+      }
+    });
+    if (res.ok) {
+      const json = await res.json();
+      const list = json.bookings || json.data;
+      if (json.success && Array.isArray(list) && list.length > 0) {
+        const normalized = list.map(normalizeBooking);
+        return normalized.filter(b => !b.deletedByAdmin && !isAdminRoleDeleted(b.id));
+      }
+    }
+  } catch (apiErr: any) {
+    console.warn('[ADMIN PORTAL FETCH] /api/bookings endpoint fetch failed, falling back:', apiErr.message);
+  }
+
+  // 2. Direct Supabase Query fallback
+  try {
     const { data, error } = await supabase
       .from('bookings')
-      .select('*')
-      .order('created_at', { ascending: false });
+      .select(COLUMNS.BOOKING)
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .limit(PAGE.BOOKINGS);
 
-    console.log('📦 [ADMIN PORTAL FETCH] Result count:', data ? data.length : 0, error ? `Error: ${error.message}` : 'OK');
-
-    if (error) {
-      console.warn('[ADMIN PORTAL FETCH] Error fetching admin bookings:', error.message);
-      return [];
+    if (!error && Array.isArray(data) && data.length > 0) {
+      const normalized = data.map(normalizeBooking);
+      return normalized.filter(b => !b.deletedByAdmin && !isAdminRoleDeleted(b.id));
     }
-
-    const normalized = (data || []).map(normalizeBooking);
-    return normalized.filter(b => !b.deletedByAdmin && !isAdminRoleDeleted(b.id));
-  } catch (err: any) {
-    console.error('[ADMIN PORTAL FETCH] Unexpected error:', err);
-    return [];
+  } catch (sbErr: any) {
+    console.warn('[ADMIN PORTAL FETCH] Supabase direct query fallback note:', sbErr.message);
   }
+
+  // 3. Ephemeral local storage cache fallback
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const saved = localStorage.getItem('app_platform_sessions');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed.map(normalizeBooking).filter(b => !b.deletedByAdmin && !isAdminRoleDeleted(b.id));
+        }
+      }
+    }
+  } catch {}
+
+  return [];
 }
 
 /**
@@ -620,7 +749,7 @@ export async function updateBookingStatus(
   status: BookingStatus | string,
   extraFields: Record<string, any> = {},
   callerInfo: { userId?: string; userEmail?: string; userRole?: string } = {}
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; booking?: ConsultationBooking }> {
   try {
     const canonicalStatus = normalizeBookingStatus(status);
     
@@ -634,6 +763,12 @@ export async function updateBookingStatus(
     if (meet !== undefined) {
       payload.meet_link = meet;
       payload.meeting_link = meet;
+    }
+    const sentAt = extraFields.meeting_link_sent_at ?? extraFields.meetingLinkSentAt;
+    if (sentAt !== undefined) {
+      payload.meeting_link_sent_at = sentAt;
+    } else if (meet !== undefined && meet) {
+      payload.meeting_link_sent_at = new Date().toISOString();
     }
     if (extraFields.notes !== undefined) payload.notes = extraFields.notes;
     if (extraFields.scheduled_date !== undefined) payload.scheduled_date = extraFields.scheduled_date;
@@ -665,6 +800,7 @@ export async function updateBookingStatus(
         updatedBookingData = json.booking || { id: bookingId, ...payload };
       } else if (json.error) {
         console.warn('[BOOKINGS UPDATE] API endpoint returned error:', json.error);
+        return { success: false, error: json.error };
       }
     } catch (apiErr: any) {
       console.warn('[BOOKINGS UPDATE] API endpoint call failed, attempting direct Supabase fallback:', apiErr.message);
@@ -676,7 +812,7 @@ export async function updateBookingStatus(
         .from('bookings')
         .update(payload)
         .eq('id', bookingId)
-        .select()
+        .select(COLUMNS.BOOKING)
         .maybeSingle();
 
       if (error) {
@@ -693,7 +829,7 @@ export async function updateBookingStatus(
       console.warn('[BOOKINGS UPDATE] Broadcast note:', bcErr);
     }
 
-    return { success: true };
+    return { success: true, booking: normalizeBooking(updatedBookingData) };
   } catch (err: any) {
     return { success: false, error: err.message };
   }
@@ -765,11 +901,19 @@ export async function deleteBooking(
  */
 export function subscribeToBookingsRealtime({
   channelName = 'bookings-realtime-channel',
+  filter,
   onInsert,
   onUpdate,
   onDelete
 }: {
   channelName?: string;
+  /**
+   * Row filter, e.g. "client_email=eq.ana@x.com". Without it, EVERY booking change in the whole
+   * table is pushed to this browser (other users' data too). Only the admin should omit it.
+   * Note: Supabase cannot filter DELETE events, so filtered listeners don't get deletes — the
+   * 60 s refresh picks those up (bookings are normally soft-deleted, i.e. updated, anyway).
+   */
+  filter?: string;
   onInsert?: (booking: ConsultationBooking) => void;
   onUpdate?: (booking: ConsultationBooking) => void;
   onDelete?: (deletedId: string) => void;
@@ -782,7 +926,8 @@ export function subscribeToBookingsRealtime({
       {
         event: '*',
         schema: 'public',
-        table: 'bookings'
+        table: 'bookings',
+        ...(filter ? { filter } : {})
       },
       (payload: any) => {
         const { eventType, new: newRec, old: oldRec } = payload;
@@ -842,46 +987,57 @@ export function subscribeToBookingsRealtime({
   };
 }
 
+// Module-level persistent BroadcastChannel singletons to prevent premature closure on postMessage
+let bcUpdatesChannel: BroadcastChannel | null = null;
+let bcDecisionsChannel: BroadcastChannel | null = null;
+
+function getBcUpdatesChannel(): BroadcastChannel | null {
+  if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+    if (!bcUpdatesChannel) {
+      try { bcUpdatesChannel = new BroadcastChannel('mentora_booking_updates'); } catch {}
+    }
+    return bcUpdatesChannel;
+  }
+  return null;
+}
+
+function getBcDecisionsChannel(): BroadcastChannel | null {
+  if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+    if (!bcDecisionsChannel) {
+      try { bcDecisionsChannel = new BroadcastChannel('mentora_booking_decisions'); } catch {}
+    }
+    return bcDecisionsChannel;
+  }
+  return null;
+}
+
 /**
  * Emits a real-time booking update event across Supabase channels,
  * BroadcastChannel, and window events for instantaneous cross-tab/cross-portal sync.
  */
-export function broadcastBookingUpdate(payload: Partial<ConsultationBooking> & { id: string; meetUrl?: string; meet_link?: string | null }) {
+export function broadcastBookingUpdate(payload: Partial<ConsultationBooking> & { id: string; meetUrl?: string; meet_link?: string | null; meeting_link_sent_at?: string | null }) {
   console.log('📢 [BROADCAST BOOKING UPDATE]:', payload);
+  const meet = payload.meetUrl || payload.meet_link || payload.meeting_link || '';
   const detail = {
     ...payload,
     bookingId: payload.id,
-    meetUrl: payload.meetUrl || payload.meet_link || payload.meeting_link || '',
-    meet_link: payload.meet_link || payload.meetUrl || null,
+    meetUrl: meet,
+    meet_link: meet || null,
+    meeting_link: meet || null,
+    meeting_link_sent_at: payload.meeting_link_sent_at || (meet ? new Date().toISOString() : null),
     timestamp: new Date().toISOString()
   };
 
-  try {
-    const broadcastChannel = supabase.channel('bookings-realtime-channel');
-    broadcastChannel.subscribe((status) => {
-      if (status === 'SUBSCRIBED') {
-        broadcastChannel.send({
-          type: 'broadcast',
-          event: 'booking_updated',
-          payload: detail
-        });
-      }
-    });
-  } catch (err) {
-    console.warn('[BROADCAST ERROR]:', err);
-  }
+  // Tell other browsers (one short message, no new channel left open — see realtimeBroadcast.ts).
+  void sendRealtimeBroadcast('bookings-realtime-channel', 'booking_updated', detail as Record<string, unknown>);
 
-  // Native Web API BroadcastChannel for instant cross-tab / cross-window sync
+  // Native Web API BroadcastChannel for instant cross-tab / cross-window sync (do NOT close channel immediately)
   try {
-    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
-      const bc1 = new BroadcastChannel('mentora_booking_updates');
-      bc1.postMessage(detail);
-      bc1.close();
+    const bc1 = getBcUpdatesChannel();
+    if (bc1) bc1.postMessage(detail);
 
-      const bc2 = new BroadcastChannel('mentora_booking_decisions');
-      bc2.postMessage(detail);
-      bc2.close();
-    }
+    const bc2 = getBcDecisionsChannel();
+    if (bc2) bc2.postMessage(detail);
   } catch (err) {
     console.warn('[BROADCAST CHANNEL ERROR]:', err);
   }
@@ -917,6 +1073,7 @@ export function broadcastBookingDecision(payload: {
   console.log('📢 [BROADCAST BOOKING DECISION]:', payload);
   const detail = {
     bookingId: payload.bookingId,
+    id: payload.bookingId,
     status: payload.decision,
     decision: payload.decision,
     expertName: payload.expertName,
@@ -925,28 +1082,16 @@ export function broadcastBookingDecision(payload: {
     timestamp: new Date().toISOString()
   };
 
-  try {
-    const broadcastChannel = supabase.channel('bookings-realtime-channel');
-    broadcastChannel.subscribe((status) => {
-      if (status === 'SUBSCRIBED') {
-        broadcastChannel.send({
-          type: 'broadcast',
-          event: 'booking_decision_updated',
-          payload: detail
-        });
-      }
-    });
-  } catch (err) {
-    console.warn('[BROADCAST ERROR]:', err);
-  }
+  // Tell other browsers (one short message, no new channel left open — see realtimeBroadcast.ts).
+  void sendRealtimeBroadcast('bookings-realtime-channel', 'booking_decision_updated', detail as Record<string, unknown>);
 
-  // Native Web API BroadcastChannel for instant cross-tab / cross-window sync
+  // Native Web API BroadcastChannel for instant cross-tab / cross-window sync (do NOT close channel immediately)
   try {
-    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
-      const bc = new BroadcastChannel('mentora_booking_decisions');
-      bc.postMessage(detail);
-      bc.close();
-    }
+    const bcDec = getBcDecisionsChannel();
+    if (bcDec) bcDec.postMessage(detail);
+
+    const bcUpd = getBcUpdatesChannel();
+    if (bcUpd) bcUpd.postMessage(detail);
   } catch (err) {
     console.warn('[BROADCAST CHANNEL ERROR]:', err);
   }
@@ -955,14 +1100,16 @@ export function broadcastBookingDecision(payload: {
   try {
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem('mentora_last_booking_decision', JSON.stringify({ ...detail, _ts: Date.now() }));
+      localStorage.setItem('mentora_last_booking_update', JSON.stringify({ ...detail, _ts: Date.now() }));
     }
   } catch {}
 
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('booking_decision_updated', { detail }));
+    window.dispatchEvent(new CustomEvent('booking_updated', { detail }));
     window.dispatchEvent(new CustomEvent('mongo_kv_updated', { detail: { key: 'client_upcoming' } }));
     window.dispatchEvent(new CustomEvent('mongo_kv_updated', { detail: { key: 'app_platform_sessions' } }));
-    window.dispatchEvent(new CustomEvent('app_platform_sessions_updated'));
+    window.dispatchEvent(new CustomEvent('app_platform_sessions_updated', { detail }));
     window.dispatchEvent(new Event('storage'));
   }
 }

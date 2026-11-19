@@ -1,3 +1,4 @@
+import { startVisibleInterval } from '../lib/polling'; // egress-safe polling (skips hidden tabs)
 import React, { useState } from 'react';
 import { X, ShieldCheck, FileText, Send, Sparkles, AlertCircle, Clock, CheckCircle2 } from 'lucide-react';
 import { ProjectReviewRecord } from '../types';
@@ -89,12 +90,14 @@ export const ProjectReviewRequestModal: React.FC<ProjectReviewRequestModalProps>
     window.addEventListener('platform_fee_updated', handlePlatformFeeUpdate);
     window.addEventListener('storage', handlePlatformFeeUpdate);
     window.addEventListener('mongo_db_updated', handlePlatformFeeUpdate);
-    const interval = setInterval(fetchPricing, 1500);
+    // EGRESS FIX: was a 1.5 s poll. Price changes arrive via the platform_fee_updated / storage /
+    // mongo_db_updated events above; a slow 60 s refresh is kept as a safety net while open.
+    const stopPricingPoll = startVisibleInterval(fetchPricing, 60_000);
     return () => {
       window.removeEventListener('platform_fee_updated', handlePlatformFeeUpdate);
       window.removeEventListener('storage', handlePlatformFeeUpdate);
       window.removeEventListener('mongo_db_updated', handlePlatformFeeUpdate);
-      clearInterval(interval);
+      stopPricingPoll();
     };
   }, [isOpen, expert?.id, expert?.projectRate]);
 

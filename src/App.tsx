@@ -57,11 +57,13 @@ import {
   createConsultationBooking,
   fetchClientBookings,
   fetchExpertBookings,
+  fetchAllBookingsForAdmin,
   updateBookingStatus,
   deleteBooking,
   subscribeToBookingsRealtime,
   normalizeBooking,
   broadcastBookingDecision,
+  broadcastBookingUpdate,
   ConsultationBooking,
   isClientRoleDeleted,
   isExpertRoleDeleted,
@@ -78,6 +80,10 @@ import mentoraLogoHorizontalDark from "./assets/mentora-logo-horizontal-dark.png
 import mentoraLogoLight from "./assets/mentora-logo-light.png";
 import mentoraLogoDark from "./assets/mentora-logo-dark.png";
 import mentoraSymbol from "./assets/mentora-symbol.png";
+// Egress-safe polling helpers (skip ticks in hidden tabs, collapse event bursts)
+import { startVisibleInterval, debounce } from "./lib/polling";
+import { getExpertSlimByKey } from "./services/supabaseExpertiseService";
+import { uploadAvatarImage } from "./lib/imageUpload";
 
 
 /* ---------------------------------------------------------------
@@ -1653,9 +1659,16 @@ function EditExpertProfileModal({ profile, onClose, onSave, theme = "dark" }: { 
   const [phone, setPhone] = useState(profile?.phone || "+91 98765 43210");
   const [bio, setBio] = useState(profile?.bio || "Ex-CFO with 34 years in corporate tax audits, ESOP design, valuation readiness, and M&A compliance.");
   const [img, setImg] = useState(profile?.img || "https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=300&auto=format&fit=crop&q=80");
+  const [isUploadingImg, setIsUploadingImg] = useState(false);
+  const [imgUploadError, setImgUploadError] = useState<string | null>(null);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    // Don't save while the photo is still uploading (the preview URL is only temporary).
+    if (isUploadingImg) {
+      alert("Please wait — your photo is still uploading.");
+      return;
+    }
     const updated = {
       ...profile,
       name,
@@ -1736,16 +1749,28 @@ function EditExpertProfileModal({ profile, onClose, onSave, theme = "dark" }: { 
                     type="file"
                     accept="image/*"
                     className="hidden"
-                    onChange={(e) => {
+                    disabled={isUploadingImg}
+                    onChange={async (e) => {
+                      // EGRESS FIX: the photo used to be saved as a full-size base64 string inside
+                      // the experts table. Now it is resized to WebP in the browser, uploaded to
+                      // Supabase Storage, and only the short URL is saved.
                       const file = e.target.files?.[0];
-                      if (file) {
-                        const reader = new FileReader();
-                        reader.onload = () => {
-                          if (typeof reader.result === "string") {
-                            setImg(reader.result);
-                          }
-                        };
-                        reader.readAsDataURL(file);
+                      e.target.value = ""; // allow choosing the same file again
+                      if (!file) return;
+                      const previous = img;
+                      const preview = URL.createObjectURL(file);
+                      setImg(preview); // instant preview while uploading
+                      setIsUploadingImg(true);
+                      setImgUploadError(null);
+                      try {
+                        const url = await uploadAvatarImage(file, profile?.id || profile?.email || email || "expert");
+                        setImg(url);
+                      } catch (err: any) {
+                        setImg(previous);
+                        setImgUploadError(err?.message || "Photo upload failed. Please try again.");
+                      } finally {
+                        URL.revokeObjectURL(preview);
+                        setIsUploadingImg(false);
                       }
                     }}
                   />
@@ -1753,6 +1778,8 @@ function EditExpertProfileModal({ profile, onClose, onSave, theme = "dark" }: { 
               </div>
             </div>
             <p className={`text-[10px] mt-1 ${isLight ? "text-slate-500" : "text-slate-500"}`}>Upload your professional headshot image to showcase on the Mentora landing page.</p>
+            {isUploadingImg && <p className="text-[10px] mt-1 text-amber-500">Optimising and uploading photo…</p>}
+            {imgUploadError && <p role="alert" className="text-[10px] mt-1 text-red-500">❌ {imgUploadError}</p>}
           </div>
 
           <div>
@@ -2175,6 +2202,9 @@ export const syncSessionToAdminOps = (sessionItem: {
   completed?: boolean;
   completedAt?: string;
   meetUrl?: string;
+  meet_link?: string;
+  meeting_link?: string;
+  meeting_link_sent_at?: string;
   meetCode?: string;
   reviewed?: boolean;
   payoutTransferred?: boolean;
@@ -4506,7 +4536,8 @@ function AuthPage({
           try {
             const { data: supaUser } = await supabase
               .from('users')
-              .select('*')
+              // Never download password_hash to the browser — only the profile fields we use.
+              .select('id, email, full_name, role, phone, bio, avatar_url, is_verified')
               .eq('email', cleanEmail)
               .maybeSingle();
             if (supaUser) userProfile = supaUser;
@@ -4515,24 +4546,13 @@ function AuthPage({
           }
         }
 
-        if (!userProfile) {
-          try {
-            const { data: supaExpert } = await supabase
-              .from('expert_profiles')
-              .select('*')
-              .eq('email', cleanEmail)
-              .maybeSingle();
-            if (supaExpert) userProfile = { ...supaExpert, role: 'expert' };
-          } catch {}
-        }
+        // (Removed: a lookup in the 'expert_profiles' table. That table does not exist in the
+        //  database, so the request failed with 404 on every login and never found anything.)
 
         if (!userProfile) {
           try {
-            const { data: supaExp } = await supabase
-              .from('experts')
-              .select('*')
-              .eq('email', cleanEmail)
-              .maybeSingle();
+            // Slim lookup (no base64 documents), cached 15 s — see supabaseExpertiseService.
+            const supaExp: any = await getExpertSlimByKey(cleanEmail);
             if (supaExp) userProfile = { ...supaExp, role: 'expert' };
           } catch {}
         }
@@ -4590,11 +4610,8 @@ function AuthPage({
         }
         if (assignedRole === "expert" || userProfile?.role === "expert") {
           try {
-            const { data: supaExp } = await supabase
-              .from('experts')
-              .select('*')
-              .eq('email', cleanEmail)
-              .maybeSingle();
+            // Slim lookup (no base64 documents), cached 15 s — see supabaseExpertiseService.
+            const supaExp: any = await getExpertSlimByKey(cleanEmail);
             if (supaExp) {
               const isVerified = Boolean(supaExp.verified === true);
               const status = isVerified ? 'approved' : (supaExp.verificationStatus || supaExp.documents?.verificationStatus || 'pending');
@@ -5017,7 +5034,7 @@ function ClientPage({
       } catch {}
     };
 
-    // 1. Initial Authoritative Fetch from Supabase bookings table
+    // 1. Initial Authoritative Fetch from backend bookings table
     const loadSupabaseBookings = async () => {
       try {
         const localBookingIds: string[] = [];
@@ -5027,18 +5044,6 @@ function ClientPage({
             const parsed = JSON.parse(raw);
             if (Array.isArray(parsed)) {
               parsed.forEach((b: any) => { if (b && b.id) localBookingIds.push(String(b.id)); });
-            }
-          }
-          for (let i = 0; i < localStorage.length; i++) {
-            const k = localStorage.key(i);
-            if (k && k.startsWith("client_upcoming_")) {
-              const r = localStorage.getItem(k);
-              if (r) {
-                const arr = JSON.parse(r);
-                if (Array.isArray(arr)) {
-                  arr.forEach((b: any) => { if (b && b.id) localBookingIds.push(String(b.id)); });
-                }
-              }
             }
           }
         } catch {}
@@ -5051,33 +5056,31 @@ function ClientPage({
             const sbMap = new Map<string, any>();
             sbBookings.forEach(b => sbMap.set(String(b.id), b));
 
-            // Merge with prev: Supabase status is single source of truth
-            const merged = prev
-              .filter(p => p && p.id && !isClientRoleDeleted(p.id, clientEmailClean) && !p.deletedByClient)
-              .map(p => {
-                if (p && p.id && sbMap.has(String(p.id))) {
-                  const sbB = sbMap.get(String(p.id));
-                  const realMeetUrl = sbB.meet_link || sbB.meeting_link || sbB.meetUrl || '';
-                  const codeMatch = realMeetUrl.match(/meet\.google\.com\/([a-z0-9-]+)/i);
-                  const realMeetCode = codeMatch ? codeMatch[1] : (realMeetUrl ? realMeetUrl.split("/").pop() : '');
-                  return {
-                    ...p,
-                    ...sbB,
-                    status: sbB.status || p.status,
-                    expert: sbB.expert || p.expert,
-                    expertEmail: sbB.expertEmail || p.expertEmail,
-                    meetUrl: realMeetUrl,
-                    meet_link: realMeetUrl,
-                    meetCode: realMeetCode
-                  };
-                }
-                return p;
-              });
+            // Authoritative list from backend
+            const merged = sbBookings.map(sbB => {
+              const prevMatch = prev.find(p => p && String(p.id) === String(sbB.id));
+              const realMeetUrl = sbB.meet_link || sbB.meeting_link || sbB.meetUrl || (prevMatch?.meetUrl || '');
+              const codeMatch = realMeetUrl.match(/meet\.google\.com\/([a-z0-9-]+)/i);
+              const realMeetCode = codeMatch ? codeMatch[1] : (realMeetUrl ? realMeetUrl.split("/").pop() : '');
+              return {
+                ...(prevMatch || {}),
+                ...sbB,
+                meetUrl: realMeetUrl,
+                meet_link: realMeetUrl,
+                meetCode: realMeetCode
+              };
+            });
 
-            // Also include any bookings from Supabase that weren't in prev yet
-            sbBookings.forEach(b => {
-              if (!merged.some(m => String(m.id) === String(b.id))) {
-                merged.push(b);
+            // Keep only recent optimistic bookings not yet synced
+            prev.forEach(p => {
+              if (p && p.id && !sbMap.has(String(p.id)) && !isClientRoleDeleted(p.id, clientEmailClean) && !p.deletedByClient) {
+                const bClientEmail = (p.clientEmail || p.client_email || '').toLowerCase().trim();
+                if (!bClientEmail || bClientEmail === clientEmailClean) {
+                  const pCreated = p.created_at ? new Date(p.created_at).getTime() : 0;
+                  if (Date.now() - pCreated < 120000) {
+                    merged.push(p);
+                  }
+                }
               }
             });
 
@@ -5095,9 +5098,12 @@ function ClientPage({
 
     loadSupabaseBookings();
 
-    // 2. Real-time Subscription to Supabase bookings table on dedicated client channel
+    // 2. Real-time Subscription to Supabase bookings table
     const unsubRealtime = subscribeToBookingsRealtime({
-      channelName: 'client-portal-bookings-realtime',
+      channelName: 'bookings-realtime-channel',
+      // Only this client's bookings (emails are stored lowercase). Without a filter every booking in
+      // the whole table was pushed to every client's browser.
+      filter: clientEmailClean ? `client_email=eq.${clientEmailClean}` : undefined,
       onInsert: (newBooking) => {
         if (newBooking.deletedByClient || isClientRoleDeleted(newBooking.id, clientEmailClean)) {
           return;
@@ -5196,7 +5202,7 @@ function ClientPage({
     window.addEventListener('booking_decision_updated', handleCustomBookingDecision);
     window.addEventListener('booking_updated', handleCustomBookingDecision);
 
-    // 6. Polling & synchronization fallback (authoritative Supabase & backend sync)
+    // 6. Polling & synchronization fallback (authoritative backend sync)
     const refreshUpcoming = async () => {
       // Fast local read for cached view
       const savedUpcoming = localStorage.getItem(storageKey);
@@ -5211,37 +5217,7 @@ function ClientPage({
         } catch {}
       }
 
-      // Merge from all client_upcoming_* keys to prevent missing bookings
-      try {
-        for (let i = 0; i < localStorage.length; i++) {
-          const key = localStorage.key(i);
-          if (key && key.startsWith("client_upcoming_") && key !== storageKey) {
-            const raw = localStorage.getItem(key);
-            if (raw) {
-              const other = JSON.parse(raw);
-              if (Array.isArray(other)) {
-                other.forEach((ob: any) => {
-                  if (!ob || !ob.id) return;
-                  const idx = localList.findIndex(l => String(l.id) === String(ob.id));
-                  const oStatus = (ob.status || '').toLowerCase();
-                  if (idx >= 0) {
-                    const lStatus = (localList[idx].status || '').toLowerCase();
-                    if ((oStatus.includes('accept') || oStatus.includes('reject')) && !lStatus.includes('accept') && !lStatus.includes('reject')) {
-                      localList[idx] = { ...localList[idx], ...ob, status: ob.status };
-                      localStorage.setItem(storageKey, JSON.stringify(localList));
-                    }
-                  } else if (oStatus.includes('accept') || oStatus.includes('reject') || oStatus.includes('pending')) {
-                    localList.push(ob);
-                    localStorage.setItem(storageKey, JSON.stringify(localList));
-                  }
-                });
-              }
-            }
-          }
-        }
-      } catch {}
-
-      // Authoritative Supabase fetch for client's bookings
+      // Authoritative fetch for client's bookings from backend
       try {
         const localIds = localList.map(b => String(b.id)).filter(Boolean);
         const sbBookings = await fetchClientBookings(clientProfile?.id, clientProfile?.email, localIds);
@@ -5252,32 +5228,30 @@ function ClientPage({
             const sbMap = new Map<string, any>();
             validSbBookings.forEach(b => sbMap.set(String(b.id), b));
 
-            const baseList = prev.length > 0 ? prev : localList;
-            const merged = baseList
-              .filter(p => p && p.id && !isClientRoleDeleted(p.id, clientEmailClean) && !p.deletedByClient)
-              .map(p => {
-                if (p && p.id && sbMap.has(String(p.id))) {
-                  const sbB = sbMap.get(String(p.id));
-                  const realMeetUrl = sbB.meet_link || sbB.meeting_link || sbB.meetUrl || '';
-                  const codeMatch = realMeetUrl.match(/meet\.google\.com\/([a-z0-9-]+)/i);
-                  const realMeetCode = codeMatch ? codeMatch[1] : (realMeetUrl ? realMeetUrl.split("/").pop() : '');
-                  return {
-                    ...p,
-                    ...sbB,
-                    status: sbB.status || p.status,
-                    expert: sbB.expert || p.expert,
-                    expertEmail: sbB.expertEmail || p.expertEmail,
-                    meetUrl: realMeetUrl,
-                    meet_link: realMeetUrl,
-                    meetCode: realMeetCode
-                  };
-                }
-                return p;
-              });
+            const merged = validSbBookings.map(sbB => {
+              const prevMatch = prev.find(p => p && String(p.id) === String(sbB.id));
+              const realMeetUrl = sbB.meet_link || sbB.meeting_link || sbB.meetUrl || (prevMatch?.meetUrl || '');
+              const codeMatch = realMeetUrl.match(/meet\.google\.com\/([a-z0-9-]+)/i);
+              const realMeetCode = codeMatch ? codeMatch[1] : (realMeetUrl ? realMeetUrl.split("/").pop() : '');
+              return {
+                ...(prevMatch || {}),
+                ...sbB,
+                meetUrl: realMeetUrl,
+                meet_link: realMeetUrl,
+                meetCode: realMeetCode
+              };
+            });
 
-            validSbBookings.forEach(b => {
-              if (!merged.some(m => String(m.id) === String(b.id))) {
-                merged.push(b);
+            // Keep only recent optimistic bookings not yet synced
+            prev.forEach(p => {
+              if (p && p.id && !sbMap.has(String(p.id)) && !isClientRoleDeleted(p.id, clientEmailClean) && !p.deletedByClient) {
+                const bClientEmail = (p.clientEmail || p.client_email || '').toLowerCase().trim();
+                if (!bClientEmail || bClientEmail === clientEmailClean) {
+                  const pCreated = p.created_at ? new Date(p.created_at).getTime() : 0;
+                  if (Date.now() - pCreated < 120000) {
+                    merged.push(p);
+                  }
+                }
               }
             });
 
@@ -5288,10 +5262,14 @@ function ClientPage({
             return merged;
           });
         } else if (localList.length > 0) {
-          setUpcoming(localList);
+          const cleaned = localList.filter(b => b && b.id && !isClientRoleDeleted(b.id, clientEmailClean) && !b.deletedByClient && ((b.clientEmail || b.client_email || '').toLowerCase().trim() === clientEmailClean || !(b.clientEmail || b.client_email)));
+          setUpcoming(cleaned);
         }
       } catch (sbErr) {
-        if (localList.length > 0) setUpcoming(localList);
+        if (localList.length > 0) {
+          const cleaned = localList.filter(b => b && b.id && !isClientRoleDeleted(b.id, clientEmailClean) && !b.deletedByClient && ((b.clientEmail || b.client_email || '').toLowerCase().trim() === clientEmailClean || !(b.clientEmail || b.client_email)));
+          setUpcoming(cleaned);
+        }
       }
 
       // Authoritative Supabase & Backend Wallet Balance Fetch
@@ -5311,10 +5289,14 @@ function ClientPage({
     };
 
     refreshUpcoming();
-    window.addEventListener("focus", refreshUpcoming);
-    window.addEventListener("mongo_db_updated", refreshUpcoming);
-    window.addEventListener("mongo_kv_updated", refreshUpcoming);
-    const interval = setInterval(refreshUpcoming, 5000);
+    // EGRESS FIX: was every 5 s even in hidden tabs. Booking changes already arrive instantly via
+    // the realtime subscription + BroadcastChannel above, so this is only a safety-net refresh:
+    // every 60 s while the tab is visible, and bursts of events are collapsed into one call.
+    const debouncedRefreshUpcoming = debounce(refreshUpcoming, 400);
+    window.addEventListener("focus", debouncedRefreshUpcoming);
+    window.addEventListener("mongo_db_updated", debouncedRefreshUpcoming);
+    window.addEventListener("mongo_kv_updated", debouncedRefreshUpcoming);
+    const stopPolling = startVisibleInterval(refreshUpcoming, 60_000);
 
     return () => {
       unsubRealtime();
@@ -5323,10 +5305,11 @@ function ClientPage({
       window.removeEventListener("storage", handleStorageEvent);
       window.removeEventListener("booking_decision_updated", handleCustomBookingDecision);
       window.removeEventListener("booking_updated", handleCustomBookingDecision);
-      window.removeEventListener("focus", refreshUpcoming);
-      window.removeEventListener("mongo_db_updated", refreshUpcoming);
-      window.removeEventListener("mongo_kv_updated", refreshUpcoming);
-      clearInterval(interval);
+      window.removeEventListener("focus", debouncedRefreshUpcoming);
+      window.removeEventListener("mongo_db_updated", debouncedRefreshUpcoming);
+      window.removeEventListener("mongo_kv_updated", debouncedRefreshUpcoming);
+      debouncedRefreshUpcoming.cancel();
+      stopPolling();
     };
   }, [clientProfile?.email, storageKey, walletStorageKey]);
 
@@ -5375,12 +5358,13 @@ function ClientPage({
     window.addEventListener('project_review_updated', handlePRUpdate);
     window.addEventListener('storage', handlePRUpdate);
     window.addEventListener('mongo_kv_updated', handlePRUpdate);
-    const interval = setInterval(loadClientProjectReviews, 3000);
+    // EGRESS FIX: was every 3 s. Updates also arrive through the events above.
+    const stopPolling = startVisibleInterval(loadClientProjectReviews, 60_000);
     return () => {
       window.removeEventListener('project_review_updated', handlePRUpdate);
       window.removeEventListener('storage', handlePRUpdate);
       window.removeEventListener('mongo_kv_updated', handlePRUpdate);
-      clearInterval(interval);
+      stopPolling();
     };
   }, [clientProfile?.email]);
 
@@ -5664,10 +5648,15 @@ function ClientPage({
       userEmail: bookingWithClient.clientEmail,
       amount: cost,
       description: `Consultation Booking: ${confirmedBooking.topic} with ${confirmedBooking.expert}`,
-      relatedBookingId: confirmedBooking.id
-    }).then(res => {
-      if (res && typeof res.newBalance === 'number') {
+      relatedBookingId: confirmedBooking.id // same booking can never be charged twice
+    }).then(async res => {
+      if (res?.success) {
         setWalletBalance(res.newBalance);
+      } else {
+        // Don't hide a failed payment: tell the user and show the real balance from the server.
+        alert(`⚠️ Your booking is confirmed, but the wallet payment could not be recorded: ${res?.error || "unknown error"}. Please contact support.`);
+        const fresh = await fetchWalletBalance(clientProfile?.id, clientProfile?.email);
+        setWalletBalance(fresh.balance);
       }
     }).catch(() => {});
 
@@ -5806,9 +5795,14 @@ function ClientPage({
       userEmail: clientProfile?.email || 'client@company.com',
       amount: amt,
       description: `Wallet Funded via UPI (₹${amt})`
-    }).then(res => {
-      if (res && typeof res.newBalance === 'number') {
+    }).then(async res => {
+      if (res?.success) {
         setWalletBalance(res.newBalance);
+      } else {
+        // Undo the optimistic balance and tell the user the top-up was not saved.
+        alert(`⚠️ Your top-up could not be saved: ${res?.error || "unknown error"}. Please try again or contact support.`);
+        const fresh = await fetchWalletBalance(clientProfile?.id, clientProfile?.email);
+        setWalletBalance(fresh.balance);
       }
     }).catch(() => {});
 
@@ -6220,10 +6214,11 @@ function ClientPage({
             ) : (
               upcoming.map((s, idx) => {
                 const rawStatus = (s.status || '').toLowerCase().trim();
-                const isDeclined = rawStatus.includes("decline") || rawStatus.includes("reject");
-                const isCompleted = s.status === "Completed" || s.completed || rawStatus.includes("complete");
-                const isLive = !isDeclined && !isCompleted && (s.status === "live" || s.isLive || rawStatus.includes("live"));
-                const isAccepted = !isDeclined && !isCompleted && !isLive && (rawStatus.includes("accept") || rawStatus.includes("confirm"));
+                const isPending = rawStatus === 'pending' || rawStatus.includes('pending') || rawStatus === 'pending expert acceptance';
+                const isDeclined = !isPending && (rawStatus.includes("decline") || rawStatus.includes("reject"));
+                const isCompleted = !isPending && !isDeclined && (s.status === "Completed" || s.completed || rawStatus.includes("complete"));
+                const isLive = !isPending && !isDeclined && !isCompleted && (s.status === "live" || s.isLive || rawStatus.includes("live"));
+                const isAccepted = !isPending && !isDeclined && !isCompleted && !isLive && (rawStatus.includes("accept") || rawStatus.includes("confirm") || (!!s.meetUrl && !isDeclined));
                 return (
                   <div
                     key={s.id || `session-${idx}`}
@@ -6259,8 +6254,8 @@ function ClientPage({
 
                     <div className="flex items-center justify-between text-xs">
                       <span className={`flex items-center gap-1 font-semibold font-mono ${isLight ? "text-amber-600" : "text-amber-400"}`}><Clock size={12} /> {s.when}</span>
-                      <Pill tone={isDeclined ? "rust" : isCompleted ? "moss" : isLive ? "rust" : (s.meetUrl || isAccepted) ? "moss" : "brass"}>
-                        {isDeclined ? "Rejected" : isCompleted ? "Completed" : isLive ? "LIVE NOW" : (s.meetUrl || isAccepted) ? "Accepted" : "Pending Expert Acceptance"}
+                      <Pill tone={isDeclined ? "rust" : isCompleted ? "moss" : isLive ? "rust" : isAccepted ? "moss" : "brass"}>
+                        {isDeclined ? "Rejected" : isCompleted ? "Completed" : isLive ? "LIVE NOW" : isAccepted ? "Accepted/Confirmed" : "Pending Expert Acceptance"}
                       </Pill>
                     </div>
 
@@ -6278,7 +6273,7 @@ function ClientPage({
                           </span>
                         </div>
                         <p className={`text-[11px] leading-relaxed ${isLight ? "text-rose-900/80" : "text-rose-200/90 font-medium"}`}>
-                          Expert {s.expert} has rejected your session request.
+                          Expert {s.expert || 'Expert'} has rejected your request.
                         </p>
                         <button
                           type="button"
@@ -6413,8 +6408,8 @@ function ClientPage({
                             : isLight ? "text-amber-900/80" : "text-amber-200/80"
                         }`}>
                           {isAccepted
-                            ? `Expert ${s.expert} has accepted your request. Please prepare for your meeting.`
-                            : `Your consultation request was sent to Expert ${s.expert}. Awaiting expert confirmation.`}
+                            ? `Expert ${s.expert || 'Expert'} has accepted your request.`
+                            : `Your consultation request was sent to Expert ${s.expert || 'Expert'}. Awaiting expert confirmation.`}
                         </p>
                       </div>
                     ) : (
@@ -6624,7 +6619,7 @@ function ClientPage({
                             {pr.completedMeetingCount} / 2 used
                           </div>
                           <div className={`text-[10px] ${isLight ? "text-slate-500" : "text-slate-400"}`}>
-                            {pr.submission?.files?.length || 0} docs · {pr.chat?.length || 0} msgs
+                            {pr.submission?.files?.length || 0} docs · {pr.chat?.length ?? pr.chatCount ?? 0} msgs
                           </div>
                         </div>
 
@@ -7175,11 +7170,11 @@ function ExpertPage({
     const handlePRUpdate = () => loadExpertProjectReviews();
     window.addEventListener('project_review_updated', handlePRUpdate);
     window.addEventListener('storage', handlePRUpdate);
-    const interval = setInterval(loadExpertProjectReviews, 3000);
+    const interval = startVisibleInterval(loadExpertProjectReviews, 60_000); // EGRESS FIX: was every 3 s, now 60 s and only while the tab is visible
     return () => {
       window.removeEventListener('project_review_updated', handlePRUpdate);
       window.removeEventListener('storage', handlePRUpdate);
-      clearInterval(interval);
+      interval();
     };
   }, [expertProfile?.email, expertProfile?.name, resolvedExpertId]);
 
@@ -7661,7 +7656,7 @@ function ExpertPage({
     window.addEventListener("mongo_db_updated", handleExpertUpdates);
     window.addEventListener("mongo_kv_updated", handleExpertUpdates);
     window.addEventListener("expert_documents_updated", handleExpertUpdates);
-    const expertSyncInterval = setInterval(handleExpertUpdates, 30000);
+    const expertSyncInterval = startVisibleInterval(handleExpertUpdates, 60_000); // EGRESS FIX: skip ticks while the tab is hidden
 
     return () => {
       window.removeEventListener("storage", handleExpertUpdates);
@@ -7670,7 +7665,7 @@ function ExpertPage({
       window.removeEventListener("mongo_db_updated", handleExpertUpdates);
       window.removeEventListener("mongo_kv_updated", handleExpertUpdates);
       window.removeEventListener("expert_documents_updated", handleExpertUpdates);
-      clearInterval(expertSyncInterval);
+      expertSyncInterval();
     };
   }, [expertProfile?.id, expertProfile?.name, expertProfile?.email, earningsKey, walletKey, trendKey, requestsKey, reviewsKey]);
 
@@ -7805,6 +7800,9 @@ function ExpertPage({
     // 2. Real-time Subscription to Supabase bookings table
     const unsubRealtime = subscribeToBookingsRealtime({
       channelName: 'bookings-realtime-channel',
+      // Only this expert's bookings (emails are stored lowercase). Without a filter every booking in
+      // the whole table was pushed to every expert's browser.
+      filter: expEmail ? `expert_email=eq.${expEmail}` : undefined,
       onInsert: (newBooking) => {
         if (newBooking.deletedByExpert || isExpertRoleDeleted(newBooking.id, expEmail)) {
           return;
@@ -7871,6 +7869,8 @@ function ExpertPage({
     window.addEventListener("booking_updated", handleWindowBookingUpdate);
     window.addEventListener("booking_decision_updated", handleWindowBookingUpdate);
     window.addEventListener("app_platform_sessions_updated", loadSupabaseExpertBookings);
+    window.addEventListener("focus", loadSupabaseExpertBookings);
+    const periodicExpertSync = startVisibleInterval(loadSupabaseExpertBookings, 60_000); // EGRESS FIX: was every 10 s; live changes already arrive via the realtime subscription above
 
     return () => {
       unsubRealtime();
@@ -7879,6 +7879,8 @@ function ExpertPage({
       window.removeEventListener("booking_updated", handleWindowBookingUpdate);
       window.removeEventListener("booking_decision_updated", handleWindowBookingUpdate);
       window.removeEventListener("app_platform_sessions_updated", loadSupabaseExpertBookings);
+      window.removeEventListener("focus", loadSupabaseExpertBookings);
+      periodicExpertSync();
     };
   }, [resolvedExpertId, expertProfile?.id, expertProfile?.user_id, expertProfile?.email, expertProfile?.name]);
 
@@ -8021,6 +8023,7 @@ function ExpertPage({
   const [editingMeetSessionId, setEditingMeetSessionId] = useState<string | null>(null);
   const [meetLinkErrors, setMeetLinkErrors] = useState<{ [sessionId: string]: string }>({});
   const [meetLinkSuccess, setMeetLinkSuccess] = useState<{ [sessionId: string]: string }>({});
+  const [isSendingMeetLink, setIsSendingMeetLink] = useState<{ [sessionId: string]: boolean }>({});
 
   // Supabase Realtime synchronization with Admin Document Audit & KYC desk
   useEffect(() => {
@@ -8129,11 +8132,14 @@ function ExpertPage({
 
   // Placeholder handler for Accept Booking (as specified in requirements)
   const handleAcceptBooking = async (bookingId: string) => {
-    // TODO: Final business logic for accepting booking will be specified later.
-    // Currently updates booking status to 'accepted' in Supabase bookings table and invokes existing accept workflow.
     try {
-      await updateBookingStatus(bookingId, 'accepted');
       const targetReq = requests.find(r => r.id === bookingId);
+      const callerInfo = {
+        userId: expertProfile?.id || expertProfile?.user_id || '',
+        userEmail: expertProfile?.email || '',
+        userRole: 'expert'
+      };
+      await updateBookingStatus(bookingId, 'accepted', {}, callerInfo);
       if (targetReq) {
         handleAcceptRequest(targetReq);
       } else {
@@ -8155,11 +8161,14 @@ function ExpertPage({
 
   // Placeholder handler for Reject Booking (as specified in requirements)
   const handleRejectBooking = async (bookingId: string) => {
-    // TODO: Final business logic for rejecting booking will be specified later.
-    // Currently updates booking status to 'rejected' in Supabase bookings table and invokes existing decline workflow.
     try {
-      await updateBookingStatus(bookingId, 'rejected');
       const targetReq = requests.find(r => r.id === bookingId);
+      const callerInfo = {
+        userId: expertProfile?.id || expertProfile?.user_id || '',
+        userEmail: expertProfile?.email || '',
+        userRole: 'expert'
+      };
+      await updateBookingStatus(bookingId, 'rejected', {}, callerInfo);
       if (targetReq) {
         handleDeclineRequest(targetReq);
       } else {
@@ -8181,7 +8190,12 @@ function ExpertPage({
 
   const handleAcceptRequest = (req: any) => {
     if (!req) return;
-    updateBookingStatus(req.id, 'accepted').catch(() => {});
+    const callerInfo = {
+      userId: expertProfile?.id || expertProfile?.user_id || '',
+      userEmail: expertProfile?.email || '',
+      userRole: 'expert'
+    };
+    updateBookingStatus(req.id, 'accepted', {}, callerInfo).catch(() => {});
     const basePay = expertProfile?.baseRate || 600;
     const payout = req.type === "Project" ? basePay * 3 : basePay;
 
@@ -8253,7 +8267,7 @@ function ExpertPage({
               srvChanged = true;
               return {
                 ...b,
-                status: "Accepted by Expert — Ready to Schedule",
+                status: "accepted",
                 meetUrl: "",
                 completed: false
               };
@@ -8279,7 +8293,7 @@ function ExpertPage({
                   changed = true;
                   return {
                     ...b,
-                    status: "Accepted by Expert — Ready to Schedule",
+                    status: "accepted",
                     meetUrl: "",
                     completed: false
                   };
@@ -8308,7 +8322,7 @@ function ExpertPage({
       type: req.type || "Hourly Consultation",
       rate: req.rate || (payout ? Math.round(payout * 1.25) : 750),
       payout: payout,
-      status: "Accepted — Awaiting Google Meet Link",
+      status: "accepted",
       isLive: false,
       completed: false,
       meetUrl: "",
@@ -8357,7 +8371,7 @@ function ExpertPage({
     alert(`✅ Consultation Request Accepted!\n\nSession with ${req.client} has been accepted and moved to "Confirm & Schedule Session".\nPlease generate and paste your Google Meet link there.`);
   };
 
-  const handleSendMeetLink = (session: any, inputUrl?: string) => {
+  const handleSendMeetLink = async (session: any, inputUrl?: string) => {
     if (!session) return;
     const sessId = session.id;
     const rawUrl = (inputUrl !== undefined ? inputUrl : (meetLinkInputs[sessId] || "")).trim();
@@ -8372,12 +8386,45 @@ function ExpertPage({
       cleanUrl = `https://${cleanUrl}`;
     }
 
-    const isGoogleMeet = /^https?:\/\/meet\.google\.com\/[a-zA-Z0-9_\-]+(\?.*)?$/i.test(cleanUrl);
+    const isGoogleMeet = /^https:\/\/meet\.google\.com\/[a-zA-Z0-9_\-]+(\?.*)?$/i.test(cleanUrl);
     if (!isGoogleMeet) {
       setMeetLinkErrors(prev => ({
         ...prev,
         [sessId]: "Please enter a valid Google Meet link (e.g. https://meet.google.com/xxx-yyyy-zzz)"
       }));
+      return;
+    }
+
+    setIsSendingMeetLink(prev => ({ ...prev, [sessId]: true }));
+
+    // Single source of truth: write exact character-for-character meet link to Supabase / DB
+    const expId = expertProfile?.id || expertProfile?.user_id || "";
+    const expEmail = expertProfile?.email || "";
+    const sentAt = new Date().toISOString();
+
+    const updateRes = await updateBookingStatus(
+      sessId,
+      session.isLive || session.status === "live" ? "live" : "accepted",
+      {
+        meet_link: cleanUrl,
+        meeting_link: cleanUrl,
+        meet_url: cleanUrl,
+        meeting_link_sent_at: sentAt,
+        updated_at: sentAt
+      },
+      {
+        userId: expId,
+        userEmail: expEmail,
+        userRole: "expert"
+      }
+    );
+
+    setIsSendingMeetLink(prev => ({ ...prev, [sessId]: false }));
+
+    if (!updateRes || !updateRes.success) {
+      const errMsg = (updateRes && updateRes.error) || "Failed to update Google Meet link in Supabase. Please try again.";
+      setMeetLinkErrors(prev => ({ ...prev, [sessId]: errMsg }));
+      alert(`❌ Error sending meeting link:\n${errMsg}`);
       return;
     }
 
@@ -8387,27 +8434,6 @@ function ExpertPage({
       return next;
     });
     setMeetLinkSuccess(prev => ({ ...prev, [sessId]: "Link sent to client and admin" }));
-
-    // Single source of truth: write exact character-for-character meet link to Supabase / DB
-    const expId = expertProfile?.id || expertProfile?.user_id || "";
-    const expEmail = expertProfile?.email || "";
-    updateBookingStatus(
-      sessId,
-      session.isLive || session.status === "live" ? "live" : "accepted",
-      {
-        meet_link: cleanUrl,
-        meeting_link: cleanUrl,
-        meet_url: cleanUrl,
-        updated_at: new Date().toISOString()
-      },
-      {
-        userId: expId,
-        userEmail: expEmail,
-        userRole: "expert"
-      }
-    ).catch(err => {
-      console.error("[EXPERT] Failed to sync meet link to Supabase:", err);
-    });
 
     const codeMatch = cleanUrl.match(/meet\.google\.com\/([a-z0-9-]+)/i);
     const meetCode = codeMatch ? codeMatch[1] : cleanUrl.split("/").pop() || "meet-session";
@@ -8421,6 +8447,9 @@ function ExpertPage({
         return {
           ...s,
           meetUrl: cleanUrl,
+          meet_link: cleanUrl,
+          meeting_link: cleanUrl,
+          meeting_link_sent_at: sentAt,
           meetCode: meetCode,
           status: "Confirmed — Meet Link Ready",
           payout: payout
@@ -8461,6 +8490,9 @@ function ExpertPage({
                 ...b,
                 status: "Confirmed — Meet Link Ready",
                 meetUrl: cleanUrl,
+                meet_link: cleanUrl,
+                meeting_link: cleanUrl,
+                meeting_link_sent_at: sentAt,
                 meetCode: meetCode,
                 completed: false
               };
@@ -8488,6 +8520,9 @@ function ExpertPage({
                     ...b,
                     status: "Confirmed — Meet Link Ready",
                     meetUrl: cleanUrl,
+                    meet_link: cleanUrl,
+                    meeting_link: cleanUrl,
+                    meeting_link_sent_at: sentAt,
                     meetCode: meetCode,
                     completed: false
                   };
@@ -8535,10 +8570,30 @@ function ExpertPage({
       isLive: false,
       completed: false,
       meetUrl: cleanUrl,
+      meet_link: cleanUrl,
+      meeting_link: cleanUrl,
+      meeting_link_sent_at: sentAt,
       meetCode: meetCode
     });
 
-    // 5. Dispatch real-time notifications
+    // 5. Broadcast across realtime channel and window events
+    try {
+      broadcastBookingUpdate({
+        id: sessId,
+        meetUrl: cleanUrl,
+        meet_link: cleanUrl,
+        meeting_link: cleanUrl,
+        meeting_link_sent_at: sentAt,
+        status: session.isLive || session.status === "live" ? "live" : "accepted",
+        expert_name: expertProfile?.name || session.expert || "Senior Expert",
+        expert_email: expertProfile?.email || session.expertEmail || "",
+        client_name: session.client || "Client ABC",
+        client_email: session.clientEmail || "",
+        topic: session.topic
+      });
+    } catch {}
+
+    // 6. Dispatch real-time notifications
     notificationService.add({
       target: "client",
       recipientId: session.clientEmail,
@@ -8933,7 +8988,7 @@ function ExpertPage({
               srvChanged = true;
               return {
                 ...b,
-                status: "Declined by Expert",
+                status: "rejected",
                 declineReason: "The Expert is currently busy/unavailable and has declined your consultation request."
               };
             }
@@ -8964,7 +9019,7 @@ function ExpertPage({
                   changed = true;
                   return { 
                     ...b, 
-                    status: "Declined by Expert",
+                    status: "rejected",
                     declineReason: "The Expert is currently busy/unavailable and has declined your consultation request."
                   };
                 }
@@ -8989,7 +9044,7 @@ function ExpertPage({
         expert: expertProfile?.name || "Senior Expert",
         expertEmail: expertProfile?.email,
         topic: reqTopic,
-        status: "Declined by Expert",
+        status: "rejected",
         isLive: false,
         completed: false,
         meetUrl: "",
@@ -10034,7 +10089,7 @@ function ExpertPage({
                                   {pr.completedMeetingCount} / 2 used
                                 </div>
                                 <div className={`text-[10px] ${isLight ? "text-slate-500" : "text-slate-400"}`}>
-                                  {pr.submission?.files?.length || 0} docs · {pr.chat?.length || 0} msgs
+                                  {pr.submission?.files?.length || 0} docs · {pr.chat?.length ?? pr.chatCount ?? 0} msgs
                                 </div>
                               </div>
 
@@ -10353,7 +10408,7 @@ function ExpertPage({
                               </>
                             ) : hasMeetUrl ? (
                               <>
-                                <Video size={11} className={isLight ? "text-emerald-600" : "text-emerald-400"} /> Google Meet Ready
+                                <Video size={11} className={isLight ? "text-emerald-600" : "text-emerald-400"} /> Link Sent
                               </>
                             ) : (
                               <>
@@ -10432,12 +10487,20 @@ function ExpertPage({
                                 />
                                 <button
                                   type="button"
+                                  disabled={Boolean(isSendingMeetLink[s.id])}
                                   onClick={() => handleSendMeetLink(s, meetLinkInputs[s.id])}
-                                  className="py-2 px-4 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white flex items-center justify-center gap-1.5 cursor-pointer shadow-md transition-all hover:scale-[1.01] shrink-0"
+                                  className={`py-2 px-4 rounded-xl text-xs font-bold text-white flex items-center justify-center gap-1.5 cursor-pointer shadow-md transition-all hover:scale-[1.01] shrink-0 ${
+                                    isSendingMeetLink[s.id] ? "bg-emerald-700 opacity-75 cursor-wait" : "bg-emerald-600 hover:bg-emerald-700"
+                                  }`}
                                 >
-                                  <Send size={13} /> Send Meeting Link
+                                  <Send size={13} /> {isSendingMeetLink[s.id] ? "Sending..." : "Send Meeting Link"}
                                 </button>
                               </div>
+                              {meetLinkSuccess[s.id] && (
+                                <p className="text-[11px] text-emerald-400 font-medium flex items-center gap-1 mt-1">
+                                  <CheckCircle2 size={12} className="shrink-0" /> {meetLinkSuccess[s.id]}
+                                </p>
+                              )}
                               {meetLinkErrors[s.id] && (
                                 <p className="text-[11px] text-rose-500 font-medium flex items-center gap-1 mt-1">
                                   <AlertCircle size={12} className="shrink-0" /> {meetLinkErrors[s.id]}
@@ -10465,10 +10528,10 @@ function ExpertPage({
                             </div>
                             <div className="flex items-center gap-2 shrink-0">
                               <button
-                                onClick={() => window.open(s.meetUrl, "_blank")}
+                                onClick={() => window.open(s.meetUrl, "_blank", "noopener,noreferrer")}
                                 className="px-3.5 py-1.5 text-xs rounded-lg font-bold bg-[#1a73e8] hover:bg-[#1557b0] text-white flex items-center gap-1.5 cursor-pointer transition-all shadow-md"
                               >
-                                <Video size={12} /> Join Google Meet ↗
+                                <Video size={12} /> Join Meeting ↗
                               </button>
                               <button
                                 onClick={() => {
@@ -11923,17 +11986,37 @@ export default function App() {
   const [pendingVerifications, setPendingVerifications] = useState<any[]>([]);
 
   useEffect(() => {
+    // EGRESS FIX: this effect used to run every 1.5 s on EVERY page and download the whole
+    // experts table (incl. base64 files) three times per tick — ~1.7 GB per hour per open tab.
+    // Now: one load on mount, a refresh every 60 s only while the tab is visible, and
+    // event-driven refreshes collapsed by a debounce. Reads are cached (src/lib/requestCache.ts)
+    // and the admin-only KYC queue is only fetched on admin pages.
+    const needsPendingQueue = page === "owner" || isAdminPortal;
     const refreshData = async () => {
       try {
         const [freshExperts, freshPendings] = await Promise.all([
           mongoDB.getExperts(),
-          mongoDB.getPendingVerifications()
+          needsPendingQueue ? mongoDB.getPendingVerifications() : Promise.resolve(null)
         ]);
         setExperts(Array.isArray(freshExperts) ? freshExperts : []);
-        setPendingVerifications(Array.isArray(freshPendings) ? freshPendings : []);
+        if (freshPendings !== null) {
+          setPendingVerifications(Array.isArray(freshPendings) ? freshPendings : []);
+        }
 
         setExpertProfile((prev: any) => {
           if (!prev) return prev;
+          // EGRESS FIX: when nobody is logged in, expertProfile is the built-in demo profile
+          // (DEFAULT_EXPERT_FALLBACK, "Sunita Rao"). Every anonymous visitor used to look up its
+          // verification status in the database. Only check it for a real logged-in expert.
+          let hasLoggedInExpert = false;
+          try {
+            hasLoggedInExpert = Boolean(
+              localStorage.getItem(isAdminPortal ? "admin_logged_in_expert" : "current_logged_in_expert")
+            );
+          } catch {}
+          if (!hasLoggedInExpert || (prev.id === DEFAULT_EXPERT_FALLBACK.id && prev.email === DEFAULT_EXPERT_FALLBACK.email)) {
+            return prev;
+          }
           const queryKey = (prev.email || prev.id || prev.name || "").toLowerCase().trim();
           if (!queryKey) return prev;
 
@@ -11982,18 +12065,20 @@ export default function App() {
     };
 
     refreshData();
-    const unsub = mongoDB.subscribe(() => refreshData());
-    const pollInterval = setInterval(refreshData, 1500);
-    window.addEventListener("focus", refreshData);
-    window.addEventListener("mongo_db_updated", refreshData);
-    window.addEventListener("storage", refreshData);
+    // Many events can fire at once (focus + storage + mongo_db_updated); run ONE refresh 400 ms
+    // after the last of them instead of one per event.
+    const debouncedRefresh = debounce(refreshData, 400);
+    const unsub = mongoDB.subscribe(() => debouncedRefresh());
+    const stopPolling = startVisibleInterval(refreshData, 60_000);
+    window.addEventListener("focus", debouncedRefresh);
+    window.addEventListener("mongo_db_updated", debouncedRefresh);
 
     return () => {
       unsub();
-      clearInterval(pollInterval);
-      window.removeEventListener("focus", refreshData);
-      window.removeEventListener("mongo_db_updated", refreshData);
-      window.removeEventListener("storage", refreshData);
+      stopPolling();
+      debouncedRefresh.cancel();
+      window.removeEventListener("focus", debouncedRefresh);
+      window.removeEventListener("mongo_db_updated", debouncedRefresh);
     };
   }, [page, isAdminPortal]);
 
@@ -12201,13 +12286,15 @@ export default function App() {
         } catch {}
       }).catch(() => {});
 
-      fetchClientBookings(clientData.id, emailKey).then(srvBookings => {
+      try {
+        const srvBookings = await Promise.race([
+          fetchClientBookings(clientData.id, emailKey),
+          new Promise<any[]>((resolve) => setTimeout(() => resolve([]), 1500))
+        ]);
         if (Array.isArray(srvBookings) && srvBookings.length > 0) {
-          try {
-            localStorage.setItem(storageKey, JSON.stringify(srvBookings));
-          } catch {}
+          localStorage.setItem(storageKey, JSON.stringify(srvBookings));
         }
-      }).catch(() => {});
+      } catch {}
 
       notificationService.syncWithBackend('client', emailKey).catch(() => {});
 
@@ -12262,6 +12349,27 @@ export default function App() {
         localStorage.setItem("current_page", "expert");
       } catch {}
 
+      // Pre-load expert bookings so Expert portal displays fresh accepted sessions immediately on login
+      const expEmail = userEmail;
+      const expId = String(merged.id || '').toLowerCase().trim();
+      const acceptedKey = `expert_accepted_sessions_${expEmail}`;
+      try {
+        const srvExpertBookings = await Promise.race([
+          fetchExpertBookings(expId, expEmail, 'all', merged.user_id),
+          new Promise<any[]>((resolve) => setTimeout(() => resolve([]), 1500))
+        ]);
+        if (Array.isArray(srvExpertBookings) && srvExpertBookings.length > 0) {
+          const confirmed = srvExpertBookings.filter(b => !b.status?.toLowerCase().includes('pending') && b.status !== 'pending' && !b.status?.toLowerCase().includes('reject'));
+          if (confirmed.length > 0) {
+            localStorage.setItem(acceptedKey, JSON.stringify(confirmed));
+          }
+          const pending = srvExpertBookings.filter(b => b.status?.toLowerCase().includes('pending') || b.status === 'pending');
+          if (pending.length > 0) {
+            localStorage.setItem(`expert_requests_${expEmail}`, JSON.stringify(pending));
+          }
+        }
+      } catch {}
+
       // Immediately navigate to the Expert Portal page (same mechanism as Client flow)
       navigateTo("expert");
 
@@ -12294,29 +12402,52 @@ export default function App() {
         localStorage.setItem("admin_token", token);
         sessionStorage.setItem("admin_token", token);
         localStorage.setItem("admin_session_token", token);
+
+        // Pre-fetch platform sessions so admin portal displays immediately
+        const srvAdminBookings = await Promise.race([
+          fetchAllBookingsForAdmin(),
+          new Promise<any[]>((resolve) => setTimeout(() => resolve([]), 1500))
+        ]);
+        if (Array.isArray(srvAdminBookings) && srvAdminBookings.length > 0) {
+          localStorage.setItem("app_platform_sessions", JSON.stringify(srvAdminBookings));
+        }
       } catch {}
       navigateTo("owner");
     }
   };
 
+  // After an admin save, reload the (slim) expert list from the database, skipping the cache,
+  // so the screen always shows what was really saved. These handlers used to call
+  // setExperts(updated) with a { success, expert } object instead of a list — the old 1.5 s
+  // poll hid that bug by overwriting it a moment later. Failed saves are now reported.
+  const reloadExpertsAfterSave = async (saveResult: any): Promise<any[]> => {
+    if (saveResult && saveResult.success === false) {
+      console.error("[admin] save failed:", saveResult.error);
+      alert(`❌ Could not save the change: ${saveResult.error || "unknown error"}. Please try again.`);
+    }
+    const fresh = await mongoDB.getExperts({ force: true });
+    setExperts(Array.isArray(fresh) ? fresh : []);
+    return Array.isArray(fresh) ? fresh : [];
+  };
+
   const handleUpdateExpertMarkup = async (expId: string, base: number, markup: number) => {
     const updated = await mongoDB.saveExpertMarkup(expId, base, markup);
-    setExperts(updated);
+    await reloadExpertsAfterSave(updated);
   };
 
   const handleToggleFeatured = async (expId: string, featured: boolean) => {
     const updated = await mongoDB.toggleFeaturedOnLanding(expId, featured);
-    setExperts(updated);
+    await reloadExpertsAfterSave(updated);
   };
 
   const handleUpdateHeroSpotlight = async (expId: string, heroSpotlight: boolean, heroPosition?: "top" | "bottom") => {
     const updated = await mongoDB.updateHeroSpotlightCard(expId, heroSpotlight, heroPosition);
-    setExperts(updated);
+    await reloadExpertsAfterSave(updated);
   };
 
   const handleUpdatePhotoUrl = async (expId: string, imgUrl: string) => {
     const updated = await mongoDB.updateExpertProfile(expId, { img: imgUrl });
-    setExperts(updated);
+    await reloadExpertsAfterSave(updated);
   };
 
   const handleApproveVerification = async (item: any) => {
@@ -12519,8 +12650,8 @@ export default function App() {
   };
 
   const handleToggleVerification = async (expId: string, verified: boolean) => {
-    const updated = await mongoDB.toggleExpertVerification(expId, verified);
-    setExperts(updated);
+    const updated = await reloadExpertsAfterSave(await mongoDB.toggleExpertVerification(expId, verified));
+
 
     const targetExp = updated.find(e => e.id === expId || e.name.toLowerCase().trim() === expId.toLowerCase().trim());
     const targetEmail = targetExp?.email?.toLowerCase().trim();

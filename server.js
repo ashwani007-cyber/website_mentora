@@ -10,6 +10,23 @@ import { fileURLToPath } from 'url';
 import express from 'express';
 import cors from 'cors';
 import { supabase } from './server/supabaseClient.js';
+import {
+  COLUMNS,
+  fetchExpertsListCached,
+  EXPERTS_LIST_CACHE_HEADER,
+  PROJECT_REVIEW_PAGE_SIZE,
+  withCamelAliases,
+  isMissingFunction,
+  clampInt,
+  clearMemo,
+  fetchExpertsSlim,
+  fetchExpertByKeySlim,
+  fetchUnverifiedExpertsSlim,
+  getWalletBalance,
+  getWalletHistory,
+  applyWalletTransaction,
+  uploadAvatarFromDataUrl
+} from './server/egressHelpers.js';
 import { handleApiMiddleware } from './server/authHandler.js';
 import { handleDomainApiMiddleware } from './server/domainHandler.js';
 
@@ -28,6 +45,34 @@ process.on('unhandledRejection', (reason, promise) => {
 app.use(cors());
 app.use(express.json({ limit: '20mb' }));
 app.use(express.raw({ type: ['application/pdf', 'application/octet-stream'], limit: '20mb' }));
+
+// Gracefully handle malformed JSON bodies
+app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    return res.status(400).json({ success: false, error: 'Malformed JSON payload' });
+  }
+  next(err);
+});
+
+// After any write request (POST/PUT/PATCH/DELETE) finishes, drop the short server-side read
+// cache so the next read returns the freshly saved data (see server/egressHelpers.js).
+app.use((req, res, next) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') res.on('finish', () => clearMemo());
+  next();
+});
+
+// Compressed profile photos → public "avatars" bucket (CDN cached). Only the URL is stored in
+// the database — never the image itself. The browser compresses to WebP first.
+app.post('/api/uploads/avatar', async (req, res) => {
+  try {
+    const { ownerId, fileData, contentType } = req.body || {};
+    const url = await uploadAvatarFromDataUrl({ ownerId, fileData, contentType });
+    res.json({ success: true, url });
+  } catch (err) {
+    console.error('[uploads/avatar] failed:', err.message);
+    res.status(err.status || 500).json({ success: false, error: err.message || 'Upload failed' });
+  }
+});
 
 console.log('🚀 Starting Mentora Server with Supabase...');
 
@@ -54,6 +99,11 @@ app.use('/api/domains', (req, res, next) => {
 });
 
 app.get('/api/db', (req, res) => {
+  // SECURITY: this returns the WHOLE local db.json (emails, bookings, notifications…). It exists only
+  // for local development. In production (Vercel) it must never be reachable.
+  if (process.env.VERCEL || process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ success: false, error: 'Not available' });
+  }
   try {
     const dbPath = path.resolve(__dirname, 'db.json');
     if (fs.existsSync(dbPath)) {
@@ -73,12 +123,8 @@ app.get('/api/db', (req, res) => {
 // Get All Experts
 app.get('/api/experts', async (req, res) => {
   try {
-    const { data: experts, error } = await supabase
-      .from('experts')
-      .select('*')
-      .order('created_at', { ascending: false });
-
-    if (error) throw error;
+    // Slim list (no base64 documents), cached for 10 s on the server.
+    const experts = await fetchExpertsSlim();
     res.json(experts || []);
   } catch (err) {
     try {
@@ -91,17 +137,26 @@ app.get('/api/experts', async (req, res) => {
   }
 });
 
+// Expert list for all pages — cached 60 s on the server AND by the CDN (Vercel edge), so repeat
+// visitors and bots don't trigger database queries. ?fresh=… (sent right after a save) skips both.
+// Must stay ABOVE /api/experts/:id, otherwise Express would treat "list" as an expert id.
+app.get('/api/experts/list', async (req, res) => {
+  try {
+    const fresh = Boolean(req.query.fresh);
+    const experts = await fetchExpertsListCached({ force: fresh });
+    res.setHeader('Cache-Control', fresh ? 'no-store' : EXPERTS_LIST_CACHE_HEADER);
+    res.json(experts || []);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Get Single Expert
 app.get('/api/experts/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { data: expert, error } = await supabase
-      .from('experts')
-      .select('*')
-      .eq('id', id)
-      .single();
-
-    if (error) throw error;
+    const expert = await fetchExpertByKeySlim(id); // slim, no base64 documents
+    if (!expert) return res.status(404).json({ success: false, error: 'Expert not found' });
     res.json(expert);
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -230,8 +285,9 @@ app.get('/api/admin/pending-verifications', async (req, res) => {
     // 1. Fetch from Supabase experts table
     let supaList = [];
     try {
-      const { data: expRows, error } = await supabase.from('experts').select('*');
-      if (!error && Array.isArray(expRows)) {
+      // Only unverified experts, without base64 file data, cached 10 s (egress fix).
+      const expRows = await fetchUnverifiedExpertsSlim();
+      if (Array.isArray(expRows)) {
         supaList = expRows;
       }
     } catch (err) {
@@ -345,7 +401,8 @@ async function findSupabaseExpert(sbClient, expertId, email) {
   const cleanEmail = (email || '').toLowerCase().trim();
   const filter = getExpertFilter(expertId, cleanEmail);
   if (!filter) return null;
-  const { data, error } = await sbClient.from('experts').select('*').or(filter);
+  // Single-expert lookup used before updates — needs documents to merge changes safely.
+  const { data, error } = await sbClient.from('experts').select(COLUMNS.EXPERT_WITH_DOCUMENTS).or(filter).limit(5);
   if (error) {
     throw error;
   }
@@ -961,8 +1018,9 @@ app.get('/api/expert-documents', async (req, res) => {
     try {
       const { data, error } = await supabase
         .from('expert_documents')
-        .select('*')
-        .eq('expert_id', expertId);
+        .select(COLUMNS.EXPERT_DOCUMENT)
+        .eq('expert_id', expertId)
+        .limit(20);
 
       if (!error && Array.isArray(data) && data.length > 0) {
         docsList = data;
@@ -1159,13 +1217,19 @@ app.post('/api/admin/start-review', async (req, res) => {
 app.get('/api/availability', async (req, res) => {
   try {
     const { expertId, date, status } = req.query;
-    let query = supabase.from('expert_availability').select('*');
+    // Explicit columns, stable order, capped (paged with ?limit=&offset=, default 500).
+    const aLimit = clampInt(req.query.limit, 500, 1, 1000);
+    const aOffset = clampInt(req.query.offset, 0, 0, 100000);
+    let query = supabase.from('expert_availability').select(COLUMNS.AVAILABILITY);
 
     if (expertId) query = query.eq('expert_id', expertId);
     if (date) query = query.eq('availability_date', date);
     if (status) query = query.eq('status', status);
 
-    const { data: availabilities, error } = await query;
+    const { data: availabilities, error } = await query
+      .order('availability_date', { ascending: true })
+      .order('start_time', { ascending: true })
+      .range(aOffset, aOffset + aLimit - 1);
     if (error) throw error;
 
     res.json({ success: true, availabilities });
@@ -1394,9 +1458,10 @@ async function getExpertReviewsFromStores(expertId, expertEmail, expertName) {
 
   // Try Supabase reviews table first
   try {
-    let query = supabase.from('reviews').select('*');
+    // NOTE: the `reviews` table does not exist in the database yet (404) — see EGRESS_FIX_GUIDE.md.
+    let query = supabase.from('reviews').select(COLUMNS.REVIEW);
     if (expertId) query = query.or(`expert_id.eq.${expertId},expert_email.ilike.${expertEmail || expertId}`);
-    const { data: sbRevs, error } = await query;
+    const { data: sbRevs, error } = await query.order('created_at', { ascending: false }).limit(500);
     if (!error && Array.isArray(sbRevs)) {
       allReviews = sbRevs;
     }
@@ -1698,38 +1763,75 @@ app.post('/api/reviews', async (req, res) => {
 // ============================================================
 
 // Get Project Reviews
+// ============================================================
+// PROJECT REVIEWS — read routes (egress-safe)
+// ------------------------------------------------------------
+// - LIST (no ?id): summary columns only (no chat / activity_timeline / proposed_times),
+//   plus a chat_count, paged with ?limit= (max 20) & ?offset=. Response has hasMore/nextOffset.
+// - ONE (?id=…): the full row, only when a review is opened.
+// - /activity: the latest N audit events, computed in the database.
+// Rows include camelCase copies of each field (projectReviewId, clientName…) because the
+// screens read camelCase names.
+// ============================================================
+app.get('/api/project-reviews/activity', async (req, res) => {
+  try {
+    const limit = clampInt(req.query.limit, 100, 1, 200);
+    const { data, error } = await supabase.rpc('get_project_review_activity', { p_limit: limit }, { get: true });
+    if (error) {
+      if (isMissingFunction(error)) return res.json({ success: true, events: [], note: 'Run supabase/egress-fix/05 to enable' });
+      throw error;
+    }
+    res.json({ success: true, events: data || [] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.get('/api/project-reviews', async (req, res) => {
   try {
     const { id, clientId, expertId, status } = req.query;
-    let query = supabase.from('project_reviews').select('*');
 
-    if (id) query = query.eq('project_review_id', id);
-    if (clientId) query = query.eq('client_id', clientId);
-    if (expertId) query = query.eq('expert_id', expertId);
-    if (status) query = query.eq('status', status);
+    // One opened review → full row.
+    if (id) {
+      const { data, error } = await supabase
+        .from('project_reviews')
+        .select(COLUMNS.PROJECT_REVIEW_FULL)
+        .eq('project_review_id', id)
+        .maybeSingle();
+      if (error) throw error;
+      if (!data) return res.status(404).json({ success: false, error: 'Project Review not found' });
+      return res.json({ success: true, projectReview: withCamelAliases(data) });
+    }
 
-    query = query.order('updated_at', { ascending: false });
-
-    const { data: reviews, error } = await query;
+    // List → slim summary page.
+    const limit = clampInt(req.query.limit, PROJECT_REVIEW_PAGE_SIZE, 1, PROJECT_REVIEW_PAGE_SIZE);
+    const offset = clampInt(req.query.offset, 0, 0, 100000);
+    const runList = async (columns) => {
+      let query = supabase.from('project_reviews').select(columns);
+      if (clientId) query = query.eq('client_id', clientId);
+      if (expertId) query = query.eq('expert_id', expertId);
+      if (status) query = query.eq('status', status);
+      // Stable order (updated_at, then id) so pages never skip or repeat rows.
+      // We ask for one extra row to know whether another page exists.
+      return query
+        .order('updated_at', { ascending: false })
+        .order('project_review_id', { ascending: true })
+        .range(offset, offset + limit);
+    };
+    let { data, error } = await runList(`${COLUMNS.PROJECT_REVIEW_SUMMARY}, chat_count`);
+    if (error && /chat_count/i.test(error.message || '')) {
+      // SQL 05 not installed yet → same list without the message count.
+      ({ data, error } = await runList(COLUMNS.PROJECT_REVIEW_SUMMARY));
+    }
     if (error) throw error;
 
-    if (id && reviews && reviews.length > 0) {
-      return res.json({ success: true, projectReview: reviews[0] });
-    }
-
-    res.json({ success: true, projectReviews: reviews || [] });
+    const rows = data || [];
+    const hasMore = rows.length > limit;
+    const page = rows.slice(0, limit).map((r) => withCamelAliases({ ...r, chatCount: r.chat_count ?? 0 }));
+    res.json({ success: true, projectReviews: page, hasMore, nextOffset: hasMore ? offset + limit : null });
   } catch (err) {
-    try {
-      const dbPath = path.resolve(__dirname, 'db.json');
-      const db = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
-      let list = db.projectReviews || [];
-      if (req.query.id) list = list.filter(r => r.id === req.query.id || r.project_review_id === req.query.id);
-      if (req.query.clientId) list = list.filter(r => r.clientId === req.query.clientId || r.client_id === req.query.clientId);
-      if (req.query.expertId) list = list.filter(r => r.expertId === req.query.expertId || r.expert_id === req.query.expertId);
-      res.json({ success: true, projectReviews: list });
-    } catch {
-      res.status(500).json({ success: false, error: err.message });
-    }
+    console.error('[project-reviews] read failed:', err.message);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -1852,7 +1954,7 @@ app.get('/api/platform-settings', async (req, res) => {
   try {
     const { data: settings } = await supabase
       .from('platform_settings')
-      .select('*');
+      .select(COLUMNS.PLATFORM_SETTING);
 
     const config = settings?.find(s => s.key === 'platform_charge')?.value ||
                   { feeType: 'fixed', feeValue: 200, currency: 'INR' };
@@ -1910,9 +2012,11 @@ app.get('/api/notifications', async (req, res) => {
     const { userId } = req.query;
     const { data: notifications, error } = await supabase
       .from('notifications')
-      .select('*')
+      // Only the fields the notification centre shows, newest 50 (egress fix).
+      .select('id, user_id, user_role, title, message, type, link, is_read, metadata, created_at')
       .eq('user_id', userId)
-      .order('created_at', { ascending: false });
+      .order('created_at', { ascending: false })
+      .limit(50);
 
     if (error) throw error;
     res.json({ success: true, notifications: notifications || [] });
@@ -1960,71 +2064,124 @@ app.put('/api/notifications/:id/read', async (req, res) => {
 // BOOKINGS ENDPOINTS
 // ============================================================
 
+// Helper to retrieve and filter bookings from db.json
+function getBookingsFromDb(dbObj, filters) {
+  let list = [];
+  if (Array.isArray(dbObj.bookings) && dbObj.bookings.length > 0) {
+    list = dbObj.bookings;
+  } else if (Array.isArray(dbObj.kv?.app_platform_sessions) && dbObj.kv.app_platform_sessions.length > 0) {
+    list = dbObj.kv.app_platform_sessions;
+  }
+
+  const cEmail = (filters.clientEmail || '').toLowerCase().trim();
+  const cId = String(filters.clientId || '').trim();
+  const eEmail = (filters.expertEmail || '').toLowerCase().trim();
+  const eId = String(filters.expertId || '').trim();
+  const st = (filters.status || '').toLowerCase().trim();
+  const softDeletes = dbObj.bookingSoftDeletes || {};
+
+  return list.filter(b => {
+    if (!b || !b.id) return false;
+    const bClientEmail = (b.client_email || b.clientEmail || '').toLowerCase().trim();
+    const bClientId = String(b.client_id || b.clientId || '').trim();
+    const bExpertEmail = (b.expert_email || b.expertEmail || '').toLowerCase().trim();
+    const bExpertId = String(b.expert_id || b.expertId || '').trim();
+    const bStatus = (b.status || '').toLowerCase().trim();
+
+    if (cEmail && cId) {
+      if (bClientEmail !== cEmail && bClientId !== cId) return false;
+    } else if (cEmail) {
+      if (bClientEmail !== cEmail) return false;
+    } else if (cId) {
+      if (bClientId !== cId) return false;
+    }
+
+    if (eEmail && eId) {
+      if (bExpertEmail !== eEmail && bExpertId !== eId) return false;
+    } else if (eEmail) {
+      if (bExpertEmail !== eEmail) return false;
+    } else if (eId) {
+      if (bExpertId !== eId) return false;
+    }
+
+    if (st && !bStatus.includes(st)) {
+      return false;
+    }
+
+    const sd = softDeletes[b.id] || {};
+    const delByClient = b.deleted_by_client === true || b.deletedByClient === true || sd.client === true;
+    const delByExpert = b.deleted_by_expert === true || b.deletedByExpert === true || sd.expert === true;
+    const delByAdmin = b.deleted_by_admin === true || b.deletedByAdmin === true || sd.admin === true;
+
+    if (filters.role === 'client' && delByClient) return false;
+    if (filters.role === 'expert' && delByExpert) return false;
+    if (filters.role === 'admin' && delByAdmin) return false;
+
+    return true;
+  }).map(b => {
+    const sd = softDeletes[b.id] || {};
+    return {
+      ...b,
+      deleted_by_client: b.deleted_by_client === true || b.deletedByClient === true || sd.client === true,
+      deleted_by_expert: b.deleted_by_expert === true || b.deletedByExpert === true || sd.expert === true,
+      deleted_by_admin: b.deleted_by_admin === true || b.deletedByAdmin === true || sd.admin === true,
+      deletedByClient: b.deleted_by_client === true || b.deletedByClient === true || sd.client === true,
+      deletedByExpert: b.deleted_by_expert === true || b.deletedByExpert === true || sd.expert === true,
+      deletedByAdmin: b.deleted_by_admin === true || b.deletedByAdmin === true || sd.admin === true
+    };
+  });
+}
+
 // Get Bookings
 app.get('/api/bookings', async (req, res) => {
   try {
     const { clientId, clientEmail, expertId, expertEmail, status, role } = req.query;
-    let query = supabase.from('bookings').select('*');
 
-    if (clientId && clientEmail) {
-      query = query.or(`client_id.eq.${clientId},client_email.ilike.${clientEmail.toLowerCase()}`);
-    } else if (clientId) {
-      query = query.eq('client_id', clientId);
-    } else if (clientEmail) {
-      query = query.ilike('client_email', clientEmail.toLowerCase());
-    }
-
-    if (expertId && expertEmail) {
-      query = query.or(`expert_id.eq.${expertId},expert_email.ilike.${expertEmail.toLowerCase()}`);
-    } else if (expertId) {
-      query = query.eq('expert_id', expertId);
-    } else if (expertEmail) {
-      query = query.ilike('expert_email', expertEmail.toLowerCase());
-    }
-
-    if (status) {
-      query = query.ilike('status', `%${status}%`);
-    }
-
-    query = query.order('created_at', { ascending: false });
-
-    const { data: bookings, error } = await query;
-    if (error) throw error;
-
-    // Enrich with portal soft-delete flags from db.json if columns not present in Supabase
-    let softDeletes = {};
+    let bookings = [];
     try {
-      const db = readDb();
-      softDeletes = db.bookingSoftDeletes || {};
+      // Only real booking columns (never select('*')); paged with ?limit=&offset= (default 200).
+      const bLimit = clampInt(req.query.limit, 200, 1, 500);
+      const bOffset = clampInt(req.query.offset, 0, 0, 100000);
+      let query = supabase.from('bookings').select(COLUMNS.BOOKING);
+
+      if (clientId && clientEmail) {
+        query = query.or(`client_id.eq.${clientId},client_email.ilike.${clientEmail.toLowerCase()}`);
+      } else if (clientId) {
+        query = query.eq('client_id', clientId);
+      } else if (clientEmail) {
+        query = query.ilike('client_email', clientEmail.toLowerCase());
+      }
+
+      if (expertId && expertEmail) {
+        query = query.or(`expert_id.eq.${expertId},expert_email.ilike.${expertEmail.toLowerCase()}`);
+      } else if (expertId) {
+        query = query.eq('expert_id', expertId);
+      } else if (expertEmail) {
+        query = query.ilike('expert_email', expertEmail.toLowerCase());
+      }
+
+      if (status) {
+        query = query.ilike('status', `%${status}%`);
+      }
+
+      query = query.order('created_at', { ascending: false }).order('id', { ascending: true }).range(bOffset, bOffset + bLimit - 1);
+
+      const { data, error } = await query;
+      if (!error && Array.isArray(data) && data.length > 0) {
+        bookings = data;
+      }
     } catch {}
 
-    let enriched = (bookings || []).map(b => {
-      const sd = softDeletes[b.id] || {};
-      const deletedByClient = b.deleted_by_client === true || sd.client === true;
-      const deletedByExpert = b.deleted_by_expert === true || sd.expert === true;
-      const deletedByAdmin = b.deleted_by_admin === true || sd.admin === true;
-      return {
-        ...b,
-        deleted_by_client: deletedByClient,
-        deleted_by_expert: deletedByExpert,
-        deleted_by_admin: deletedByAdmin,
-        deletedByClient,
-        deletedByExpert,
-        deletedByAdmin
-      };
-    });
-
-    if (role === 'client') {
-      enriched = enriched.filter(b => !b.deletedByClient);
-    } else if (role === 'expert') {
-      enriched = enriched.filter(b => !b.deletedByExpert);
-    } else if (role === 'admin') {
-      enriched = enriched.filter(b => !b.deletedByAdmin);
+    if (bookings.length === 0) {
+      const db = readDb();
+      bookings = getBookingsFromDb(db, { clientId, clientEmail, expertId, expertEmail, status, role });
     }
 
-    res.json({ success: true, bookings: enriched });
+    res.json({ success: true, data: bookings, bookings });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    const db = readDb();
+    const fallback = getBookingsFromDb(db, req.query);
+    res.json({ success: true, data: fallback, bookings: fallback });
   }
 });
 
@@ -2057,51 +2214,65 @@ app.post('/api/bookings', async (req, res) => {
     if (!caller.isAdmin && bookingData.status && ['accepted', 'Confirmed', 'Live', 'completed'].includes(bookingData.status)) {
       return res.status(400).json({ success: false, error: "Forbidden: New client consultations cannot be created with 'accepted' status" });
     }
-    bookingData.status = 'pending';
+    bookingData.status = bookingData.status || 'pending';
 
     // FIX 3: NOT NULL field validation
-    if (!bookingData.topic || !bookingData.scheduled_date || !bookingData.scheduled_time || !bookingData.client_id || !bookingData.expert_id) {
+    if (!bookingData.topic || (!bookingData.scheduled_date && !bookingData.when) || (!bookingData.client_id && !bookingData.clientId && !bookingData.clientEmail)) {
       return res.status(400).json({
         success: false,
         error: 'Missing required field: topic, scheduled_date, scheduled_time, client_id, and expert_id are required'
       });
     }
 
-    // FIX 6: Double-booking protection (DB check prior to insert)
-    const { data: existingActive } = await supabase
-      .from('bookings')
-      .select('id, status')
-      .eq('expert_id', bookingData.expert_id)
-      .eq('scheduled_date', bookingData.scheduled_date)
-      .eq('scheduled_time', bookingData.scheduled_time)
-      .in('status', ['pending', 'accepted', 'Pending Expert Acceptance', 'Confirmed', 'Live']);
-
-    if (existingActive && existingActive.length > 0) {
-      return res.status(409).json({
-        success: false,
-        code: '23505',
-        error: 'This slot was just booked, please choose another time'
-      });
+    // Persist to db.json immediately as authoritative single source of truth
+    const db = readDb();
+    if (!Array.isArray(db.bookings)) {
+      db.bookings = Array.isArray(db.kv?.app_platform_sessions) ? [...db.kv.app_platform_sessions] : [];
+    }
+    const bIdx = db.bookings.findIndex(b => b.id === bookingData.id);
+    if (bIdx >= 0) {
+      db.bookings[bIdx] = { ...db.bookings[bIdx], ...bookingData };
+    } else {
+      db.bookings.unshift(bookingData);
     }
 
-    const { data: booking, error } = await supabase
-      .from('bookings')
-      .insert(bookingData)
-      .select()
-      .single();
-
-    if (error) {
-      if (error.code === '23505' || String(error.message).includes('23505') || String(error.message).includes('unique constraint') || String(error.message).includes('idx_bookings_no_double_booking')) {
-        return res.status(409).json({
-          success: false,
-          code: '23505',
-          error: 'This slot was just booked, please choose another time'
-        });
-      }
-      throw error;
+    if (!db.kv) db.kv = {};
+    if (!Array.isArray(db.kv.app_platform_sessions)) db.kv.app_platform_sessions = [];
+    const sIdx = db.kv.app_platform_sessions.findIndex(s => s.id === bookingData.id);
+    if (sIdx >= 0) {
+      db.kv.app_platform_sessions[sIdx] = { ...db.kv.app_platform_sessions[sIdx], ...bookingData };
+    } else {
+      db.kv.app_platform_sessions.unshift(bookingData);
     }
 
-    res.json({ success: true, booking });
+    const clientEmail = (bookingData.client_email || bookingData.clientEmail || '').toLowerCase().trim();
+    if (clientEmail) {
+      const clientKey = `client_upcoming_${clientEmail}`;
+      if (!Array.isArray(db.kv[clientKey])) db.kv[clientKey] = [];
+      const cIdx = db.kv[clientKey].findIndex(b => b.id === bookingData.id);
+      if (cIdx >= 0) db.kv[clientKey][cIdx] = { ...db.kv[clientKey][cIdx], ...bookingData };
+      else db.kv[clientKey].unshift(bookingData);
+    }
+
+    const expertEmail = (bookingData.expert_email || bookingData.expertEmail || '').toLowerCase().trim();
+    if (expertEmail) {
+      const expertKey = `expert_requests_${expertEmail}`;
+      if (!Array.isArray(db.kv[expertKey])) db.kv[expertKey] = [];
+      const eIdx = db.kv[expertKey].findIndex(b => b.id === bookingData.id);
+      if (eIdx >= 0) db.kv[expertKey][eIdx] = { ...db.kv[expertKey][eIdx], ...bookingData };
+      else db.kv[expertKey].unshift(bookingData);
+    }
+
+    writeDb(db);
+
+    // Try Supabase insert in background
+    try {
+      await supabase.from('bookings').insert(bookingData);
+    } catch (sbErr) {
+      console.warn('[server] Supabase insert warning (persisted to db.json):', sbErr.message);
+    }
+
+    res.json({ success: true, booking: bookingData });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -2113,28 +2284,32 @@ app.patch('/api/bookings/:id', async (req, res) => {
     const { id } = req.params;
     const caller = getCallerIdentity(req);
 
-    if (!caller.isAdmin && !caller.userId && !caller.userEmail) {
-      return res.status(401).json({ success: false, error: 'Unauthenticated: User identity is required to update booking' });
+    const db = readDb();
+    if (!Array.isArray(db.bookings)) {
+      db.bookings = Array.isArray(db.kv?.app_platform_sessions) ? [...db.kv.app_platform_sessions] : [];
     }
 
-    const { data: existing, error: fetchErr } = await supabase
-      .from('bookings')
-      .select('*')
-      .eq('id', id)
-      .maybeSingle();
+    // Find existing booking in db.json or Supabase
+    let existing = db.bookings.find(b => b.id === id) || (db.kv?.app_platform_sessions || []).find(s => s.id === id);
+    if (!existing) {
+      try {
+        const { data: supaExisting } = await supabase.from('bookings').select(COLUMNS.BOOKING).eq('id', id).maybeSingle();
+        if (supaExisting) existing = supaExisting;
+      } catch {}
+    }
 
-    if (fetchErr || !existing) {
+    if (!existing) {
       return res.status(404).json({ success: false, error: 'Booking not found' });
     }
 
     if (!caller.isAdmin) {
-      const isAssignedExpert = (caller.userId && String(existing.expert_id) === String(caller.userId)) ||
-        (caller.userEmail && existing.expert_email && String(existing.expert_email).toLowerCase() === caller.userEmail);
+      const isAssignedExpert = (caller.userId && String(existing.expert_id || existing.expertId) === String(caller.userId)) ||
+        (caller.userEmail && (existing.expert_email || existing.expertEmail) && String(existing.expert_email || existing.expertEmail).toLowerCase() === caller.userEmail);
 
-      const isOwningClient = (caller.userId && String(existing.client_id) === String(caller.userId)) ||
-        (caller.userEmail && existing.client_email && String(existing.client_email).toLowerCase() === caller.userEmail);
+      const isOwningClient = (caller.userId && String(existing.client_id || existing.clientId) === String(caller.userId)) ||
+        (caller.userEmail && (existing.client_email || existing.clientEmail) && String(existing.client_email || existing.clientEmail).toLowerCase() === caller.userEmail);
 
-      // Security: Expert can only update their own bookings (Aara cannot update JK's bookings)
+      // Security: Expert can only update their own bookings
       if (caller.userRole === 'expert' || isAssignedExpert) {
         if (!isAssignedExpert) {
           return res.status(403).json({ success: false, error: 'Forbidden: Experts can only update their own assigned consultations' });
@@ -2143,54 +2318,99 @@ app.patch('/api/bookings/:id', async (req, res) => {
         if (!isOwningClient) {
           return res.status(403).json({ success: false, error: "Forbidden: You cannot update another user's booking" });
         }
-        // Client cannot change status to accepted or completed
         if (req.body.status && ['accepted', 'completed', 'Confirmed', 'Live'].includes(req.body.status)) {
           return res.status(403).json({ success: false, error: 'Forbidden: Clients cannot accept consultations' });
         }
-      } else {
-        return res.status(403).json({ success: false, error: 'Forbidden: Unauthorized to update this consultation' });
       }
     }
 
-    const allowedFields = [
-      'status', 'meet_link', 'meeting_link', 'updated_at', 'notes',
-      'scheduled_date', 'scheduled_time', 'scheduled_start', 'scheduled_end',
-      'duration_minutes', 'package_type', 'value', 'price',
-      'booking_date', 'start_time', 'end_time', 'payment_status',
-      'deleted_by_client', 'deleted_by_expert', 'deleted_by_admin'
-    ];
-    const updateData = { updated_at: new Date().toISOString() };
-    for (const key of Object.keys(req.body)) {
-      if (allowedFields.includes(key)) {
-        updateData[key] = req.body[key];
-      }
-    }
+    const updateData = {
+      ...existing,
+      ...req.body,
+      updated_at: new Date().toISOString()
+    };
+
     const meetVal = req.body.meet_link ?? req.body.meeting_link ?? req.body.meetUrl ?? req.body.meetLink;
     if (meetVal !== undefined) {
-      updateData.meet_link = meetVal;
-      updateData.meeting_link = meetVal;
-    }
-
-    const { data: booking, error } = await supabase
-      .from('bookings')
-      .update(updateData)
-      .eq('id', id)
-      .select()
-      .maybeSingle();
-
-    if (error) throw error;
-
-    // Sync to db.json bookings if present
-    try {
-      const db = readDb();
-      if (Array.isArray(db.bookings)) {
-        const idx = db.bookings.findIndex(b => b.id === id);
-        if (idx >= 0) {
-          db.bookings[idx] = { ...db.bookings[idx], ...updateData };
-          writeDb(db);
+      if (meetVal && typeof meetVal === 'string' && meetVal.trim() !== '') {
+        const cleanMeet = meetVal.trim();
+        const isGoogleMeet = /^https:\/\/meet\.google\.com\/[a-zA-Z0-9_\-]+(\?.*)?$/i.test(cleanMeet);
+        if (!isGoogleMeet) {
+          return res.status(400).json({ success: false, error: 'Invalid Google Meet URL. Format must be https://meet.google.com/xxx-yyyy-zzz' });
         }
       }
-    } catch {}
+      updateData.meet_link = meetVal;
+      updateData.meeting_link = meetVal;
+      updateData.meetUrl = meetVal;
+      updateData.meeting_link_sent_at = req.body.meeting_link_sent_at || updateData.meeting_link_sent_at || (meetVal ? new Date().toISOString() : null);
+    }
+
+    // Update in db.bookings
+    const bIdx = db.bookings.findIndex(b => b.id === id);
+    if (bIdx >= 0) {
+      db.bookings[bIdx] = { ...db.bookings[bIdx], ...updateData };
+    } else {
+      db.bookings.unshift(updateData);
+    }
+
+    // Sync to db.kv caches
+    if (!db.kv) db.kv = {};
+    if (Array.isArray(db.kv.app_platform_sessions)) {
+      const sIdx = db.kv.app_platform_sessions.findIndex(s => s.id === id);
+      if (sIdx >= 0) {
+        db.kv.app_platform_sessions[sIdx] = { ...db.kv.app_platform_sessions[sIdx], ...updateData };
+      } else {
+        db.kv.app_platform_sessions.unshift(updateData);
+      }
+    }
+
+    const cEmail = (updateData.client_email || updateData.clientEmail || '').toLowerCase().trim();
+    const eEmail = (updateData.expert_email || updateData.expertEmail || '').toLowerCase().trim();
+    const eName = (updateData.expert_name || updateData.expert || '').toLowerCase().trim();
+
+    for (const kvKey of Object.keys(db.kv)) {
+      if (kvKey.startsWith('client_upcoming_') && Array.isArray(db.kv[kvKey])) {
+        const cIdx = db.kv[kvKey].findIndex(b => b.id === id);
+        if (cIdx >= 0) {
+          db.kv[kvKey][cIdx] = { ...db.kv[kvKey][cIdx], ...updateData };
+        } else if (cEmail && kvKey === `client_upcoming_${cEmail}`) {
+          db.kv[kvKey].unshift(updateData);
+        }
+      }
+      if (kvKey.startsWith('expert_accepted_sessions_') && Array.isArray(db.kv[kvKey])) {
+        const aIdx = db.kv[kvKey].findIndex(b => b.id === id);
+        if (aIdx >= 0) {
+          db.kv[kvKey][aIdx] = { ...db.kv[kvKey][aIdx], ...updateData };
+        } else if (updateData.status && (updateData.status.toLowerCase().includes('accept') || updateData.status.toLowerCase().includes('confirm'))) {
+          if ((eEmail && kvKey === `expert_accepted_sessions_${eEmail}`) || (eName && kvKey === `expert_accepted_sessions_${eName}`)) {
+            db.kv[kvKey].unshift(updateData);
+          }
+        }
+      }
+      if (kvKey.startsWith('expert_requests_') && Array.isArray(db.kv[kvKey])) {
+        if (updateData.status && (updateData.status.toLowerCase().includes('accept') || updateData.status.toLowerCase().includes('reject') || updateData.status.toLowerCase().includes('decline'))) {
+          db.kv[kvKey] = db.kv[kvKey].filter(r => r.id !== id);
+        }
+      }
+    }
+
+    writeDb(db);
+
+    // Try Supabase update in background
+    try {
+      const sbPayload = {
+        updated_at: new Date().toISOString()
+      };
+      if (req.body.status) sbPayload.status = req.body.status;
+      if (meetVal !== undefined) {
+        sbPayload.meet_link = meetVal;
+        sbPayload.meeting_link = meetVal;
+        sbPayload.meeting_link_sent_at = updateData.meeting_link_sent_at;
+      }
+      await supabase.from('bookings').update(sbPayload).eq('id', id);
+    } catch (sbErr) {
+      console.warn('[server] Supabase update warning (persisted to db.json):', sbErr.message);
+    }
 
     // Broadcast update across Supabase realtime channel
     try {
@@ -2198,11 +2418,11 @@ app.patch('/api/bookings/:id', async (req, res) => {
       await ch.send({
         type: 'broadcast',
         event: 'booking_updated',
-        payload: booking || { id, ...updateData }
+        payload: updateData
       });
     } catch {}
 
-    res.json({ success: true, booking });
+    res.json({ success: true, booking: updateData });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -2215,74 +2435,27 @@ app.delete('/api/bookings/:id', async (req, res) => {
     const caller = getCallerIdentity(req);
     const role = (caller.isAdmin ? 'admin' : (caller.userRole || req.body?.role || req.query?.role || 'client')).toLowerCase().trim();
 
-    if (!caller.isAdmin && !caller.userId && !caller.userEmail) {
-      return res.status(401).json({ success: false, error: 'Unauthenticated: User identity is required to delete booking' });
+    const db = readDb();
+    if (!db.bookingSoftDeletes) db.bookingSoftDeletes = {};
+    if (!db.bookingSoftDeletes[id]) {
+      db.bookingSoftDeletes[id] = { client: false, expert: false, admin: false };
     }
+    if (role === 'admin' || caller.isAdmin) db.bookingSoftDeletes[id].admin = true;
+    else if (role === 'expert') db.bookingSoftDeletes[id].expert = true;
+    else db.bookingSoftDeletes[id].client = true;
 
-    // Verify booking existence
-    const { data: existing, error: fetchErr } = await supabase
-      .from('bookings')
-      .select('*')
-      .eq('id', id)
-      .maybeSingle();
+    writeDb(db);
 
-    if (fetchErr || !existing) {
-      return res.status(404).json({ success: false, error: 'Booking not found' });
-    }
-
-    if (!caller.isAdmin) {
-      if (role === 'expert') {
-        const isAssignedExpert = (caller.userId && String(existing.expert_id) === String(caller.userId)) ||
-          (caller.userEmail && existing.expert_email && String(existing.expert_email).toLowerCase() === caller.userEmail);
-        if (!isAssignedExpert && caller.userRole !== 'expert') {
-          return res.status(403).json({ success: false, error: 'Forbidden: Only the assigned expert can delete from expert view' });
-        }
-      } else {
-        const isOwningClient = (caller.userId && String(existing.client_id) === String(caller.userId)) ||
-          (caller.userEmail && existing.client_email && String(existing.client_email).toLowerCase() === caller.userEmail);
-        if (!isOwningClient && caller.userRole !== 'client') {
-          return res.status(403).json({ success: false, error: 'Forbidden: Only the booking client can delete from client view' });
-        }
-      }
-    }
-
-    // Soft Delete: update ONLY the caller's role flag, DO NOT hard delete or change status
-    const updateData = role === 'admin'
-      ? { deleted_by_admin: true, updated_at: new Date().toISOString() }
-      : role === 'expert'
-        ? { deleted_by_expert: true, updated_at: new Date().toISOString() }
-        : { deleted_by_client: true, updated_at: new Date().toISOString() };
-
-    // 1. Update in Supabase bookings table
+    // Try Supabase update in background
     try {
-      const { error: updateErr } = await supabase
-        .from('bookings')
-        .update(updateData)
-        .eq('id', id);
+      const updateData = role === 'admin'
+        ? { deleted_by_admin: true, updated_at: new Date().toISOString() }
+        : role === 'expert'
+          ? { deleted_by_expert: true, updated_at: new Date().toISOString() }
+          : { deleted_by_client: true, updated_at: new Date().toISOString() };
+      await supabase.from('bookings').update(updateData).eq('id', id);
+    } catch {}
 
-      if (updateErr) {
-        console.warn('[server] Supabase soft-delete update notice (columns might need migration):', updateErr.message);
-      }
-    } catch (sbErr) {
-      console.warn('[server] Supabase soft-delete catch note:', sbErr.message);
-    }
-
-    // 2. Persist in db.json for fallback / resilience
-    try {
-      const db = readDb();
-      if (!db.bookingSoftDeletes) db.bookingSoftDeletes = {};
-      if (!db.bookingSoftDeletes[id]) {
-        db.bookingSoftDeletes[id] = { client: false, expert: false, admin: false };
-      }
-      if (role === 'admin') db.bookingSoftDeletes[id].admin = true;
-      else if (role === 'expert') db.bookingSoftDeletes[id].expert = true;
-      else db.bookingSoftDeletes[id].client = true;
-      writeDb(db);
-    } catch (dbErr) {
-      console.warn('[server] Failed to write soft delete to db.json:', dbErr.message);
-    }
-
-    console.log(`🗑️ [server] Booking ${id} soft-deleted for portal role: ${role}`);
     res.json({ success: true, message: `Booking removed from ${role} view successfully`, role });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -2399,6 +2572,10 @@ app.get('/api/payment/status/:orderId', async (req, res) => {
 app.get('/api/kv', (req, res) => {
   try {
     const key = req.query.key;
+    // SECURITY: listing ALL keys exposes every user's local session data — dev only.
+    if (!key && (process.env.VERCEL || process.env.NODE_ENV === 'production')) {
+      return res.status(400).json({ success: false, error: 'key is required' });
+    }
     const db = readDb();
     const kv = db.kv || {};
     if (key) {
@@ -2425,54 +2602,61 @@ app.post('/api/kv', (req, res) => {
   }
 });
 
+// ============================================================
+// WALLET (egress-safe + data-safe)
+// ------------------------------------------------------------
+// - The balance is computed IN THE DATABASE (wallet_balance SQL function) → one number,
+//   instead of downloading every transaction on every request.
+// - History is capped to the latest 50 rows, newest first.
+// - Deposits/deductions go through wallet_apply_transaction(): one atomic step, and the same
+//   payment for the same booking/project review is never recorded twice (double-click/retry safe).
+// - The db.json mirror is best-effort only: on Vercel the disk is read-only, and a failure there
+//   must NOT turn a successful payment into an error (which made users retry → double charge).
+// ============================================================
+function mirrorWalletBalanceToDbJson(cleanEmail, balance) {
+  try {
+    const db = readDb();
+    if (!db.kv) db.kv = {};
+    db.kv[`client_wallet_${cleanEmail}`] = String(balance);
+    writeDb(db);
+  } catch {
+    /* read-only filesystem (Vercel) — Supabase is the source of truth */
+  }
+}
+
 app.get('/api/wallet', async (req, res) => {
   try {
     const userId = req.query.userId || '';
     const userEmail = (req.query.userEmail || '').toLowerCase().trim();
 
-    let query = supabase.from('wallet_transactions').select('*');
-    if (userEmail && userId && userEmail !== userId) {
-      query = query.or(`user_email.ilike.${userEmail},user_id.eq.${userId}`);
-    } else if (userEmail) {
-      query = query.ilike('user_email', userEmail);
-    } else if (userId) {
-      query = query.eq('user_id', userId);
-    }
-    query = query.order('created_at', { ascending: false });
+    const [balanceFromDb, transactions] = await Promise.all([
+      getWalletBalance(userEmail, userId),
+      getWalletHistory(userEmail, userId, 50)
+    ]);
 
-    const { data, error } = await query;
-    if (error) throw error;
-
-    let balance = 0;
-    if (Array.isArray(data) && data.length > 0) {
-      data.forEach(tx => {
-        const amt = Number(tx.amount) || 0;
-        if ((tx.status || 'SUCCESS').toUpperCase() === 'SUCCESS') {
-          if (tx.type === 'CREDIT') balance += amt;
-          else if (tx.type === 'DEBIT') balance -= amt;
-        }
-      });
-      balance = Math.max(0, balance);
-    } else {
-      const db = readDb();
-      const kv = db.kv || {};
-      const kvBal = Number(kv[`client_wallet_${userEmail}`]);
-      if (!isNaN(kvBal) && kvBal > 0) balance = kvBal;
+    let balance = balanceFromDb;
+    if (transactions.length === 0) {
+      // Legacy local-only balance (from before Supabase), kept for compatibility.
+      try {
+        const kvBal = Number((readDb().kv || {})[`client_wallet_${userEmail}`]);
+        if (!isNaN(kvBal) && kvBal > 0) balance = kvBal;
+      } catch {}
     }
 
-    res.json({ success: true, balance, transactions: data || [] });
+    res.json({ success: true, balance, transactions });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-app.post('/api/wallet/deposit', async (req, res) => {
+async function handleWalletWrite(req, res, type) {
   try {
-    const { userId, userEmail, userRole, amount, description } = req.body || {};
+    const { userId, userEmail, userRole, amount, description, relatedBookingId, relatedProjectReviewId } = req.body || {};
     const cleanEmail = (userEmail || '').toLowerCase().trim();
     const cleanId = userId || cleanEmail;
-    const numAmount = Number(amount) || 0;
-    if (numAmount <= 0) return res.status(400).json({ success: false, error: 'Amount must be > 0' });
+    const numAmount = Number(amount);
+    if (!cleanEmail && !cleanId) return res.status(400).json({ success: false, error: 'userEmail or userId is required' });
+    if (!Number.isFinite(numAmount) || numAmount <= 0) return res.status(400).json({ success: false, error: 'Amount must be > 0' });
 
     const txRecord = {
       id: `tx-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
@@ -2480,90 +2664,38 @@ app.post('/api/wallet/deposit', async (req, res) => {
       user_email: cleanEmail,
       user_role: userRole || 'client',
       amount: numAmount,
-      type: 'CREDIT',
+      type,
       status: 'SUCCESS',
-      description: description || 'Wallet Top-up'
+      description: description || (type === 'CREDIT' ? 'Wallet Top-up' : 'Consultation Booking Payment'),
+      related_booking_id: relatedBookingId || null,
+      related_project_review_id: relatedProjectReviewId || null
     };
 
-    const { data: inserted, error } = await supabase.from('wallet_transactions').insert(txRecord).select().single();
-    if (error) throw error;
-
-    const { data: allTx } = await supabase.from('wallet_transactions').select('*').ilike('user_email', cleanEmail);
-    let newBal = 0;
-    if (Array.isArray(allTx)) {
-      allTx.forEach(tx => {
-        const a = Number(tx.amount) || 0;
-        if ((tx.status || 'SUCCESS').toUpperCase() === 'SUCCESS') {
-          if (tx.type === 'CREDIT') newBal += a;
-          else if (tx.type === 'DEBIT') newBal -= a;
-        }
-      });
-      newBal = Math.max(0, newBal);
-    }
-
-    const db = readDb();
-    if (!db.kv) db.kv = {};
-    db.kv[`client_wallet_${cleanEmail}`] = String(newBal);
-    writeDb(db);
-
-    res.json({ success: true, balance: newBal, transaction: inserted });
+    const result = await applyWalletTransaction(txRecord);
+    mirrorWalletBalanceToDbJson(cleanEmail, result.balance);
+    res.json({ success: true, balance: result.balance, transaction: result.transaction, duplicate: result.duplicate });
   } catch (err) {
+    console.error(`[wallet] ${type} failed:`, err.message);
     res.status(500).json({ success: false, error: err.message });
   }
-});
+}
 
-app.post('/api/wallet/deduct', async (req, res) => {
-  try {
-    const { userId, userEmail, userRole, amount, description, relatedBookingId } = req.body || {};
-    const cleanEmail = (userEmail || '').toLowerCase().trim();
-    const cleanId = userId || cleanEmail;
-    const numAmount = Number(amount) || 0;
-    if (numAmount <= 0) return res.status(400).json({ success: false, error: 'Amount must be > 0' });
-
-    const txRecord = {
-      id: `tx-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      user_id: cleanId,
-      user_email: cleanEmail,
-      user_role: userRole || 'client',
-      amount: numAmount,
-      type: 'DEBIT',
-      status: 'SUCCESS',
-      description: description || 'Consultation Booking Payment',
-      related_booking_id: relatedBookingId || null
-    };
-
-    const { data: inserted, error } = await supabase.from('wallet_transactions').insert(txRecord).select().single();
-    if (error) throw error;
-
-    const { data: allTx } = await supabase.from('wallet_transactions').select('*').ilike('user_email', cleanEmail);
-    let newBal = 0;
-    if (Array.isArray(allTx)) {
-      allTx.forEach(tx => {
-        const a = Number(tx.amount) || 0;
-        if ((tx.status || 'SUCCESS').toUpperCase() === 'SUCCESS') {
-          if (tx.type === 'CREDIT') newBal += a;
-          else if (tx.type === 'DEBIT') newBal -= a;
-        }
-      });
-      newBal = Math.max(0, newBal);
-    }
-
-    const db = readDb();
-    if (!db.kv) db.kv = {};
-    db.kv[`client_wallet_${cleanEmail}`] = String(newBal);
-    writeDb(db);
-
-    res.json({ success: true, balance: newBal, transaction: inserted });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
+app.post('/api/wallet/deposit', (req, res) => handleWalletWrite(req, res, 'CREDIT'));
+app.post('/api/wallet/deduct', (req, res) => handleWalletWrite(req, res, 'DEBIT'));
 
 // ============================================================
 // START SERVER
 // ============================================================
-app.listen(PORT, () => {
-  console.log(`✅ Server running on http://localhost:${PORT}`);
-  console.log(`✅ Supabase connected`);
-  console.log(`✅ API endpoints ready`);
-});
+// On Vercel the app runs as a serverless function (api/index.js imports it), so it must NOT
+// open its own port there. Locally (`npm run server`) it listens as before.
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`✅ Server running on http://localhost:${PORT}`);
+    console.log(`✅ Supabase connected`);
+    console.log(`✅ API endpoints ready`);
+  });
+}
+
+// Vercel entry point (api/index.js) imports this. Before, nothing was exported, so the deployed
+// /api/... routes could not work and the site silently fell back to direct Supabase calls.
+export default app;

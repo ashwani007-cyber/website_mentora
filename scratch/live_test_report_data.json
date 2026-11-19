@@ -1,0 +1,3481 @@
+{
+  "results": [
+    {
+      "testNumber": 1,
+      "testName": "Before sending the link",
+      "status": "PASS",
+      "observed": "Expert tab shows \"Awaiting Google Meet Link\", Admin tab shows \"Pending Google Meet Link Generation by Expert\" (no join button), Client tab shows no \"Join Meeting\" button."
+    },
+    {
+      "testNumber": 2,
+      "testName": "Send a valid link",
+      "status": "PASS",
+      "observed": "Expert tab badge changed to \"Link Sent\" with \"Join Meeting ↗\" button. Link and \"Join Meeting\" button appeared in real time on Client tab (3.4s) and Admin tab (2.3s) without page refresh."
+    },
+    {
+      "testNumber": 3,
+      "testName": "Same link everywhere",
+      "status": "PASS",
+      "observed": "All three portals display identical character-for-character URL (https://meet.google.com/abc-defg-hij). \"Join Meeting\" button on each portal triggers window.open with the exact URL in a new tab."
+    },
+    {
+      "testNumber": 4,
+      "testName": "Persistence",
+      "status": "PASS",
+      "observed": "Link persisted on Expert, Client, and Admin tabs after page reload. Logging out and logging back in on Client Portal preserved the saved link and \"Join Meeting ↗\" button."
+    },
+    {
+      "testNumber": 5,
+      "testName": "Edit / re-send",
+      "status": "PASS",
+      "observed": "Expert edited link to https://meet.google.com/xyz-abcd-efg. New link replaced the old one in real time on Client tab (2.2s) and Admin tab (1.1s) without page refresh."
+    },
+    {
+      "testNumber": 6,
+      "testName": "Validation",
+      "status": "PASS",
+      "observed": "All invalid formats rejected with inline error messages (\"Please enter a valid Google Meet link...\"). Empty input, random text, non-Meet URL, and malformed URL were blocked. Previously saved link (https://meet.google.com/xyz-abcd-efg) remained unchanged on Client and Admin portals."
+    },
+    {
+      "testNumber": 7,
+      "testName": "Access control",
+      "status": "PASS",
+      "observed": "Different client (vikram@northwindretail.com) cannot see Aman's consultation session or meeting link. Different expert (Sunita Rao) cannot see or edit Aara's assigned consultation or meeting link."
+    },
+    {
+      "testNumber": 8,
+      "testName": "Nothing else broke",
+      "status": "PASS",
+      "observed": "Admin Portal retains \"Launch Live Now\", \"Mark Completed\", and \"Delete\" buttons. Value is intact (₹225). Expert Portal retains Earned Payout (₹225), Delete Session button, and dark/light layouts without distortion."
+    }
+  ],
+  "consoleErrors": [],
+  "failedRequests": [
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/expert_availability?select=*&expert_id=eq.usr-86c1c358-aara",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/users?select=id&email=eq.aara%40gmail.com",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/users?select=id&email=eq.aara%40gmail.com",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/expert_availability?select=*&expert_id=eq.usr-86c1c358-aara",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/profiles?select=id&email=eq.aara%40gmail.com",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/profiles?select=id&email=eq.aara%40gmail.com",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/expert_documents?select=*&expert_id=eq.usr-86c1c358-aara",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/expert_availability?select=*&expert_id=eq.usr-86c1c358-aara",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/expert_availability?select=*&expert_id=eq.usr-86c1c358-aara",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/users?select=id&email=eq.aara%40gmail.com",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/profiles?select=id&email=eq.aara%40gmail.com",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/users?select=id&email=eq.aara%40gmail.com",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/expert_availability?select=*&expert_id=eq.usr-86c1c358-aara",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/profiles?select=id&email=eq.aara%40gmail.com",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/expert_documents?select=*&expert_id=eq.usr-86c1c358-aara",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/expert_availability?select=*&expert_id=eq.usr-86c1c358-aara",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/users?select=id&email=eq.sunita.rao%40registry.com",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/expert_availability?select=*&expert_id=eq.exp-1",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/users?select=id&email=eq.sunita.rao%40registry.com",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/expert_availability?select=*&expert_id=eq.exp-1",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/profiles?select=id&email=eq.sunita.rao%40registry.com",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/profiles?select=id&email=eq.sunita.rao%40registry.com",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/expert_documents?select=*&expert_id=eq.exp-1",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/expert_availability?select=*&expert_id=eq.usr-86c1c358-aara",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/users?select=id&email=eq.aara%40gmail.com",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/expert_availability?select=*&expert_id=eq.usr-86c1c358-aara",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/users?select=id&email=eq.aara%40gmail.com",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/profiles?select=id&email=eq.aara%40gmail.com",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/profiles?select=id&email=eq.aara%40gmail.com",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/expert_documents?select=*&expert_id=eq.usr-86c1c358-aara",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.aara%40gmail.com%2Cemail.ilike.aara%40gmail.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Expert",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*&or=%28user_email.ilike.aman%40gmail.com%2Cuser_id.eq.059fc01e-4a01-47a1-95d8-e881d1b5a262%29&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*&or=%28user_email.ilike.aman%40gmail.com%2Cuser_id.eq.059fc01e-4a01-47a1-95d8-e881d1b5a262%29&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*&or=%28user_email.ilike.aman%40gmail.com%2Cuser_id.eq.059fc01e-4a01-47a1-95d8-e881d1b5a262%29&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*&or=%28user_email.ilike.aman%40gmail.com%2Cuser_id.eq.059fc01e-4a01-47a1-95d8-e881d1b5a262%29&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*&or=%28user_email.ilike.aman%40gmail.com%2Cuser_id.eq.059fc01e-4a01-47a1-95d8-e881d1b5a262%29&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "requestId": "19448.680",
+      "errorText": "net::ERR_BLOCKED_BY_ORB",
+      "canceled": false
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*&or=%28user_email.ilike.aman%40gmail.com%2Cuser_id.eq.059fc01e-4a01-47a1-95d8-e881d1b5a262%29&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*&or=%28user_email.ilike.aman%40gmail.com%2Cuser_id.eq.059fc01e-4a01-47a1-95d8-e881d1b5a262%29&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*&or=%28user_email.ilike.aman%40gmail.com%2Cuser_id.eq.059fc01e-4a01-47a1-95d8-e881d1b5a262%29&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*&or=%28user_email.ilike.aman%40gmail.com%2Cuser_id.eq.059fc01e-4a01-47a1-95d8-e881d1b5a262%29&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*&or=%28user_email.ilike.vikram%40northwindretail.com%2Cuser_id.eq.client-vikram%29&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*&or=%28user_email.ilike.vikram%40northwindretail.com%2Cuser_id.eq.client-vikram%29&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*&or=%28user_email.ilike.vikram%40northwindretail.com%2Cuser_id.eq.client-vikram%29&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*&or=%28user_email.ilike.aman%40gmail.com%2Cuser_id.eq.059fc01e-4a01-47a1-95d8-e881d1b5a262%29&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/wallet_transactions?select=*&or=%28user_email.ilike.aman%40gmail.com%2Cuser_id.eq.059fc01e-4a01-47a1-95d8-e881d1b5a262%29&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Client",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/domains?select=*&order=sort_order.asc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=id%2Cfield%2Cdomain_id",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&or=%28id.eq.sunita.rao%40registry.com%2Cemail.ilike.sunita.rao%40registry.com%29",
+      "status": 402,
+      "statusText": ""
+    },
+    {
+      "tab": "Admin",
+      "url": "http://localhost:5173/api/admin/pending-verifications",
+      "status": 403,
+      "statusText": "Forbidden"
+    },
+    {
+      "tab": "Admin",
+      "url": "https://oitxwcspkelduxbuczux.supabase.co/rest/v1/experts?select=*&order=created_at.desc",
+      "status": 402,
+      "statusText": ""
+    }
+  ],
+  "testDataCreated": [
+    {
+      "sessionId": "book-1793372078834",
+      "client": "Aman (aman@gmail.com)",
+      "expert": "Aara (aara@gmail.com)",
+      "linksUsed": [
+        "https://meet.google.com/abc-defg-hij",
+        "https://meet.google.com/xyz-abcd-efg"
+      ],
+      "currentStoredLink": "https://meet.google.com/xyz-abcd-efg"
+    }
+  ]
+}

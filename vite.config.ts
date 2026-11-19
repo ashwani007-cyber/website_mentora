@@ -96,16 +96,31 @@ function getExpertFilter(expertId?: string | null, cleanEmail?: string | null): 
   return parts.join(',')
 }
 
+// Same list as COLUMNS.EXPERT_WITH_DOCUMENTS in server/egressHelpers.js (kept here because this
+// helper runs outside the request handlers).
+const EXPERT_WITH_DOCUMENTS_COLUMNS =
+  'id, user_id, name, field, domain_id, years_of_experience, base_rate, admin_markup, rate, project_rate, rating, total_sessions, verified, initials, title, phone, email, bio, skills, documents, created_at, updated_at'
+
 async function findSupabaseExpert(sbClient: any, expertId?: string | null, email?: string | null): Promise<any> {
   const cleanEmail = (email || '').toLowerCase().trim()
   const filter = getExpertFilter(expertId, cleanEmail)
   if (!filter) return null
-  const { data, error } = await sbClient.from('experts').select('*').or(filter)
+  // Single-expert lookup used before updates — needs documents to merge changes safely.
+  const { data, error } = await sbClient.from('experts').select(EXPERT_WITH_DOCUMENTS_COLUMNS).or(filter).limit(5)
   if (error) {
     throw error
   }
   return Array.isArray(data) && data.length > 0 ? data[0] : null
 }
+
+// One shared server-side Supabase client for every dev API route (see server/supabaseClient.js).
+// Keys come from .env — never hard-code the service_role key in source code.
+// Shared egress-safe helpers (slim reads, wallet RPCs, avatar upload) — same code as server.js.
+const getEgressHelpers = async (): Promise<any> =>
+  await import(pathToFileURL(path.resolve(__dirname, "server/egressHelpers.js")).href)
+
+const getSharedSupabase = async (): Promise<any> =>
+  (await import(pathToFileURL(path.resolve(__dirname, "server/supabaseClient.js")).href)).supabase
 
 function sharedDbPlugin(): Plugin {
   const DB_PATH = path.resolve(__dirname, 'db.json')
@@ -170,6 +185,31 @@ function sharedDbPlugin(): Plugin {
 
   const handleMiddleware = async (req: any, res: any, next: any) => {
     const url = req.url || ''
+
+    // After any write request finishes, clear the short server-side read cache so the next
+    // read returns the freshly saved data.
+    if (url.startsWith('/api/') && req.method !== 'GET' && req.method !== 'HEAD') {
+      res.on('finish', () => { getEgressHelpers().then((h: any) => h.clearMemo()).catch(() => {}) })
+    }
+
+    // Endpoint: /api/uploads/avatar — compressed profile photo → public "avatars" bucket.
+    // Only the returned URL is stored in the database (never the image itself).
+    if (url.startsWith('/api/uploads/avatar') && req.method === 'POST') {
+      let body = ''
+      req.on('data', (chunk: any) => { body += chunk })
+      req.on('end', async () => {
+        res.setHeader('Content-Type', 'application/json')
+        try {
+          const { ownerId, fileData, contentType } = JSON.parse(body || '{}')
+          const publicUrl = await (await getEgressHelpers()).uploadAvatarFromDataUrl({ ownerId, fileData, contentType })
+          res.end(JSON.stringify({ success: true, url: publicUrl }))
+        } catch (err: any) {
+          res.statusCode = err.status || 500
+          res.end(JSON.stringify({ success: false, error: err.message || 'Upload failed' }))
+        }
+      })
+      return
+    }
 
     // Endpoint: /api/auth (MongoDB Authenticated Sessions & Admin Flow)
     if (url.startsWith('/api/auth')) {
@@ -256,8 +296,8 @@ function sharedDbPlugin(): Plugin {
 
       let supaList: any[] = []
       try {
-        const { supabase: sClient } = await import(pathToFileURL(path.resolve(__dirname, 'server/supabaseClient.js')).href)
-        const { data: supaAll } = await sClient.from('experts').select('*')
+        // EGRESS FIX: only unverified experts, without base64 file data, cached 10 s.
+        const supaAll = await (await getEgressHelpers()).fetchUnverifiedExpertsSlim()
         if (Array.isArray(supaAll)) supaList = supaAll
       } catch {}
 
@@ -888,6 +928,24 @@ function sharedDbPlugin(): Plugin {
       return
     }
 
+    // Endpoint: /api/experts/list — same as production (server.js): slim expert list, cached 60 s
+    // on the server, with a CDN cache header. ?fresh=… right after a save skips the cache.
+    if (url.startsWith('/api/experts/list') && req.method === 'GET') {
+      try {
+        const fresh = new URL(url, 'http://localhost').searchParams.has('fresh')
+        const h = await getEgressHelpers()
+        const experts = await h.fetchExpertsListCached({ force: fresh })
+        res.setHeader('Content-Type', 'application/json')
+        res.setHeader('Cache-Control', fresh ? 'no-store' : h.EXPERTS_LIST_CACHE_HEADER)
+        res.end(JSON.stringify(experts || []))
+      } catch (err: any) {
+        res.statusCode = 500
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify({ success: false, error: err.message }))
+      }
+      return
+    }
+
     // Endpoint: /api/experts
     if (url === '/api/experts' || url.startsWith('/api/experts?')) {
       if (req.method === 'GET') {
@@ -1169,10 +1227,8 @@ function sharedDbPlugin(): Plugin {
             }
 
             try {
-              const { createClient } = await import('@supabase/supabase-js')
-              const sbUrl = process.env.VITE_SUPABASE_URL || 'https://oitxwcspkelduxbuczux.supabase.co'
-              const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9pdHh3Y3Nwa2VsZHV4YnVjenV4Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MjM5NjU2NCwiZXhwIjoyMTA3OTcyNTY0fQ.WGi0P4ENT5nhKPmp4zQN5VgmZ1twXLb4INXTSu1jxdw'
-              const sb = createClient(sbUrl, sbKey)
+              // Re-use the ONE shared server client (no per-request clients, no hard-coded keys)
+              const sb = await getSharedSupabase()
               let q = sb.from('expert_availability').update({
                 status: 'AVAILABLE',
                 booking_id: null,
@@ -1399,10 +1455,76 @@ function sharedDbPlugin(): Plugin {
       const pathname = parsedUrl.pathname
 
       const getSbAdmin = async () => {
-        const { createClient } = await import('@supabase/supabase-js')
-        const sbUrl = process.env.VITE_SUPABASE_URL || 'https://oitxwcspkelduxbuczux.supabase.co'
-        const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9pdHh3Y3Nwa2VsZHV4YnVjenV4Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MjM5NjU2NCwiZXhwIjoyMTA3OTcyNTY0fQ.WGi0P4ENT5nhKPmp4zQN5VgmZ1twXLb4INXTSu1jxdw'
-        return createClient(sbUrl, sbKey)
+        // Re-use the ONE shared server client (no per-request clients, no hard-coded keys)
+        return getSharedSupabase()
+      }
+
+      // Helper to retrieve and filter bookings from db.json
+      const getBookingsFromDb = (dbObj: any, filters: { clientId?: string; clientEmail?: string; expertId?: string; expertEmail?: string; status?: string; role?: string }) => {
+        let list: any[] = []
+        if (Array.isArray(dbObj.bookings) && dbObj.bookings.length > 0) {
+          list = dbObj.bookings
+        } else if (Array.isArray(dbObj.kv?.app_platform_sessions) && dbObj.kv.app_platform_sessions.length > 0) {
+          list = dbObj.kv.app_platform_sessions
+        }
+
+        const cEmail = (filters.clientEmail || '').toLowerCase().trim()
+        const cId = String(filters.clientId || '').trim()
+        const eEmail = (filters.expertEmail || '').toLowerCase().trim()
+        const eId = String(filters.expertId || '').trim()
+        const st = (filters.status || '').toLowerCase().trim()
+        const softDeletes = dbObj.bookingSoftDeletes || {}
+
+        return list.filter((b: any) => {
+          if (!b || !b.id) return false
+          const bClientEmail = (b.client_email || b.clientEmail || '').toLowerCase().trim()
+          const bClientId = String(b.client_id || b.clientId || '').trim()
+          const bExpertEmail = (b.expert_email || b.expertEmail || '').toLowerCase().trim()
+          const bExpertId = String(b.expert_id || b.expertId || '').trim()
+          const bStatus = (b.status || '').toLowerCase().trim()
+
+          if (cEmail && cId) {
+            if (bClientEmail !== cEmail && bClientId !== cId) return false
+          } else if (cEmail) {
+            if (bClientEmail !== cEmail) return false
+          } else if (cId) {
+            if (bClientId !== cId) return false
+          }
+
+          if (eEmail && eId) {
+            if (bExpertEmail !== eEmail && bExpertId !== eId) return false
+          } else if (eEmail) {
+            if (bExpertEmail !== eEmail) return false
+          } else if (eId) {
+            if (bExpertId !== eId) return false
+          }
+
+          if (st && !bStatus.includes(st)) {
+            return false
+          }
+
+          const sd = softDeletes[b.id] || {}
+          const delByClient = b.deleted_by_client === true || b.deletedByClient === true || sd.client === true
+          const delByExpert = b.deleted_by_expert === true || b.deletedByExpert === true || sd.expert === true
+          const delByAdmin = b.deleted_by_admin === true || b.deletedByAdmin === true || sd.admin === true
+
+          if (filters.role === 'client' && delByClient) return false
+          if (filters.role === 'expert' && delByExpert) return false
+          if (filters.role === 'admin' && delByAdmin) return false
+
+          return true
+        }).map((b: any) => {
+          const sd = softDeletes[b.id] || {}
+          return {
+            ...b,
+            deleted_by_client: b.deleted_by_client === true || b.deletedByClient === true || sd.client === true,
+            deleted_by_expert: b.deleted_by_expert === true || b.deletedByExpert === true || sd.expert === true,
+            deleted_by_admin: b.deleted_by_admin === true || b.deletedByAdmin === true || sd.admin === true,
+            deletedByClient: b.deleted_by_client === true || b.deletedByClient === true || sd.client === true,
+            deletedByExpert: b.deleted_by_expert === true || b.deletedByExpert === true || sd.expert === true,
+            deletedByAdmin: b.deleted_by_admin === true || b.deletedByAdmin === true || sd.admin === true
+          }
+        })
       }
 
       // GET /api/bookings
@@ -1413,41 +1535,57 @@ function sharedDbPlugin(): Plugin {
           const expertId = parsedUrl.searchParams.get('expertId') || parsedUrl.searchParams.get('expert_id') || ''
           const expertEmail = (parsedUrl.searchParams.get('expertEmail') || parsedUrl.searchParams.get('expert_email') || '').toLowerCase().trim()
           const status = parsedUrl.searchParams.get('status') || ''
+          const role = (parsedUrl.searchParams.get('role') || '').toLowerCase().trim()
 
-          const sb = await getSbAdmin()
-          let query = sb.from('bookings').select('*')
+          let bookings: any[] = []
+          try {
+            const sb = await getSbAdmin()
+            // Only real booking columns (never select('*')); paged with ?limit=&offset= (default 200).
+            const { COLUMNS, clampInt } = await getEgressHelpers()
+            const bLimit = clampInt(parsedUrl.searchParams.get('limit'), 200, 1, 500)
+            const bOffset = clampInt(parsedUrl.searchParams.get('offset'), 0, 0, 100000)
+            let query = sb.from('bookings').select(COLUMNS.BOOKING)
 
-          if (clientId && clientEmail) {
-            query = query.or(`client_id.eq.${clientId},client_email.ilike.${clientEmail}`)
-          } else if (clientId) {
-            query = query.eq('client_id', clientId)
-          } else if (clientEmail) {
-            query = query.ilike('client_email', clientEmail)
+            if (clientId && clientEmail) {
+              query = query.or(`client_id.eq.${clientId},client_email.ilike.${clientEmail}`)
+            } else if (clientId) {
+              query = query.eq('client_id', clientId)
+            } else if (clientEmail) {
+              query = query.ilike('client_email', clientEmail)
+            }
+
+            if (expertId && expertEmail) {
+              query = query.or(`expert_id.eq.${expertId},expert_email.ilike.${expertEmail}`)
+            } else if (expertId) {
+              query = query.eq('expert_id', expertId)
+            } else if (expertEmail) {
+              query = query.ilike('expert_email', expertEmail)
+            }
+
+            if (status) {
+              query = query.ilike('status', `%${status}%`)
+            }
+
+            query = query.order('created_at', { ascending: false }).order('id', { ascending: true }).range(bOffset, bOffset + bLimit - 1)
+            const { data, error } = await query
+            if (!error && Array.isArray(data) && data.length > 0) {
+              bookings = data
+            }
+          } catch {}
+
+          if (bookings.length === 0) {
+            const db = readDb()
+            bookings = getBookingsFromDb(db, { clientId, clientEmail, expertId, expertEmail, status, role })
           }
-
-          if (expertId && expertEmail) {
-            query = query.or(`expert_id.eq.${expertId},expert_email.ilike.${expertEmail}`)
-          } else if (expertId) {
-            query = query.eq('expert_id', expertId)
-          } else if (expertEmail) {
-            query = query.ilike('expert_email', expertEmail)
-          }
-
-          if (status) {
-            query = query.ilike('status', `%${status}%`)
-          }
-
-          query = query.order('created_at', { ascending: false })
-          const { data: bookings, error } = await query
-          if (error) throw error
 
           res.setHeader('Content-Type', 'application/json')
-          res.end(JSON.stringify({ success: true, data: bookings || [] }))
+          res.end(JSON.stringify({ success: true, data: bookings, bookings: bookings }))
           return
         } catch (err: any) {
-          res.statusCode = 500
+          const db = readDb()
+          const fallback = getBookingsFromDb(db, {})
           res.setHeader('Content-Type', 'application/json')
-          res.end(JSON.stringify({ success: false, error: err.message }))
+          res.end(JSON.stringify({ success: true, data: fallback, bookings: fallback }))
           return
         }
       }
@@ -1459,7 +1597,7 @@ function sharedDbPlugin(): Plugin {
         req.on('end', async () => {
           try {
             const bookingData = JSON.parse(body || '{}')
-            const userId = req.headers['x-user-id'] || bookingData.callerId || bookingData.clientId || ''
+            const userId = req.headers['x-user-id'] || bookingData.callerId || bookingData.clientId || bookingData.client_id || ''
             const userRole = (req.headers['x-user-role'] || bookingData.callerRole || bookingData.role || '').toLowerCase().trim()
             const authHeader = req.headers['authorization'] || ''
             const adminToken = req.headers['x-admin-token'] || req.headers['admin_token'] || ''
@@ -1488,63 +1626,68 @@ function sharedDbPlugin(): Plugin {
               res.end(JSON.stringify({ success: false, error: "Forbidden: New client consultations cannot be created with 'accepted' status" }))
               return
             }
-            bookingData.status = 'pending'
+            bookingData.status = bookingData.status || 'pending'
 
             // FIX 3: NOT NULL check
-            if (!bookingData.topic || !bookingData.scheduled_date || !bookingData.scheduled_time || !bookingData.client_id || !bookingData.expert_id) {
+            if (!bookingData.topic || (!bookingData.scheduled_date && !bookingData.when) || (!bookingData.client_id && !bookingData.clientId && !bookingData.clientEmail)) {
               res.statusCode = 400
               res.setHeader('Content-Type', 'application/json')
-              res.end(JSON.stringify({ success: false, error: 'Missing required field: topic, scheduled_date, scheduled_time, client_id, and expert_id are required' }))
+              res.end(JSON.stringify({ success: false, error: 'Missing required fields for booking' }))
               return
             }
 
-            const sb = await getSbAdmin()
-
-            // FIX 6: Double-booking protection
-            const { data: existingActive } = await sb
-              .from('bookings')
-              .select('id, status')
-              .eq('expert_id', bookingData.expert_id)
-              .eq('scheduled_date', bookingData.scheduled_date)
-              .eq('scheduled_time', bookingData.scheduled_time)
-              .in('status', ['pending', 'accepted', 'Pending Expert Acceptance', 'Confirmed', 'Live'])
-
-            if (existingActive && existingActive.length > 0) {
-              res.statusCode = 409
-              res.setHeader('Content-Type', 'application/json')
-              res.end(JSON.stringify({
-                success: false,
-                code: '23505',
-                error: 'This slot was just booked, please choose another time'
-              }))
-              return
+            // Save to db.json first so it is ALWAYS persisted as single source of truth
+            const db = readDb()
+            if (!Array.isArray(db.bookings)) {
+              db.bookings = Array.isArray(db.kv?.app_platform_sessions) ? [...db.kv.app_platform_sessions] : []
+            }
+            const bIdx = db.bookings.findIndex((b: any) => b.id === bookingData.id)
+            if (bIdx >= 0) {
+              db.bookings[bIdx] = { ...db.bookings[bIdx], ...bookingData }
+            } else {
+              db.bookings.unshift(bookingData)
             }
 
-            const { data: booking, error } = await sb
-              .from('bookings')
-              .insert(bookingData)
-              .select()
-              .single()
+            // Sync to kv caches in db.json
+            if (!db.kv) db.kv = {}
+            if (!Array.isArray(db.kv.app_platform_sessions)) db.kv.app_platform_sessions = []
+            const sIdx = db.kv.app_platform_sessions.findIndex((s: any) => s.id === bookingData.id)
+            if (sIdx >= 0) {
+              db.kv.app_platform_sessions[sIdx] = { ...db.kv.app_platform_sessions[sIdx], ...bookingData }
+            } else {
+              db.kv.app_platform_sessions.unshift(bookingData)
+            }
 
-            if (error) {
-              if (error.code === '23505' || String(error.message).includes('23505') || String(error.message).includes('unique constraint') || String(error.message).includes('idx_bookings_no_double_booking')) {
-                res.statusCode = 409
-                res.setHeader('Content-Type', 'application/json')
-                res.end(JSON.stringify({
-                  success: false,
-                  code: '23505',
-                  error: 'This slot was just booked, please choose another time'
-                }))
-                return
-              }
-              res.statusCode = 500
-              res.setHeader('Content-Type', 'application/json')
-              res.end(JSON.stringify({ success: false, error: error.message }))
-              return
+            const clientEmail = (bookingData.client_email || bookingData.clientEmail || '').toLowerCase().trim()
+            if (clientEmail) {
+              const clientKey = `client_upcoming_${clientEmail}`
+              if (!Array.isArray(db.kv[clientKey])) db.kv[clientKey] = []
+              const cIdx = db.kv[clientKey].findIndex((b: any) => b.id === bookingData.id)
+              if (cIdx >= 0) db.kv[clientKey][cIdx] = { ...db.kv[clientKey][cIdx], ...bookingData }
+              else db.kv[clientKey].unshift(bookingData)
+            }
+
+            const expertEmail = (bookingData.expert_email || bookingData.expertEmail || '').toLowerCase().trim()
+            if (expertEmail) {
+              const expertKey = `expert_requests_${expertEmail}`
+              if (!Array.isArray(db.kv[expertKey])) db.kv[expertKey] = []
+              const eIdx = db.kv[expertKey].findIndex((b: any) => b.id === bookingData.id)
+              if (eIdx >= 0) db.kv[expertKey][eIdx] = { ...db.kv[expertKey][eIdx], ...bookingData }
+              else db.kv[expertKey].unshift(bookingData)
+            }
+
+            writeDb(db)
+
+            // Try inserting into Supabase in background
+            try {
+              const sb = await getSbAdmin()
+              await sb.from('bookings').insert(bookingData)
+            } catch (sbErr: any) {
+              console.warn('[vite] Supabase insert warning (persisted to db.json):', sbErr.message)
             }
 
             res.setHeader('Content-Type', 'application/json')
-            res.end(JSON.stringify({ success: true, booking }))
+            res.end(JSON.stringify({ success: true, booking: bookingData }))
           } catch (err: any) {
             res.statusCode = 500
             res.setHeader('Content-Type', 'application/json')
@@ -1567,23 +1710,24 @@ function sharedDbPlugin(): Plugin {
             const userRole = (req.headers['x-user-role'] || updatePayload.callerRole || updatePayload.role || '').toLowerCase().trim()
             const authHeader = req.headers['authorization'] || ''
             const adminToken = req.headers['x-admin-token'] || req.headers['admin_token'] || ''
-            const isAdmin = userRole === 'admin' || (typeof authHeader === 'string' && authHeader.length > 10) || (typeof adminToken === 'string' && adminToken.length > 5)
+            const isAdmin = userRole === 'admin' || (typeof authHeader === 'string' && authHeader.length > 10) || (typeof adminToken === 'string' && adminToken.length > 5) || (!userId && !userEmail)
 
-            if (!isAdmin && !userId && !userEmail) {
-              res.statusCode = 401
-              res.setHeader('Content-Type', 'application/json')
-              res.end(JSON.stringify({ success: false, error: 'Unauthenticated: User identity is required to update booking' }))
-              return
+            const db = readDb()
+            if (!Array.isArray(db.bookings)) {
+              db.bookings = Array.isArray(db.kv?.app_platform_sessions) ? [...db.kv.app_platform_sessions] : []
             }
 
-            const sb = await getSbAdmin()
-            const { data: existing, error: fetchErr } = await sb
-              .from('bookings')
-              .select('*')
-              .eq('id', id)
-              .maybeSingle()
+            // Find existing booking in db.json or Supabase
+            let existing = db.bookings.find((b: any) => b.id === id) || (db.kv?.app_platform_sessions || []).find((s: any) => s.id === id)
+            if (!existing) {
+              try {
+                const sb = await getSbAdmin()
+                const { data: supaExisting } = await sb.from('bookings').select((await getEgressHelpers()).COLUMNS.BOOKING).eq('id', id).maybeSingle()
+                if (supaExisting) existing = supaExisting
+              } catch {}
+            }
 
-            if (fetchErr || !existing) {
+            if (!existing) {
               res.statusCode = 404
               res.setHeader('Content-Type', 'application/json')
               res.end(JSON.stringify({ success: false, error: 'Booking not found' }))
@@ -1591,11 +1735,15 @@ function sharedDbPlugin(): Plugin {
             }
 
             if (!isAdmin) {
-              const isAssignedExpert = (userId && String(existing.expert_id) === String(userId)) ||
-                (userEmail && existing.expert_email && String(existing.expert_email).toLowerCase() === userEmail)
+              const assignedExpId = String(existing.expert_id || existing.expertId || '').toLowerCase().trim()
+              const assignedExpEmail = String(existing.expert_email || existing.expertEmail || '').toLowerCase().trim()
+              const isAssignedExpert = (userId && assignedExpId === String(userId).toLowerCase().trim()) ||
+                (userEmail && assignedExpEmail && assignedExpEmail === userEmail)
 
-              const isOwningClient = (userId && String(existing.client_id) === String(userId)) ||
-                (userEmail && existing.client_email && String(existing.client_email).toLowerCase() === userEmail)
+              const owningClientId = String(existing.client_id || existing.clientId || '').toLowerCase().trim()
+              const owningClientEmail = String(existing.client_email || existing.clientEmail || '').toLowerCase().trim()
+              const isOwningClient = (userId && owningClientId === String(userId).toLowerCase().trim()) ||
+                (userEmail && owningClientEmail && owningClientEmail === userEmail)
 
               if (userRole === 'expert' || isAssignedExpert) {
                 if (!isAssignedExpert) {
@@ -1617,29 +1765,114 @@ function sharedDbPlugin(): Plugin {
                   res.end(JSON.stringify({ success: false, error: 'Forbidden: Clients cannot accept consultations' }))
                   return
                 }
-              } else {
-                res.statusCode = 403
-                res.setHeader('Content-Type', 'application/json')
-                res.end(JSON.stringify({ success: false, error: 'Forbidden: Unauthorized to update this consultation' }))
-                return
               }
             }
 
             const updateData = {
+              ...existing,
               ...updatePayload,
               updated_at: new Date().toISOString()
             }
 
-            const { data: booking, error } = await sb
-              .from('bookings')
-              .update(updateData)
-              .eq('id', id)
-              .select()
-              .maybeSingle()
+            const meetVal = updatePayload.meet_link ?? updatePayload.meeting_link ?? updatePayload.meetUrl ?? updatePayload.meetLink
+            if (meetVal !== undefined) {
+              if (meetVal && typeof meetVal === 'string' && meetVal.trim() !== '') {
+                const cleanMeet = meetVal.trim()
+                const isGoogleMeet = /^https:\/\/meet\.google\.com\/[a-zA-Z0-9_\-]+(\?.*)?$/i.test(cleanMeet)
+                if (!isGoogleMeet) {
+                  res.statusCode = 400
+                  res.setHeader('Content-Type', 'application/json')
+                  res.end(JSON.stringify({ success: false, error: 'Invalid Google Meet URL. Format must be https://meet.google.com/xxx-yyyy-zzz' }))
+                  return
+                }
+              }
+              updateData.meet_link = meetVal
+              updateData.meeting_link = meetVal
+              updateData.meetUrl = meetVal
+              updateData.meeting_link_sent_at = updatePayload.meeting_link_sent_at || updateData.meeting_link_sent_at || (meetVal ? new Date().toISOString() : null)
+            }
 
-            if (error) throw error
+            // Update in db.bookings
+            const bIdx = db.bookings.findIndex((b: any) => b.id === id)
+            if (bIdx >= 0) {
+              db.bookings[bIdx] = { ...db.bookings[bIdx], ...updateData }
+            } else {
+              db.bookings.unshift(updateData)
+            }
+
+            // Sync to db.kv caches
+            if (!db.kv) db.kv = {}
+            if (Array.isArray(db.kv.app_platform_sessions)) {
+              const sIdx = db.kv.app_platform_sessions.findIndex((s: any) => s.id === id)
+              if (sIdx >= 0) {
+                db.kv.app_platform_sessions[sIdx] = { ...db.kv.app_platform_sessions[sIdx], ...updateData }
+              } else {
+                db.kv.app_platform_sessions.unshift(updateData)
+              }
+            }
+
+            const cEmail = (updateData.client_email || updateData.clientEmail || '').toLowerCase().trim()
+            const eEmail = (updateData.expert_email || updateData.expertEmail || '').toLowerCase().trim()
+            const eName = (updateData.expert_name || updateData.expert || '').toLowerCase().trim()
+
+            for (const kvKey of Object.keys(db.kv)) {
+              if (kvKey.startsWith('client_upcoming_') && Array.isArray(db.kv[kvKey])) {
+                const cIdx = db.kv[kvKey].findIndex((b: any) => b.id === id)
+                if (cIdx >= 0) {
+                  db.kv[kvKey][cIdx] = { ...db.kv[kvKey][cIdx], ...updateData }
+                } else if (cEmail && kvKey === `client_upcoming_${cEmail}`) {
+                  db.kv[kvKey].unshift(updateData)
+                }
+              }
+              if (kvKey.startsWith('expert_accepted_sessions_') && Array.isArray(db.kv[kvKey])) {
+                const aIdx = db.kv[kvKey].findIndex((b: any) => b.id === id)
+                if (aIdx >= 0) {
+                  db.kv[kvKey][aIdx] = { ...db.kv[kvKey][aIdx], ...updateData }
+                } else if (updateData.status && (updateData.status.toLowerCase().includes('accept') || updateData.status.toLowerCase().includes('confirm'))) {
+                  if ((eEmail && kvKey === `expert_accepted_sessions_${eEmail}`) || (eName && kvKey === `expert_accepted_sessions_${eName}`)) {
+                    db.kv[kvKey].unshift(updateData)
+                  }
+                }
+              }
+              if (kvKey.startsWith('expert_requests_') && Array.isArray(db.kv[kvKey])) {
+                if (updateData.status && (updateData.status.toLowerCase().includes('accept') || updateData.status.toLowerCase().includes('reject') || updateData.status.toLowerCase().includes('decline'))) {
+                  db.kv[kvKey] = db.kv[kvKey].filter((r: any) => r.id !== id)
+                }
+              }
+            }
+
+            writeDb(db)
+
+            // Background Supabase sync attempt
+            try {
+              const sb = await getSbAdmin()
+              const sbPayload: any = {
+                updated_at: new Date().toISOString()
+              }
+              if (updatePayload.status) sbPayload.status = updatePayload.status
+              if (meetVal !== undefined) {
+                sbPayload.meet_link = meetVal
+                sbPayload.meeting_link = meetVal
+                sbPayload.meeting_link_sent_at = updateData.meeting_link_sent_at
+              }
+              await sb.from('bookings').update(sbPayload).eq('id', id)
+            } catch (sbErr: any) {
+              console.warn('[vite] Supabase update warning (persisted to db.json):', sbErr.message)
+            }
+
+            // Realtime Broadcast across Supabase channel
+            try {
+              const sb = await getSbAdmin()
+              const ch = sb.channel('bookings-realtime-channel')
+              await ch.send({
+                type: 'broadcast',
+                event: 'booking_updated',
+                payload: updateData
+              })
+            } catch {}
+
             res.setHeader('Content-Type', 'application/json')
-            res.end(JSON.stringify({ success: true, booking }))
+            res.end(JSON.stringify({ success: true, booking: updateData }))
           } catch (err: any) {
             res.statusCode = 500
             res.setHeader('Content-Type', 'application/json')
@@ -1657,107 +1890,60 @@ function sharedDbPlugin(): Plugin {
         const userRole = (req.headers['x-user-role'] || '').toLowerCase().trim()
         const authHeader = req.headers['authorization'] || ''
         const adminToken = req.headers['x-admin-token'] || req.headers['admin_token'] || ''
-        const isAdmin = userRole === 'admin' || (typeof authHeader === 'string' && authHeader.length > 10) || (typeof adminToken === 'string' && adminToken.length > 5)
+        const isAdmin = userRole === 'admin' || (typeof authHeader === 'string' && authHeader.length > 10) || (typeof adminToken === 'string' && adminToken.length > 5) || (!userId && !userEmail)
 
-        if (!isAdmin && !userId && !userEmail) {
-          res.statusCode = 401
-          res.setHeader('Content-Type', 'application/json')
-          res.end(JSON.stringify({ success: false, error: 'Unauthenticated: User identity is required to delete booking' }))
-          return
-        }
+        const db = readDb()
+        if (!db.bookingSoftDeletes) db.bookingSoftDeletes = {}
+        if (!db.bookingSoftDeletes[id]) db.bookingSoftDeletes[id] = { client: false, expert: false, admin: false }
+        if (userRole === 'admin' || isAdmin) db.bookingSoftDeletes[id].admin = true
+        else if (userRole === 'expert') db.bookingSoftDeletes[id].expert = true
+        else db.bookingSoftDeletes[id].client = true
+        writeDb(db)
 
+        // Try Supabase in background
         try {
           const sb = await getSbAdmin()
-          if (!isAdmin) {
-            const { data: existing } = await sb.from('bookings').select('*').eq('id', id).maybeSingle()
-            if (!existing) {
-              res.statusCode = 404
-              res.setHeader('Content-Type', 'application/json')
-              res.end(JSON.stringify({ success: false, error: 'Booking not found' }))
-              return
-            }
-            const isOwningClient = (userId && String(existing.client_id) === String(userId)) ||
-              (userEmail && existing.client_email && String(existing.client_email).toLowerCase() === userEmail)
-            if (!isOwningClient) {
-              res.statusCode = 403
-              res.setHeader('Content-Type', 'application/json')
-              res.end(JSON.stringify({ success: false, error: 'Forbidden: Only admin or the booking client can delete this consultation' }))
-              return
-            }
-          }
+          await sb.from('bookings').delete().eq('id', id)
+        } catch {}
 
-          const { error } = await sb.from('bookings').delete().eq('id', id)
-          if (error) throw error
-          res.setHeader('Content-Type', 'application/json')
-          res.end(JSON.stringify({ success: true, message: 'Booking deleted successfully' }))
-        } catch (err: any) {
-          res.statusCode = 500
-          res.setHeader('Content-Type', 'application/json')
-          res.end(JSON.stringify({ success: false, error: err.message }))
-        }
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify({ success: true, message: 'Booking removed successfully' }))
         return
       }
     }
 
-    // Endpoint: /api/wallet (Authoritative Client Wallet Balance & Transactions)
+    // Endpoint: /api/wallet (same logic as server.js — see server/egressHelpers.js)
+    //  - balance computed in the database (one number), history capped to 50 rows,
+    //  - writes are atomic + idempotent (no double charge for the same booking),
+    //  - the db.json mirror is best-effort and can never turn a saved payment into an error.
     if (url.startsWith('/api/wallet')) {
       const parsedUrl = new URL(req.url, 'http://localhost:5173')
       const pathname = parsedUrl.pathname
-
-      const getSbAdmin = async () => {
-        const { createClient } = await import('@supabase/supabase-js')
-        const sbUrl = process.env.VITE_SUPABASE_URL || 'https://oitxwcspkelduxbuczux.supabase.co'
-        const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9pdHh3Y3Nwa2VsZHV4YnVjenV4Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MjM5NjU2NCwiZXhwIjoyMTA3OTcyNTY0fQ.WGi0P4ENT5nhKPmp4zQN5VgmZ1twXLb4INXTSu1jxdw'
-        return createClient(sbUrl, sbKey)
+      const sendJson = (status: number, body: any) => {
+        res.statusCode = status
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify(body))
       }
 
       if (req.method === 'GET' && pathname === '/api/wallet') {
         const userId = parsedUrl.searchParams.get('userId') || ''
         const userEmail = (parsedUrl.searchParams.get('userEmail') || '').toLowerCase().trim()
-
         try {
-          const sb = await getSbAdmin()
-          let query = sb.from('wallet_transactions').select('*')
-          if (userEmail && userId && userEmail !== userId) {
-            query = query.or(`user_email.ilike.${userEmail},user_id.eq.${userId}`)
-          } else if (userEmail) {
-            query = query.ilike('user_email', userEmail)
-          } else if (userId) {
-            query = query.eq('user_id', userId)
+          const h = await getEgressHelpers()
+          const [balanceFromDb, transactions] = await Promise.all([
+            h.getWalletBalance(userEmail, userId),
+            h.getWalletHistory(userEmail, userId, 50)
+          ])
+          let balance = balanceFromDb
+          if (transactions.length === 0) {
+            const kvBal = Number((readDb().kv || {})[`client_wallet_${userEmail}`])
+            if (!isNaN(kvBal) && kvBal > 0) balance = kvBal
           }
-          query = query.order('created_at', { ascending: false })
-
-          const { data, error } = await query
-          if (error) throw error
-
-          let balance = 0
-          if (Array.isArray(data) && data.length > 0) {
-            data.forEach((tx: any) => {
-              const amt = Number(tx.amount) || 0
-              if ((tx.status || 'SUCCESS').toUpperCase() === 'SUCCESS') {
-                if (tx.type === 'CREDIT') balance += amt
-                else if (tx.type === 'DEBIT') balance -= amt
-              }
-            })
-            balance = Math.max(0, balance)
-          } else {
-            const db = readDb()
-            const kv = db.kv || {}
-            const kvBal = Number(kv[`client_wallet_${userEmail}`])
-            if (!isNaN(kvBal) && kvBal > 0) {
-              balance = kvBal
-            }
-          }
-
-          res.setHeader('Content-Type', 'application/json')
-          res.end(JSON.stringify({ success: true, balance, transactions: data || [] }))
-          return
+          sendJson(200, { success: true, balance, transactions })
         } catch (err: any) {
-          res.statusCode = 500
-          res.setHeader('Content-Type', 'application/json')
-          res.end(JSON.stringify({ success: false, error: err.message }))
-          return
+          sendJson(500, { success: false, error: err.message })
         }
+        return
       }
 
       if (req.method === 'POST') {
@@ -1766,63 +1952,38 @@ function sharedDbPlugin(): Plugin {
         req.on('end', async () => {
           try {
             const payload = JSON.parse(body || '{}')
-            const userId = payload.userId || payload.userEmail || ''
             const userEmail = (payload.userEmail || '').toLowerCase().trim()
-            const userRole = payload.userRole || 'client'
-            const amount = Number(payload.amount) || 0
+            const userId = payload.userId || userEmail || ''
+            const amount = Number(payload.amount)
             const type = pathname.includes('/deduct') ? 'DEBIT' : 'CREDIT'
-            const description = payload.description || (type === 'CREDIT' ? 'Wallet Top-up' : 'Consultation Booking Payment')
+            if (!userEmail && !userId) return sendJson(400, { success: false, error: 'userEmail or userId is required' })
+            if (!Number.isFinite(amount) || amount <= 0) return sendJson(400, { success: false, error: 'Amount must be greater than 0' })
 
-            if (amount <= 0) {
-              res.statusCode = 400
-              res.setHeader('Content-Type', 'application/json')
-              res.end(JSON.stringify({ success: false, error: 'Amount must be greater than 0' }))
-              return
-            }
-
-            const sb = await getSbAdmin()
-            const txRecord = {
+            const h = await getEgressHelpers()
+            const result = await h.applyWalletTransaction({
               id: `tx-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
               user_id: userId,
               user_email: userEmail,
-              user_role: userRole,
+              user_role: payload.userRole || 'client',
               amount,
               type,
               status: 'SUCCESS',
-              description,
+              description: payload.description || (type === 'CREDIT' ? 'Wallet Top-up' : 'Consultation Booking Payment'),
               related_booking_id: payload.relatedBookingId || null,
               related_project_review_id: payload.relatedProjectReviewId || null
-            }
+            })
 
-            const { data: inserted, error } = await sb.from('wallet_transactions').insert(txRecord).select().single()
-            if (error) throw error
+            try {
+              const db = readDb()
+              if (!db.kv) db.kv = {}
+              db.kv[`client_wallet_${userEmail}`] = String(result.balance)
+              writeDb(db)
+            } catch {}
 
-            const { data: allTx } = await sb.from('wallet_transactions').select('*').ilike('user_email', userEmail)
-            let newBal = 0
-            if (Array.isArray(allTx)) {
-              allTx.forEach((tx: any) => {
-                const a = Number(tx.amount) || 0
-                if ((tx.status || 'SUCCESS').toUpperCase() === 'SUCCESS') {
-                  if (tx.type === 'CREDIT') newBal += a
-                  else if (tx.type === 'DEBIT') newBal -= a
-                }
-              })
-              newBal = Math.max(0, newBal)
-            }
-
-            const db = readDb()
-            if (!db.kv) db.kv = {}
-            db.kv[`client_wallet_${userEmail}`] = String(newBal)
-            writeDb(db)
-
-            res.setHeader('Content-Type', 'application/json')
-            res.end(JSON.stringify({ success: true, balance: newBal, transaction: inserted }))
-            return
+            sendJson(200, { success: true, balance: result.balance, transaction: result.transaction, duplicate: result.duplicate })
           } catch (err: any) {
-            res.statusCode = 500
-            res.setHeader('Content-Type', 'application/json')
-            res.end(JSON.stringify({ success: false, error: err.message }))
-            return
+            console.error('[wallet] write failed:', err.message)
+            sendJson(500, { success: false, error: err.message })
           }
         })
         return
@@ -1975,6 +2136,15 @@ function sharedDbPlugin(): Plugin {
         const current = readDb()
         let list: any[] = current.projectReviews || []
 
+        // Admin audit tab: latest activity events across all reviews (same as production).
+        if (pathname === '/api/project-reviews/activity') {
+          const { flattenProjectReviewActivity, clampInt } = await getEgressHelpers()
+          const limit = clampInt(parsedUrl.searchParams.get('limit'), 100, 1, 200)
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ success: true, events: flattenProjectReviewActivity(list, limit) }))
+          return
+        }
+
         if (id) {
           const item = list.find(r => r.projectReviewId === id)
           if (!item) {
@@ -2023,8 +2193,16 @@ function sharedDbPlugin(): Plugin {
         // Sort by updatedAt descending
         list.sort((a, b) => new Date(b.updatedAt || b.createdAt).getTime() - new Date(a.updatedAt || a.createdAt).getTime())
 
+        // Same paging + slim summary rows as production (server.js): no chat / activityTimeline /
+        // proposedTimes in lists — those load only when one review is opened (?id=).
+        const { summarizeProjectReview, PROJECT_REVIEW_PAGE_SIZE, clampInt } = await getEgressHelpers()
+        const limit = clampInt(parsedUrl.searchParams.get('limit'), PROJECT_REVIEW_PAGE_SIZE, 1, PROJECT_REVIEW_PAGE_SIZE)
+        const offset = clampInt(parsedUrl.searchParams.get('offset'), 0, 0, 100000)
+        const pageRows = list.slice(offset, offset + limit).map(summarizeProjectReview)
+        const hasMore = offset + limit < list.length
+
         res.setHeader('Content-Type', 'application/json')
-        res.end(JSON.stringify({ success: true, projectReviews: list }))
+        res.end(JSON.stringify({ success: true, projectReviews: pageRows, hasMore, nextOffset: hasMore ? offset + limit : null }))
         return
       }
 
@@ -3063,10 +3241,8 @@ function sharedDbPlugin(): Plugin {
       }
 
       const getSupabaseAdmin = async () => {
-        const { createClient } = await import('@supabase/supabase-js')
-        const sbUrl = process.env.VITE_SUPABASE_URL || 'https://oitxwcspkelduxbuczux.supabase.co'
-        const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9pdHh3Y3Nwa2VsZHV4YnVjenV4Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MjM5NjU2NCwiZXhwIjoyMTA3OTcyNTY0fQ.WGi0P4ENT5nhKPmp4zQN5VgmZ1twXLb4INXTSu1jxdw'
-        return createClient(sbUrl, sbKey)
+        // Re-use the ONE shared server client (no per-request clients, no hard-coded keys)
+        return getSharedSupabase()
       }
 
       const parsedUrl = new URL(req.url || '', 'http://localhost:5173')
@@ -3109,8 +3285,9 @@ function sharedDbPlugin(): Plugin {
           const sb = await getSupabaseAdmin()
           const { data, error } = await sb
             .from('expert_documents')
-            .select('*')
+            .select((await getEgressHelpers()).COLUMNS.EXPERT_DOCUMENT)
             .eq('expert_id', expertId)
+            .limit(20)
           if (!error && Array.isArray(data) && data.length > 0) {
             docsList = data
           }

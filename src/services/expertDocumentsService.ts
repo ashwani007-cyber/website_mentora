@@ -1,4 +1,5 @@
 import { supabase } from '../supabaseClient';
+import { COLUMNS } from '../lib/columns';
 
 export type ExpertDocType = 'work_experience_cert' | 'offer_relieving_letter' | 'executive_cv';
 
@@ -319,8 +320,9 @@ export async function fetchExpertDocuments(
     try {
       const { data, error } = await supabase
         .from('expert_documents')
-        .select('*')
-        .eq('expert_id', expertId);
+        .select(COLUMNS.EXPERT_DOCUMENT) // only real columns, never select('*')
+        .eq('expert_id', expertId)
+        .limit(20);
 
       if (!error && Array.isArray(data) && data.length > 0) {
         data.forEach((row: any) => {

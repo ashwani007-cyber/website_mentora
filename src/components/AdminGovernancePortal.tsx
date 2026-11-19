@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { supabase } from '../supabaseClient';
+import { startVisibleInterval } from '../lib/polling'; // egress-safe timers (skip hidden tabs)
 import {
   ShieldCheck,
   Briefcase,
@@ -544,6 +545,8 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
   const [rejectReasonText, setRejectReasonText] = useState("");
   const [isSubmittingAction, setIsSubmittingAction] = useState(false);
   const reconnectTimeoutRef = useRef<any>(null);
+  const reconnectAttemptRef = useRef(0); // for exponential backoff of reconnect refreshes
+  const lastForcedRefreshRef = useRef(0); // limits cache-skipping refreshes to one per 5 s
 
   // Sync local state with prop changes while avoiding overwrite of live realtime additions
   useEffect(() => {
@@ -578,12 +581,11 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
       config: { broadcast: { self: false } }
     });
 
-    // Handle incoming postgres_changes on experts table
+    // EGRESS FIX: the desk used to listen to postgres_changes on the WHOLE experts table. Supabase
+    // sends the full old + new row for every change (incl. the large `documents` column), to every
+    // open admin tab. Every KYC action (register, upload, approve, reject, delete) already sends a
+    // tiny broadcast message below, so we listen to those only and then re-read the slim list.
     channel
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'experts' }, (payload) => {
-        console.log('[REALTIME] Postgres change on experts table:', payload);
-        handleRefresh();
-      })
       // Direct Realtime Broadcast Events for Zero-Latency Cross-Browser Sync
       .on('broadcast', { event: 'expert_registered' }, (e) => {
         const p = e.payload;
@@ -667,7 +669,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
             }
             return item;
           }));
-          handleRefresh();
+          handleRefresh({ force: true }); // a broadcast means data changed → skip the cache
         }
       })
       .on('broadcast', { event: 'document_deleted' }, (e) => {
@@ -692,7 +694,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
             }
             return item;
           }));
-          handleRefresh();
+          handleRefresh({ force: true }); // a broadcast means data changed → skip the cache
         }
       })
       .on('broadcast', { event: 'expert_status_changed' }, (e) => {
@@ -719,7 +721,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
               return item;
             }));
           }
-          handleRefresh();
+          handleRefresh({ force: true }); // a broadcast means data changed → skip the cache
         }
       })
       .on('broadcast', { event: 'expert_deleted' }, (e) => {
@@ -734,12 +736,20 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
         console.log('[REALTIME] Subscription status:', status);
         if (status === 'SUBSCRIBED') {
           setRealtimeSyncStatus('connected');
+          reconnectAttemptRef.current = 0; // healthy again → reset the backoff
         } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
           setRealtimeSyncStatus('reconnecting');
-          clearTimeout(reconnectTimeoutRef.current);
-          reconnectTimeoutRef.current = setTimeout(() => {
-            handleRefresh();
-          }, 3000);
+          // EGRESS FIX: this used to refresh 3 s after EVERY error, and errors repeat on every
+          // reconnect attempt. Now: at most one pending refresh, waiting 60 s, then 2, 4, 8 min
+          // (capped at 10 min) while the errors continue. The refresh uses the 15 s cache.
+          if (!reconnectTimeoutRef.current) {
+            const delay = Math.min(60_000 * 2 ** reconnectAttemptRef.current, 10 * 60_000);
+            reconnectAttemptRef.current += 1;
+            reconnectTimeoutRef.current = setTimeout(() => {
+              reconnectTimeoutRef.current = null;
+              if (document.visibilityState === 'visible') handleRefresh();
+            }, delay);
+          }
         } else if (status === 'CLOSED') {
           setRealtimeSyncStatus('offline');
         }
@@ -748,6 +758,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
     return () => {
       console.log('[REALTIME] Cleaning up channel on unmount:', channelName);
       clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
       supabase.removeChannel(channel);
     };
   }, [activeDesk]);
@@ -792,35 +803,32 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
     [taxonomyDomains]
   );
 
-  // Auto-refresh pending verifications every 30 seconds
+  // Auto-refresh pending verifications.
+  // EGRESS FIX: was every 30 s, also in hidden tabs (Chrome still fires hidden-tab timers about once a
+  // minute, so a forgotten admin tab kept downloading the expert list all day). Now every 60 s and
+  // only while the tab is visible, through the shared 15 s cache.
   useEffect(() => {
-    const interval = setInterval(() => {
-      if (activeDesk === 'kyc') {
-        console.log('[ADMIN] Auto-refreshing pending verifications');
-        window.dispatchEvent(new Event('mongo_db_updated'));
-        setLastRefresh(new Date());
-      }
-    }, 30000); // 30 seconds
-
-    return () => clearInterval(interval);
+    if (activeDesk !== 'kyc') return;
+    const stop = startVisibleInterval(() => {
+      handleRefresh();
+    }, 60_000);
+    return stop;
   }, [activeDesk]);
 
-  // Manual refresh handler
-  const handleRefresh = async () => {
+  // Refresh handler for the KYC queue.
+  // Goes through mongoDB.getPendingVerificationsRaw → 15 s cache, so several triggers at once cause
+  // at most ONE request. { force: true } (used when a broadcast says data changed) skips the cache,
+  // but no more than once every 5 s.
+  const handleRefresh = async (opts: { force?: boolean } = {}) => {
     setIsRefreshing(true);
-    console.log('[ADMIN] Manual refresh triggered');
+    const force = opts.force === true && Date.now() - lastForcedRefreshRef.current > 5_000;
+    if (force) lastForcedRefreshRef.current = Date.now();
 
-    // Directly fetch fresh data from API
     try {
-      const url = statusFilter && statusFilter !== 'all'
-        ? `/api/admin/pending-verifications?status=${statusFilter}`
-        : '/api/admin/pending-verifications';
-
-      console.log('[ADMIN] Fetching fresh data from:', url);
-      const response = await fetch(url);
-      const data = await response.json();
-
-      console.log('[ADMIN] Fresh data received:', data);
+      const data = await mongoDB.getPendingVerificationsRaw(
+        statusFilter && statusFilter !== 'all' ? statusFilter : undefined,
+        { force }
+      );
 
       if (Array.isArray(data)) {
         // Update local state immediately
@@ -1314,16 +1322,18 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
     const loadAuthoritativeSupabaseBookings = async () => {
       try {
         const sbBookings = await fetchAllBookingsForAdmin();
-        const mapped = sbBookings
-          .filter(b => !b.deletedByAdmin && !isAdminRoleDeleted(b.id))
-          .map(b => ({
-            ...b,
-            status: b.status === 'pending' ? 'Pending Expert Acceptance' : b.status,
-            isLive: b.status?.toLowerCase().includes('live') || b.isLive === true,
-            completed: b.status?.toLowerCase().includes('complete') || b.completed === true
-          }));
-        setPlatformSessions(mapped);
-        localStorage.setItem("app_platform_sessions", JSON.stringify(mapped));
+        if (Array.isArray(sbBookings) && sbBookings.length > 0) {
+          const mapped = sbBookings
+            .filter(b => !b.deletedByAdmin && !isAdminRoleDeleted(b.id))
+            .map(b => ({
+              ...b,
+              status: b.status === 'pending' ? 'Pending Expert Acceptance' : b.status,
+              isLive: b.status?.toLowerCase().includes('live') || b.isLive === true,
+              completed: b.status?.toLowerCase().includes('complete') || b.completed === true
+            }));
+          setPlatformSessions(mapped);
+          localStorage.setItem("app_platform_sessions", JSON.stringify(mapped));
+        }
       } catch (err) {
         console.warn('[ADMIN PORTAL] Supabase initial fetch note:', err);
       }
@@ -1333,7 +1343,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
 
     // 2. Real-time subscription to Supabase bookings table
     const unsubRealtime = subscribeToBookingsRealtime({
-      channelName: 'admin-portal-bookings-realtime',
+      channelName: 'bookings-realtime-channel',
       onInsert: (newBooking) => {
         if (newBooking.deletedByAdmin || isAdminRoleDeleted(newBooking.id)) {
           return;
@@ -1341,11 +1351,13 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
         console.log('[ADMIN REALTIME] Incoming booking inserted in Supabase:', newBooking);
         setPlatformSessions(prev => {
           if (prev.some(s => s.id === newBooking.id)) return prev;
-          const isDone = newBooking.status?.toLowerCase().includes('complete') || newBooking.completed === true;
-          const isLiveNow = !isDone && (newBooking.status?.toLowerCase().includes('live') || newBooking.isLive === true);
+          const rawSt = (newBooking.status || '').toLowerCase().trim();
+          const isPendingSt = rawSt === 'pending' || rawSt.includes('pending') || rawSt === 'pending expert acceptance';
+          const isDone = !isPendingSt && (rawSt.includes('complete') || newBooking.completed === true);
+          const isLiveNow = !isPendingSt && !isDone && (rawSt.includes('live') || newBooking.isLive === true);
           const mapped = {
             ...newBooking,
-            status: newBooking.status === 'pending' ? 'Pending Expert Acceptance' : newBooking.status,
+            status: isPendingSt ? 'Pending Expert Acceptance' : newBooking.status,
             isLive: isLiveNow,
             completed: isDone,
             meetUrl: newBooking.meet_link || newBooking.meeting_link || newBooking.meetUrl || ''
@@ -1366,11 +1378,13 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
         }
         console.log('[ADMIN REALTIME] Booking status updated in Supabase:', updatedBooking);
         setPlatformSessions(prev => {
-          const isDone = updatedBooking.status?.toLowerCase().includes('complete') || updatedBooking.completed === true;
-          const isLiveNow = !isDone && (updatedBooking.status?.toLowerCase().includes('live') || updatedBooking.isLive === true);
+          const rawSt = (updatedBooking.status || '').toLowerCase().trim();
+          const isPendingSt = rawSt === 'pending' || rawSt.includes('pending') || rawSt === 'pending expert acceptance';
+          const isDone = !isPendingSt && (rawSt.includes('complete') || updatedBooking.completed === true);
+          const isLiveNow = !isPendingSt && !isDone && (rawSt.includes('live') || updatedBooking.isLive === true);
           const mapped = {
             ...updatedBooking,
-            status: updatedBooking.status === 'pending' ? 'Pending Expert Acceptance' : updatedBooking.status,
+            status: isPendingSt ? 'Pending Expert Acceptance' : updatedBooking.status,
             isLive: isLiveNow,
             completed: isDone,
             meetUrl: updatedBooking.meet_link || updatedBooking.meeting_link || updatedBooking.meetUrl || ''
@@ -1446,9 +1460,16 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
 
                         if (map.has(b.id)) {
                           const exist = map.get(b.id);
+                          const existSt = (exist.status || '').toLowerCase().trim();
+                          const incomingSt = (b.status || '').toLowerCase().trim();
+                          const existIsDecided = existSt.includes('accept') || existSt.includes('confirm') || existSt.includes('reject') || existSt.includes('decline') || existSt.includes('complete');
+                          const incomingIsPending = incomingSt.includes('pending') || incomingSt === 'pending';
+                          const finalStatus = (existIsDecided && incomingIsPending) ? exist.status : (b.status || exist.status);
+
                           map.set(b.id, {
                             ...exist,
                             ...b,
+                            status: finalStatus,
                             client: clientName !== "Corporate Client" ? clientName : (exist.client || clientName),
                             clientEmail: clientEmail || exist.clientEmail,
                             expert: expertName !== "Senior Advisor" ? expertName : (exist.expert || expertName),
@@ -1600,9 +1621,13 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
       if (!bId || isAdminRoleDeleted(bId)) return;
       console.log('[ADMIN REALTIME] Processing booking update event:', detail);
       setPlatformSessions(prev => {
-        const isDone = String(detail.status || '').toLowerCase().includes('complete') || detail.completed === true;
-        const isLiveNow = !isDone && (String(detail.status || '').toLowerCase().includes('live') || detail.isLive === true);
+        const rawDecision = String(detail.decision || detail.status || '').toLowerCase().trim();
+        const isPendingSt = rawDecision === 'pending' || rawDecision.includes('pending') || rawDecision === 'pending expert acceptance';
+        const isDone = !isPendingSt && (rawDecision.includes('complete') || detail.completed === true);
+        const isLiveNow = !isPendingSt && !isDone && (rawDecision.includes('live') || detail.isLive === true);
         const meetUrl = detail.meetUrl || detail.meet_link || detail.meeting_link || '';
+        const targetStatus = isPendingSt ? 'Pending Expert Acceptance' : (detail.decision || detail.status);
+
         const idx = prev.findIndex(s => s.id === bId);
         let next: any[];
         if (idx >= 0) {
@@ -1610,13 +1635,18 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
           next[idx] = {
             ...next[idx],
             ...detail,
-            status: detail.status || next[idx].status,
+            status: targetStatus || next[idx].status,
+            expert: detail.expertName || detail.expert || next[idx].expert,
             isLive: isLiveNow,
             completed: isDone,
             meetUrl: meetUrl || next[idx].meetUrl || ''
           };
         } else {
-          next = [normalizeBooking({ ...detail, id: bId }), ...prev];
+          next = [{
+            ...normalizeBooking({ ...detail, id: bId }),
+            status: targetStatus,
+            expert: detail.expertName || detail.expert || 'Senior Expert'
+          }, ...prev];
         }
         localStorage.setItem("app_platform_sessions", JSON.stringify(next));
         return next;
@@ -1653,10 +1683,13 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
     window.addEventListener("mongo_kv_updated", scanAllActiveSessions);
     window.addEventListener("mongo_db_updated", scanAllActiveSessions);
     window.addEventListener("app_platform_sessions_updated", scanAllActiveSessions);
-    const scanTimer = setInterval(() => {
-      scanAllActiveSessions();
-      loadAuthoritativeSupabaseBookings();
-    }, 2500);
+    // EGRESS FIX: this timer used to download ALL bookings from the server every 2.5 s, even in
+    // hidden tabs. Now:
+    //  - the local scan (reads localStorage only, no network) keeps its 2.5 s rhythm for live labels,
+    //  - the server/database reload runs every 60 s and only while the tab is visible.
+    // New/changed bookings still appear instantly through the realtime feed + BroadcastChannel above.
+    const scanTimer = setInterval(scanAllActiveSessions, 2500);
+    const stopBookingsReload = startVisibleInterval(loadAuthoritativeSupabaseBookings, 60_000);
 
     return () => {
       unsubRealtime();
@@ -1669,6 +1702,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
       window.removeEventListener("mongo_db_updated", scanAllActiveSessions);
       window.removeEventListener("app_platform_sessions_updated", scanAllActiveSessions);
       clearInterval(scanTimer);
+      stopBookingsReload();
     };
   }, []);
 
@@ -3893,7 +3927,17 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
                       </div>
                     ) : (
                       <div className="space-y-3.5">
-                        {scheduledList.map((s) => (
+                        {scheduledList.map((s) => {
+                          const sStatus = (s.status || '').toLowerCase().trim();
+                          const isPending = sStatus === 'pending' || sStatus.includes('pending') || sStatus === 'pending expert acceptance';
+                          const isRejected = !isPending && (sStatus.includes('reject') || sStatus.includes('decline'));
+                          const isCompleted = !isPending && !isRejected && (s.completed === true || sStatus.includes('complete'));
+                          const isLive = !isPending && !isRejected && !isCompleted && (s.isLive === true || sStatus.includes('live'));
+                          const isAccepted = !isPending && !isRejected && !isCompleted && (sStatus.includes('accept') || sStatus.includes('confirm') || !!s.meetUrl);
+
+                          const expertDisplayName = s.expert || s.expert_name || 'Senior Expert';
+
+                          return (
                           <div
                             key={s.id}
                             className="p-5 rounded-2xl border shadow-xl space-y-3.5 transition-all hover:border-amber-500/40"
@@ -3907,32 +3951,24 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
                                   <CalendarDays size={13} />
                                   Scheduled: {s.when}
                                 </span>
-                                {(s.isLive || s.status?.toLowerCase().includes("live")) && (
+                                {isLive && (
                                   <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-rose-500 text-white shadow-sm animate-pulse">
                                     🔴 LIVE
                                   </span>
                                 )}
                                 <span className={`text-[10px] px-2 py-0.5 rounded font-bold border ${
-                                  s.status?.toLowerCase().includes("sent") || s.meetUrl || s.status?.toLowerCase().includes("accept")
-                                    ? isLight ? "bg-emerald-100 text-emerald-900 border-emerald-300" : "bg-emerald-950 text-emerald-300 border-emerald-700"
-                                    : s.status?.toLowerCase().includes("reject") || s.status?.toLowerCase().includes("decline")
-                                      ? isLight ? "bg-rose-100 text-rose-900 border-rose-300" : "bg-rose-950 text-rose-300 border-rose-700"
-                                      : s.status?.toLowerCase().includes("pending")
-                                        ? isLight ? "bg-amber-100 text-amber-900 border-amber-300" : "bg-amber-950 text-amber-300 border-amber-800"
-                                        : isLight ? "bg-slate-100 text-slate-700 border-slate-300" : "bg-slate-800 text-slate-400 border-slate-700"
+                                  isLive
+                                    ? "bg-rose-500 text-white border-rose-600 animate-pulse"
+                                    : isAccepted
+                                      ? isLight ? "bg-emerald-100 text-emerald-900 border-emerald-300" : "bg-emerald-950 text-emerald-300 border-emerald-700"
+                                      : isRejected
+                                        ? isLight ? "bg-rose-100 text-rose-900 border-rose-300" : "bg-rose-950 text-rose-300 border-rose-700"
+                                        : isCompleted
+                                          ? isLight ? "bg-emerald-100 text-emerald-900 border-emerald-300" : "bg-emerald-950 text-emerald-300 border-emerald-700"
+                                          : isLight ? "bg-amber-100 text-amber-900 border-amber-300" : "bg-amber-950 text-amber-300 border-amber-800"
                                 }`}>
-                                  {s.status?.toLowerCase() === 'pending' ? 'Pending Expert Acceptance' : s.status}
+                                  {isLive ? "LIVE NOW" : isAccepted ? "Accepted/Confirmed" : isRejected ? "Rejected" : isCompleted ? "Completed" : "Pending Expert Acceptance"}
                                 </span>
-                                {s.status && (s.status.toLowerCase().includes("accept") || s.status.toLowerCase().includes("confirm")) && (
-                                  <span className="text-[10px] font-semibold text-emerald-400 bg-emerald-950/60 border border-emerald-500/30 px-2 py-0.5 rounded-md flex items-center gap-1 shadow-sm">
-                                    <Check size={11} className="text-emerald-400 shrink-0" /> Expert accepted this request.
-                                  </span>
-                                )}
-                                {s.status && (s.status.toLowerCase().includes("reject") || s.status.toLowerCase().includes("decline")) && (
-                                  <span className="text-[10px] font-semibold text-rose-400 bg-rose-950/60 border border-rose-500/30 px-2 py-0.5 rounded-md flex items-center gap-1 shadow-sm">
-                                    <X size={11} className="text-rose-400 shrink-0" /> Expert rejected this request.
-                                  </span>
-                                )}
                               </div>
 
                               <span className={`text-xs font-mono font-bold ${isLight ? "text-slate-700" : "text-slate-300"}`}>
@@ -3954,7 +3990,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
                                 <span className={`text-[10px] font-bold uppercase tracking-wider block ${isLight ? "text-slate-500" : "text-slate-400"}`}>
                                   Assigned Senior Expert:
                                 </span>
-                                <p className={`text-sm font-bold ${isLight ? "text-amber-800" : "text-amber-300"}`}>{s.expert}</p>
+                                <p className={`text-sm font-bold ${isLight ? "text-amber-800" : "text-amber-300"}`}>{expertDisplayName}</p>
                                 <p className={`text-[11px] font-mono mt-0.5 ${isLight ? "text-slate-500" : "text-slate-400"}`}>{s.expertEmail || "expert@registry.com"}</p>
                               </div>
                             </div>
@@ -3998,22 +4034,29 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
                                   </div>
                                 ) : (
                                   <div className="flex items-center gap-2 flex-wrap">
-                                    <span className={`text-xs flex items-center gap-1.5 ${isLight ? "text-amber-700" : "text-amber-400"}`}>
-                                      <Clock size={13} />
-                                      {s.status?.toLowerCase().includes("pending")
-                                        ? "Pending Expert Acceptance — Awaiting confirmation"
-                                        : s.status?.toLowerCase().includes("reject") || s.status?.toLowerCase().includes("decline")
-                                          ? "Consultation Request Rejected by Expert"
-                                          : "Pending Google Meet Link Generation by Expert"}
-                                    </span>
-                                    {s.status && (s.status.toLowerCase().includes("accept") || s.status.toLowerCase().includes("confirm")) && (
-                                      <span className="text-[11px] font-medium text-emerald-400 bg-emerald-950/40 border border-emerald-500/30 px-2 py-0.5 rounded flex items-center gap-1 shadow-sm">
-                                        <Check size={11} /> Expert accepted this request.
+                                    {isPending ? (
+                                      <span className={`text-xs flex items-center gap-1.5 ${isLight ? "text-amber-700" : "text-amber-400"}`}>
+                                        <Clock size={13} />
+                                        Pending Expert Acceptance — Awaiting confirmation
                                       </span>
-                                    )}
-                                    {s.status && (s.status.toLowerCase().includes("reject") || s.status.toLowerCase().includes("decline")) && (
+                                    ) : isRejected ? (
                                       <span className="text-[11px] font-medium text-rose-400 bg-rose-950/40 border border-rose-500/30 px-2 py-0.5 rounded flex items-center gap-1 shadow-sm">
-                                        <X size={11} /> Expert rejected this request.
+                                        <X size={11} className="text-rose-400 shrink-0" /> Expert {expertDisplayName} has rejected this request.
+                                      </span>
+                                    ) : isAccepted ? (
+                                      <div className="flex items-center gap-2 flex-wrap">
+                                        <span className="text-[11px] font-medium text-emerald-400 bg-emerald-950/40 border border-emerald-500/30 px-2 py-0.5 rounded flex items-center gap-1 shadow-sm">
+                                          <Check size={11} className="text-emerald-400 shrink-0" /> Expert {expertDisplayName} has accepted this request.
+                                        </span>
+                                        <span className={`text-xs flex items-center gap-1.5 ${isLight ? "text-amber-700" : "text-amber-400"}`}>
+                                          <Clock size={13} />
+                                          Pending Google Meet Link Generation by Expert
+                                        </span>
+                                      </div>
+                                    ) : (
+                                      <span className={`text-xs flex items-center gap-1.5 ${isLight ? "text-slate-600" : "text-slate-400"}`}>
+                                        <Clock size={13} />
+                                        {s.status}
                                       </span>
                                     )}
                                   </div>
@@ -4023,13 +4066,25 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
                               <div className="flex items-center gap-2">
                                 <button
                                   onClick={() => handleStartLiveMeeting(s.id)}
-                                  className="px-3 py-1.5 rounded-lg text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white cursor-pointer shadow flex items-center gap-1.5 transition-all"
+                                  disabled={!isAccepted && !isLive}
+                                  className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all shadow ${
+                                    isAccepted || isLive
+                                      ? "bg-rose-600 hover:bg-rose-500 text-white cursor-pointer"
+                                      : "bg-slate-700/50 text-slate-400 border border-slate-600/30 cursor-not-allowed opacity-50"
+                                  }`}
+                                  title={isAccepted || isLive ? "Launch Live Now" : "Available only after expert accepts"}
                                 >
                                   <Play size={12} /> Launch Live Now
                                 </button>
                                 <button
                                   onClick={() => handleMarkSessionCompleted(s.id)}
-                                  className="px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer shadow flex items-center gap-1.5 transition-all"
+                                  disabled={!isAccepted && !isLive}
+                                  className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all shadow ${
+                                    isAccepted || isLive
+                                      ? "bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer"
+                                      : "bg-slate-700/50 text-slate-400 border border-slate-600/30 cursor-not-allowed opacity-50"
+                                  }`}
+                                  title={isAccepted || isLive ? "Mark Completed" : "Available only after expert accepts"}
                                 >
                                   <Check size={12} /> Mark Completed
                                 </button>
@@ -4045,7 +4100,8 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
                               </div>
                             </div>
                           </div>
-                        ))}
+                        );
+                      })}
                       </div>
                     )}
                   </div>

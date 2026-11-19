@@ -1,7 +1,8 @@
 // Temporary stub service to maintain compatibility while migrating to Supabase
 // This service bridges the old MongoDB API calls to new Supabase services
 import { supabase } from './supabaseClient';
-import { expertiseService } from './services/supabaseExpertiseService';
+import { expertiseService, getExpertSlimByKey } from './services/supabaseExpertiseService';
+import { cached, invalidate } from './lib/requestCache';
 import { notificationService } from './services/supabaseNotificationService';
 import type { AvailabilityStatus } from './types';
 
@@ -84,7 +85,8 @@ const mapAvailability = (slot: any): ExpertAvailabilityDoc => ({
 
 // Stub implementation to maintain API compatibility
 export const mongoDB = {
-  async getExperts(): Promise<any[]> {
+  // Slim + cached list (see supabaseExpertiseService). { force: true } skips the cache.
+  async getExperts(opts: { force?: boolean } = {}): Promise<any[]> {
     const mapExpert = (expert: any) => {
       const isVerified = Boolean(expert.verified === true);
       const status = isVerified ? 'approved' : (expert.verificationStatus || expert.documents?.verificationStatus || 'pending');
@@ -106,7 +108,7 @@ export const mongoDB = {
       };
     };
 
-    const remote = await expertiseService.getExperts();
+    const remote = await expertiseService.getExperts(opts);
     if (remote.length > 0) return remote.map(mapExpert);
 
     try {
@@ -118,15 +120,36 @@ export const mongoDB = {
     }
   },
 
-  async getPendingVerifications(status?: string): Promise<any[]> {
+  // Admin KYC queue. Cached for 60 s and shared between callers so several components asking
+  // at once cause ONE request. { force: true } skips the cache (e.g. right after approve/reject).
+  // Raw KYC queue exactly as the server returns it (all statuses, incl. rejected), through the
+  // same 15 s cache. Used by the admin KYC desk so its refreshes never bypass the cache.
+  async getPendingVerificationsRaw(status?: string, opts: { force?: boolean } = {}): Promise<any[]> {
+    const url = status ? `/api/admin/pending-verifications?status=${status}` : '/api/admin/pending-verifications';
+    const cacheKey = `pending:${status || 'all'}`;
+    if (opts.force) invalidate(cacheKey);
+    // 60 s: the KYC desk timer and the app timer both ask once a minute; a broadcast or your own
+    // save forces a fresh read, so the queue is never stale after a change.
+    const data = await cached(cacheKey, 60_000, async () => {
+      // The server only answers this admin route when the admin session token is sent.
+      // (Before, no token was sent → HTTP 403 every time → the app fell back to downloading the
+      // whole local db.json, about 2.5 MB, on every refresh.)
+      let adminToken = '';
+      try {
+        adminToken = localStorage.getItem('admin_token') || sessionStorage.getItem('admin_token') || localStorage.getItem('admin_session_token') || '';
+      } catch {}
+      const response = await fetch(url, adminToken ? { headers: { 'x-admin-token': adminToken } } : undefined);
+      if (!response.ok) throw new Error(`pending-verifications HTTP ${response.status}`);
+      return response.json();
+    });
+    return Array.isArray(data) ? data : [];
+  },
+
+  async getPendingVerifications(status?: string, opts: { force?: boolean } = {}): Promise<any[]> {
     try {
-      const url = status ? `/api/admin/pending-verifications?status=${status}` : '/api/admin/pending-verifications';
-      const response = await fetch(url);
-      if (response.ok) {
-        const data = await response.json();
-        if (Array.isArray(data)) {
-          return data.filter((e: any) => !e.verified && e.verificationStatus !== 'approved');
-        }
+      const data = await this.getPendingVerificationsRaw(status, opts);
+      if (Array.isArray(data)) {
+        return data.filter((e: any) => !e.verified && e.verificationStatus !== 'approved');
       }
     } catch (err) {
       console.error('[AUDIT] Error fetching pending verifications from API:', err);
@@ -173,18 +196,14 @@ export const mongoDB = {
     return fallback.filter((e: any) => !e.verified && e.verificationStatus !== 'approved');
   },
 
-  async getAuditStatus(id: string): Promise<any> {
+  async getAuditStatus(id: string, opts: { force?: boolean } = {}): Promise<any> {
     try {
       const key = (id || '').trim().toLowerCase();
       if (!key) return { success: false, status: null };
 
-      // 1. Query Supabase experts table (authoritative single source of truth)
-      const { data } = await supabase
-        .from('experts')
-        .select('*')
-        .or(`id.eq.${key},email.ilike.${key}`);
-
-      const expert = Array.isArray(data) && data.length > 0 ? data[0] : null;
+      // 1. Query Supabase experts table (authoritative single source of truth).
+      //    Slim (no base64 documents) and cached for 15 s — see getExpertSlimByKey.
+      const expert: any = await getExpertSlimByKey(key, opts);
       if (expert) {
         const isVerified = Boolean(expert.verified === true);
         const status = isVerified ? 'approved' : (expert.verificationStatus || expert.documents?.verificationStatus || 'pending');
@@ -416,16 +435,48 @@ export const mongoDB = {
   },
 
   // Project Reviews
+  // Project review LISTS. The server sends small summary rows (no chat / activity timeline) in
+  // pages of 20. We follow `nextOffset` until every page is loaded (max 10 pages = 200 reviews),
+  // so the lists stay complete. Full details load only when one review is opened (?id=…).
   async getProjectReviews(filters: any) {
     try {
-      const params = new URLSearchParams(filters);
-      const response = await fetch(`/api/project-reviews?${params}`);
+      // Drop empty filters so the URL never contains "clientId=undefined".
+      const clean: Record<string, string> = {};
+      for (const [k, v] of Object.entries(filters || {})) {
+        if (v !== undefined && v !== null && v !== '') clean[k] = String(v);
+      }
+      if (clean.id) {
+        const response = await fetch(`/api/project-reviews?${new URLSearchParams(clean)}`);
+        if (!response.ok) return [];
+        const data = await response.json();
+        return data?.projectReview ? [data.projectReview] : [];
+      }
+
+      const all: any[] = [];
+      let offset = 0;
+      for (let page = 0; page < 10; page++) {
+        const params = new URLSearchParams({ ...clean, offset: String(offset) });
+        const response = await fetch(`/api/project-reviews?${params}`);
+        if (!response.ok) break;
+        const data = await response.json();
+        const rows = Array.isArray(data) ? data : Array.isArray(data?.projectReviews) ? data.projectReviews : [];
+        all.push(...rows);
+        if (!data?.hasMore || data?.nextOffset == null) break;
+        offset = data.nextOffset;
+      }
+      return all;
+    } catch {
+      return [];
+    }
+  },
+
+  // Latest audit events across all project reviews (admin audit tab), computed on the server.
+  async getProjectReviewActivity(limit = 100): Promise<any[]> {
+    try {
+      const response = await fetch(`/api/project-reviews/activity?limit=${limit}`);
       if (!response.ok) return [];
       const data = await response.json();
-      if (Array.isArray(data)) return data;
-      if (Array.isArray(data?.projectReviews)) return data.projectReviews;
-      if (data?.projectReview) return [data.projectReview];
-      return [];
+      return Array.isArray(data?.events) ? data.events : [];
     } catch {
       return [];
     }
