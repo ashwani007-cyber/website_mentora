@@ -1,7 +1,7 @@
 // Supabase Client for Frontend (React)
 // ---------------------------------------------------------------------------
 // This is the ONE shared Supabase client for the whole browser app.
-// Every file must import { supabase } from here (src/kyc/supabaseClient.ts re-exports it).
+// Every file must import { supabase } from here.
 // Creating several clients wastes memory, duplicates auth token refreshes and causes
 // "Multiple GoTrueClient instances" warnings.
 //

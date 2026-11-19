@@ -2677,8 +2677,16 @@ app.post('/api/wallet/deduct', (req, res) => handleWalletWrite(req, res, 'DEBIT'
 // ============================================================
 // START SERVER
 // ============================================================
-app.listen(PORT, () => {
-  console.log(`✅ Server running on http://localhost:${PORT}`);
-  console.log(`✅ Supabase connected`);
-  console.log(`✅ API endpoints ready`);
-});
+// On Vercel the app runs as a serverless function (api/index.js imports it), so it must NOT
+// open its own port there. Locally (`npm run server`) it listens as before.
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`✅ Server running on http://localhost:${PORT}`);
+    console.log(`✅ Supabase connected`);
+    console.log(`✅ API endpoints ready`);
+  });
+}
+
+// Vercel entry point (api/index.js) imports this. Before, nothing was exported, so the deployed
+// /api/... routes could not work and the site silently fell back to direct Supabase calls.
+export default app;
