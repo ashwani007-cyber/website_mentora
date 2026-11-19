@@ -120,7 +120,7 @@ export const mongoDB = {
     }
   },
 
-  // Admin KYC queue. Cached for 15 s and shared between callers so several components asking
+  // Admin KYC queue. Cached for 60 s and shared between callers so several components asking
   // at once cause ONE request. { force: true } skips the cache (e.g. right after approve/reject).
   // Raw KYC queue exactly as the server returns it (all statuses, incl. rejected), through the
   // same 15 s cache. Used by the admin KYC desk so its refreshes never bypass the cache.
@@ -128,8 +128,17 @@ export const mongoDB = {
     const url = status ? `/api/admin/pending-verifications?status=${status}` : '/api/admin/pending-verifications';
     const cacheKey = `pending:${status || 'all'}`;
     if (opts.force) invalidate(cacheKey);
-    const data = await cached(cacheKey, 15_000, async () => {
-      const response = await fetch(url);
+    // 60 s: the KYC desk timer and the app timer both ask once a minute; a broadcast or your own
+    // save forces a fresh read, so the queue is never stale after a change.
+    const data = await cached(cacheKey, 60_000, async () => {
+      // The server only answers this admin route when the admin session token is sent.
+      // (Before, no token was sent → HTTP 403 every time → the app fell back to downloading the
+      // whole local db.json, about 2.5 MB, on every refresh.)
+      let adminToken = '';
+      try {
+        adminToken = localStorage.getItem('admin_token') || sessionStorage.getItem('admin_token') || localStorage.getItem('admin_session_token') || '';
+      } catch {}
+      const response = await fetch(url, adminToken ? { headers: { 'x-admin-token': adminToken } } : undefined);
       if (!response.ok) throw new Error(`pending-verifications HTTP ${response.status}`);
       return response.json();
     });

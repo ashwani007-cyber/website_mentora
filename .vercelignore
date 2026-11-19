@@ -1,0 +1,8 @@
+# Files that must never be uploaded to Vercel (personal data, local backups, dev-only files).
+db.json
+db.json.backup
+backups/
+scratch/
+server_docs/
+archive/
+error.md

@@ -99,6 +99,11 @@ app.use('/api/domains', (req, res, next) => {
 });
 
 app.get('/api/db', (req, res) => {
+  // SECURITY: this returns the WHOLE local db.json (emails, bookings, notifications…). It exists only
+  // for local development. In production (Vercel) it must never be reachable.
+  if (process.env.VERCEL || process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ success: false, error: 'Not available' });
+  }
   try {
     const dbPath = path.resolve(__dirname, 'db.json');
     if (fs.existsSync(dbPath)) {
@@ -2567,6 +2572,10 @@ app.get('/api/payment/status/:orderId', async (req, res) => {
 app.get('/api/kv', (req, res) => {
   try {
     const key = req.query.key;
+    // SECURITY: listing ALL keys exposes every user's local session data — dev only.
+    if (!key && (process.env.VERCEL || process.env.NODE_ENV === 'production')) {
+      return res.status(400).json({ success: false, error: 'key is required' });
+    }
     const db = readDb();
     const kv = db.kv || {};
     if (key) {

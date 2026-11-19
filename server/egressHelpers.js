@@ -156,10 +156,10 @@ export async function fetchExpertsListCached({ force = false } = {}) {
 /** HTTP cache header for the expert list: shared CDN copy for 60 s, then refreshed in the background. */
 export const EXPERTS_LIST_CACHE_HEADER = 'public, max-age=0, s-maxage=60, stale-while-revalidate=300';
 
-/** Unverified experts for the admin KYC queue, slim. Cached 10 s. */
+/** Unverified experts for the admin KYC queue, slim. Cached 30 s (cleared on every write). */
 export async function fetchUnverifiedExpertsSlim({ force = false } = {}) {
   if (force) clearMemo('experts:');
-  return memo('experts:unverified', 10_000, async () => {
+  return memo('experts:unverified', 30_000, async () => {
     const { data, error } = await supabase.rpc('get_unverified_experts', undefined, { get: true });
     if (!error) return Array.isArray(data) ? data : [];
     if (!isMissingFunction(error)) throw error;
