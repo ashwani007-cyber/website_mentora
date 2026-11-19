@@ -1,9 +1,9 @@
 import fs from 'fs';
 import path from 'path';
-import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import bcrypt from 'bcryptjs';
 import { supabase } from './supabaseClient.js';
+import { createAdminToken, createPublicToken, getRequestToken, hashAdminToken, normalizeEmail, readActor, sessionExpiresAt } from './session.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -15,12 +15,14 @@ const ADMIN_EMAILS = [
 ];
 
 function isAdminEmail(email = '') {
-  return ADMIN_EMAILS.includes(String(email).toLowerCase().trim());
+  const configured = process.env.MENTORA_ADMIN_EMAILS?.split(',').map(normalizeEmail);
+  return (configured || ADMIN_EMAILS).includes(normalizeEmail(email));
 }
 
 function sendJson(res, status, payload) {
   res.statusCode = status;
   res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Cache-Control', 'no-store');
   res.end(JSON.stringify(payload));
 }
 
@@ -53,14 +55,10 @@ function readLocalDb() {
   }
 }
 
-function writeLocalDb(db) {
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf-8');
-}
-
 function publicUser(user, extras = {}) {
   const name = user.full_name || user.fullName || user.name || extras.name || '';
   const role = user.role || extras.role || 'client';
-  const token = role === 'admin' ? (extras.token || crypto.randomBytes(24).toString('hex')) : extras.token;
+  const token = extras.token;
   const isVerified = Boolean(user.verified === true || extras.verified === true || user.is_verified === true || extras.is_verified === true);
   const status = isVerified ? 'approved' : (user.verificationStatus || extras.verificationStatus || 'pending');
   return {
@@ -76,7 +74,7 @@ function publicUser(user, extras = {}) {
     bio: user.bio || extras.bio || '',
     years: extras.years ?? user.years ?? 0,
     baseRate: extras.baseRate ?? user.baseRate ?? 600,
-    projectRate: extras.projectRate ?? user.projectRate ?? 1000,
+    projectRate: extras.projectRate ?? extras.project_rate ?? user.projectRate ?? 1500,
     verified: isVerified,
     is_verified: isVerified,
     verificationStatus: status,
@@ -96,7 +94,7 @@ function loginPayload(user, extras = {}) {
 
 async function passwordsMatch(password, user) {
   if (!user) return false;
-  if (user.password_hash) return bcrypt.compare(password, user.password_hash);
+  if (user.password_hash) return user.password_hash.startsWith('$2') ? bcrypt.compare(password, user.password_hash) : user.password_hash === password;
   if (user.password) {
     if (String(user.password).startsWith('$2')) return bcrypt.compare(password, user.password);
     return user.password === password;
@@ -104,346 +102,168 @@ async function passwordsMatch(password, user) {
   return false;
 }
 
-function findLocalUser(email, phone) {
-  const db = readLocalDb();
-  const cleanEmail = String(email || '').toLowerCase().trim();
-  const phoneDigits = String(phone || '').replace(/\D/g, '');
-  const user = db.users.find((entry) => {
-    const entryEmail = String(entry.email || '').toLowerCase().trim();
-    if (cleanEmail && entryEmail === cleanEmail) return true;
-    if (phoneDigits && phoneDigits.length >= 8) {
-      const entryDigits = String(entry.phone || '').replace(/\D/g, '');
-      if (entryDigits && entryDigits.length >= 8 && entryDigits === phoneDigits) return true;
-    }
-    return false;
-  });
-  return { db, user };
+function result(status, error) {
+  return { status, body: { success: false, error, message: error } };
 }
 
-function upsertLocalUser(user) {
-  const db = readLocalDb();
-  const idx = db.users.findIndex((entry) => String(entry.email || '').toLowerCase() === String(user.email).toLowerCase());
-  if (idx >= 0) db.users[idx] = { ...db.users[idx], ...user };
-  else db.users.push(user);
-  writeLocalDb(db);
-  return user;
+function signedIn(user, extras = {}) {
+  const profile = publicUser(user, extras);
+  const token = extras.token || createPublicToken(profile);
+  return { status: 200, body: loginPayload(user, { ...extras, token }) };
 }
 
-function upsertLocalExpert(expert) {
-  const db = readLocalDb();
-  if (!Array.isArray(db.experts)) db.experts = [];
-  const idx = db.experts.findIndex((entry) => String(entry.email || '').toLowerCase() === String(expert.email).toLowerCase() || (expert.id && entry.id === expert.id));
-  if (idx >= 0) db.experts[idx] = { ...db.experts[idx], ...expert };
-  else db.experts.unshift(expert);
-  writeLocalDb(db);
-  return expert;
-}
+async function startAdminSession(email, password, registration = false) {
+  const { data: credentials, error } = await supabase.from('admin_credentials')
+    .select('password_hash').eq('email', email).maybeSingle();
+  if (error) throw error;
+  if (credentials && registration) return result(409, 'Account already registered. Please sign in.');
 
-function upsertLocalPending(pending) {
-  const db = readLocalDb();
-  if (!Array.isArray(db.pendingVerifications)) db.pendingVerifications = [];
-  const idx = db.pendingVerifications.findIndex((entry) => String(entry.email || '').toLowerCase() === String(pending.email).toLowerCase() || (pending.id && entry.id === pending.id));
-  if (idx >= 0) db.pendingVerifications[idx] = { ...db.pendingVerifications[idx], ...pending };
-  else db.pendingVerifications.unshift(pending);
-  writeLocalDb(db);
-  return pending;
+  const { data: user, error: userError } = await supabase.from('users')
+    .select('id, email, role, full_name, password_hash').eq('email', email).maybeSingle();
+  if (userError) throw userError;
+  const legacy = readLocalDb().users.find(entry => normalizeEmail(entry.email) === email && entry.role === 'admin');
+  const hash = credentials?.password_hash || user?.password_hash || legacy?.password_hash || process.env.MENTORA_ADMIN_INITIAL_PASSWORD_HASH;
+  if (!hash || !hash.startsWith('$2') || !await bcrypt.compare(password, hash)) {
+    return result(401, 'Invalid administrator credentials');
+  }
+
+  const token = createAdminToken();
+  const session = { current_token_hash: hashAdminToken(token), session_expires_at: sessionExpiresAt(), last_login: new Date().toISOString() };
+  const write = credentials
+    ? await supabase.from('admin_credentials').update(session).eq('email', email).eq('password_hash', hash).select('email').maybeSingle()
+    : await supabase.from('admin_credentials').insert({ email, password_hash: hash, ...session }).select('email').single();
+  if (write.error?.code === '23505') return result(409, 'Administrator account initialized. Please sign in.');
+  if (write.error) throw write.error;
+  if (!write.data) return result(409, 'Administrator credentials changed. Please sign in again.');
+  return signedIn({ ...user, id: user?.id || email, email, role: 'admin' }, { token });
 }
 
 async function registerUser(payload) {
-  const email = String(payload.email || '').toLowerCase().trim();
+  const email = normalizeEmail(payload.email);
   const password = String(payload.password || '');
-  const fullName = payload.fullName || payload.full_name || payload.name || '';
+  const fullName = String(payload.fullName || payload.full_name || payload.name || '').trim();
   const phone = String(payload.phone || '').trim();
-  let role = String(payload.role || 'client').toLowerCase();
-  if (isAdminEmail(email)) role = 'admin';
+  const requestedRole = String(payload.role || 'client').toLowerCase();
+  if (!email || !password) return result(400, 'Email and password are required');
+  if (isAdminEmail(email)) return startAdminSession(email, password, true);
+  if (!['admin', 'expert', 'client'].includes(requestedRole)) return result(400, 'Invalid role selected');
+  const role = requestedRole === 'expert' ? 'expert' : 'client';
+  if (phone && phone.replace(/\D/g, '').length < 8) return result(400, 'Please enter a valid phone number (at least 8 digits)');
 
-  if (!email || !password) {
-    return { status: 400, body: { success: false, error: 'Email and password are required', message: 'Email and password are required.' } };
-  }
-  if (!['admin', 'expert', 'client'].includes(role)) {
-    return { status: 400, body: { success: false, error: 'Invalid role', message: 'Invalid role selected.' } };
-  }
-
-  // Validate phone format if provided
-  if (phone && phone.replace(/\D/g, '').length < 8) {
-    return { status: 400, body: { success: false, error: 'Invalid phone', message: 'Please enter a valid phone number (at least 8 digits).' } };
-  }
+  const existing = await supabase.from('users').select('id').eq('email', email).maybeSingle();
+  if (existing.error) throw existing.error;
+  if (existing.data) return result(409, 'Account already registered. Please sign in.');
+  const legacy = readLocalDb().users.find(entry => normalizeEmail(entry.email) === email);
+  if (legacy) return result(409, 'Account already registered. Please sign in.');
 
   const passwordHash = await bcrypt.hash(password, 10);
-  const expertId = payload.id || `exp-${Date.now()}`;
-  const localRecord = {
-    id: role === 'expert' ? expertId : (payload.id || `usr-${Date.now()}`),
-    email,
-    password_hash: passwordHash,
-    name: fullName,
-    full_name: fullName,
-    role,
-    phone,
-    company: payload.company || '',
-    title: payload.title || (role === 'expert' ? 'Senior Executive Advisor' : ''),
-    field: payload.field || (role === 'expert' ? 'Finance & Taxation' : ''),
-    bio: payload.bio || '',
-    years: Number(payload.years) || 0,
-    baseRate: Number(payload.baseRate) || 600,
-    projectRate: Number(payload.projectRate) || 1000,
-    verified: false,
-    is_verified: false,
-    verificationStatus: 'pending',
-    createdAt: new Date().toISOString()
-  };
+  const { data, error } = await supabase.auth.admin.createUser({
+    email, password, email_confirm: true, user_metadata: { full_name: fullName, role, phone }
+  });
+  if (error?.code === 'email_exists' || error?.code === 'user_already_exists') return result(409, 'Account already registered. Please sign in.');
+  if (error) throw error;
 
-  // 1. Check duplicate registrations in local DB
-  const { user: existingLocal } = findLocalUser(email, phone);
-  if (existingLocal) {
-    const digitsA = phone ? String(phone).replace(/\D/g, '') : '';
-    const digitsB = existingLocal.phone ? String(existingLocal.phone).replace(/\D/g, '') : '';
-    const isSamePhone = Boolean(digitsA && digitsB && digitsA.length >= 8 && digitsA === digitsB);
-    const valid = await passwordsMatch(password, existingLocal);
-    if (valid) {
-      upsertLocalUser({ ...existingLocal, ...localRecord, id: existingLocal.id });
-      return {
-        status: 200,
-        body: {
-          ...loginPayload(existingLocal, localRecord),
-          alreadyRegistered: true,
-          message: 'Account already registered. Logging in to portal...'
-        }
-      };
+  const initialRate = Number(payload.baseRate ?? 600);
+  const baseRate = Number.isFinite(initialRate) ? Math.min(1000, Math.max(0, initialRate)) : 600;
+  const { data: user, error: profileError } = await supabase.rpc('register_mentora_profile', {
+    p_user: {
+      id: data.user.id, email, role, full_name: fullName, password_hash: passwordHash,
+      phone, company: String(payload.company || ''), field: String(payload.field || ''),
+      title: String(payload.title || 'Senior Executive Advisor'), years: Math.max(0, Math.trunc(Number(payload.years) || 0)),
+      bio: String(payload.bio || ''), base_rate: baseRate
     }
-    const dupField = isSamePhone ? 'phone number' : 'email address';
-    return {
-      status: 409,
-      body: {
-        success: false,
-        error: 'User already exists',
-        message: `An account with this ${dupField} is already registered. Please sign in with your password.`
-      }
-    };
-  }
-
-  // 2. Check Supabase Auth and remote database
-  let authUserId = null;
-  try {
-    const { data: authCreated, error: authCreateErr } = await supabase.auth.admin.createUser({
-      email,
-      password,
-      email_confirm: true,
-      user_metadata: { full_name: fullName, role, phone }
-    });
-    if (authCreated?.user?.id) {
-      authUserId = authCreated.user.id;
-      localRecord.id = authUserId;
-      localRecord.user_id = authUserId;
-    } else if (authCreateErr && authCreateErr.message?.toLowerCase().includes('already')) {
-      // User already in Supabase Auth
+  });
+  if (profileError) {
+    // A database error with a SQLSTATE rolled back the profile transaction.
+    if (/^[0-9]{2}[0-9A-Z]{3}$/.test(profileError.code || '') || profileError.code === 'PGRST202') {
+      const cleanup = await supabase.auth.admin.deleteUser(data.user.id);
+      if (cleanup.error) console.error('[auth] Could not remove incomplete registration:', cleanup.error.code);
     }
-  } catch (authErr) {
-    console.warn('[AUTH] Supabase Auth creation note:', authErr.message);
+    if (profileError.code === '23505') return result(409, 'An account with this email or phone number already exists');
+    throw profileError;
   }
-
-  // 1. Insert/upsert into users table first so foreign keys (experts_user_id_fkey) are satisfied
-  let userRowCreated = false;
-  try {
-    const { error: sbUserError } = await supabase.from('users').upsert({
-      id: (authUserId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(authUserId)) ? authUserId : undefined,
-      email,
-      password_hash: passwordHash,
-      full_name: fullName,
-      role,
-      phone: phone || null,
-      is_verified: false
-    }, { onConflict: 'email' });
-    if (sbUserError) {
-      console.error('[AUTH] Supabase users upsert error:', sbUserError);
-    } else {
-      userRowCreated = true;
-    }
-  } catch (sbUserErr) {
-    console.error('[AUTH] Supabase users upsert error:', sbUserErr);
-  }
-
-  try {
-    if (role === 'expert') {
-      const expertRecord = {
-        id: localRecord.id,
-        user_id: localRecord.id,
-        name: fullName,
-        field: payload.field || 'Finance & Taxation',
-        years_of_experience: Number(payload.years) || 0,
-        years: Number(payload.years) || 0,
-        company: payload.company || '',
-        base_rate: Number(payload.baseRate) || 600,
-        baseRate: Number(payload.baseRate) || 600,
-        admin_markup: 150,
-        adminMarkup: 150,
-        rate: (Number(payload.baseRate) || 600) + 150,
-        project_rate: Number(payload.projectRate) || 1000,
-        projectRate: Number(payload.projectRate) || 1000,
-        rating: 0,
-        total_sessions: 0,
-        sessions: 0,
-        verified: false,
-        is_verified: false,
-        verificationStatus: 'pending',
-        initials: fullName.split(' ').map((n) => n[0]).join('').toUpperCase().slice(0, 2) || 'EX',
-        title: payload.title || 'Senior Executive Advisor',
-        phone: phone || '',
-        email,
-        bio: payload.bio || '',
-        skills: [payload.field || 'Finance & Taxation'],
-        documents: {
-          status: 'pending',
-          verificationStatus: 'pending',
-          items: {}
-        },
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      };
-
-      const pendingRecord = {
-        id: localRecord.id,
-        expertId: localRecord.id,
-        name: fullName,
-        email,
-        phone: phone || '',
-        field: payload.field || 'Finance & Taxation',
-        company: payload.company || '',
-        title: payload.title || 'Senior Executive Advisor',
-        years: Number(payload.years) || 0,
-        baseRate: Number(payload.baseRate) || 600,
-        projectRate: Number(payload.projectRate) || 1000,
-        bio: payload.bio || '',
-        status: 'Pending Audit',
-        verificationStatus: 'pending',
-        verified: false,
-        is_verified: false,
-        submittedAt: new Date().toISOString(),
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        documents: {}
-      };
-
-      upsertLocalExpert(expertRecord);
-      upsertLocalPending(pendingRecord);
-
-      try {
-        const targetUserId = (userRowCreated && authUserId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(authUserId)) ? authUserId : null;
-        const { error: sbExpError } = await supabase.from('experts').upsert({
-          id: localRecord.id,
-          user_id: targetUserId,
-          name: fullName,
-          field: payload.field || 'Finance & Taxation',
-          years_of_experience: Number(payload.years) || 0,
-          base_rate: Number(payload.baseRate) || 600,
-          admin_markup: 150,
-          rate: (Number(payload.baseRate) || 600) + 150,
-          project_rate: Number(payload.projectRate) || 1000,
-          rating: 0,
-          total_sessions: 0,
-          verified: false,
-          initials: fullName.split(' ').map((n) => n[0]).join('').toUpperCase().slice(0, 2) || 'EX',
-          title: payload.title || 'Senior Executive Advisor',
-          phone: phone || null,
-          email,
-          bio: payload.bio || '',
-          skills: [payload.field || 'Finance & Taxation'],
-          documents: {
-            status: 'pending',
-            verificationStatus: 'pending',
-            is_verified: false,
-            company: payload.company || '',
-            items: {}
-          }
-        }, { onConflict: 'id' });
-        if (sbExpError) {
-          console.error('[AUTH] Supabase experts upsert error:', sbExpError);
-        }
-      } catch (sbExpErr) {
-        console.error('[AUTH] Supabase experts upsert error:', sbExpErr);
-      }
-    }
-
-    upsertLocalUser(localRecord);
-    return {
-      status: 200,
-      body: {
-        success: true,
-        message: 'Account registered successfully.',
-        user: publicUser(localRecord, localRecord),
-        token: publicUser(localRecord, localRecord).token || null
-      }
-    };
-  } catch (err) {
-    upsertLocalUser(localRecord);
-    return {
-      status: 200,
-      body: {
-        success: true,
-        message: 'Account registered successfully.',
-        user: publicUser(localRecord, localRecord),
-        token: publicUser(localRecord, localRecord).token || null
-      }
-    };
-  }
+  const response = signedIn(user, { title: payload.title, years: Number(payload.years) || 0, baseRate, projectRate: 1500 });
+  response.body.message = 'Account registered successfully.';
+  return response;
 }
 
 async function loginUser(payload) {
-  const email = String(payload.email || '').toLowerCase().trim();
+  const email = normalizeEmail(payload.email);
   const password = String(payload.password || '');
-  if (!email || !password) {
-    return { status: 400, body: { success: false, error: 'Email and password are required', message: 'Email and password are required' } };
+  if (!email || !password) return result(400, 'Email and password are required');
+  if (isAdminEmail(email)) return startAdminSession(email, password);
+
+  const { data: user, error } = await supabase.from('users')
+    .select('id, email, full_name, phone, company, field, password_hash, role, is_verified, bio')
+    .eq('email', email).maybeSingle();
+  if (error) throw error;
+  if (!user) return result(404, 'Account not found. Please register first.');
+  if (!['client', 'expert'].includes(user.role) || !await passwordsMatch(password, user)) return result(401, 'Invalid credentials');
+  return finishPublicLogin(user, password);
+}
+
+async function finishPublicLogin(user, password) {
+  const update = { last_login: new Date().toISOString() };
+  if (password && !user.password_hash?.startsWith('$2')) update.password_hash = await bcrypt.hash(password, 10);
+  const { error } = await supabase.from('users').update(update).eq('id', user.id);
+  if (error) throw error;
+  if (user.role !== 'expert') return signedIn(user);
+  const expert = await supabase.from('experts').select('id, name, email, verified, title, field, base_rate, project_rate, years_of_experience')
+    .eq('email', user.email).maybeSingle();
+  if (expert.error) throw expert.error;
+  return signedIn(user, { ...expert.data, baseRate: expert.data?.base_rate, years: expert.data?.years_of_experience });
+}
+
+async function exchangeSupabaseSession(req) {
+  const token = getRequestToken(req);
+  if (!token) return result(401, 'Sign in first');
+  const { data, error } = await supabase.auth.getUser(token);
+  if (error || !data?.user?.email) return result(401, 'Invalid session');
+  const { data: user, error: profileError } = await supabase.from('users')
+    .select('id, email, full_name, phone, company, field, role, is_verified, bio')
+    .eq('id', data.user.id).eq('email', normalizeEmail(data.user.email)).maybeSingle();
+  if (profileError) throw profileError;
+  if (!user || isAdminEmail(user.email) || !['client', 'expert'].includes(user.role)) return result(403, 'No matching portal account');
+  return finishPublicLogin(user);
+}
+
+async function changeAdminPassword(req, payload) {
+  const actor = await readActor(req);
+  if (actor?.role !== 'admin') return result(403, 'Administrator session required');
+  const { currentPassword, newPassword, confirmPassword } = payload;
+  if (typeof newPassword !== 'string' || newPassword.length < 6 || (confirmPassword !== undefined && confirmPassword !== newPassword)) {
+    return result(400, 'Enter a matching password with at least 6 characters');
   }
+  const currentHash = hashAdminToken(getRequestToken(req));
+  const row = await supabase.from('admin_credentials').select('password_hash').eq('email', actor.email)
+    .eq('current_token_hash', currentHash).maybeSingle();
+  if (row.error) throw row.error;
+  if (!row.data || !await bcrypt.compare(String(currentPassword || ''), row.data.password_hash)) return result(401, 'Current password is incorrect');
+  const token = createAdminToken();
+  const write = await supabase.from('admin_credentials').update({
+    password_hash: await bcrypt.hash(newPassword, 12), current_token_hash: hashAdminToken(token),
+    session_expires_at: sessionExpiresAt(), password_changed_at: new Date().toISOString()
+  }).eq('email', actor.email).eq('current_token_hash', currentHash).select('email').maybeSingle();
+  if (write.error) throw write.error;
+  return write.data ? signedIn(actor, { token }) : result(409, 'Session changed. Please sign in again.');
+}
 
-  const { user: localUser, db } = findLocalUser(email);
-  const localExpert = (db?.experts || []).find((e) => String(e.email || '').toLowerCase() === email);
-
-  let supaExpert = null;
-  try {
-    const { data: se } = await supabase.from('experts').select('*').eq('email', email).maybeSingle();
-    if (se) supaExpert = se;
-  } catch {}
-
-  const isExpVerified = Boolean(supaExpert?.verified === true || localExpert?.verified === true);
-
-  try {
-    const { data: user, error } = await supabase.from('users').select('*').eq('email', email).maybeSingle();
-    if (!error && user) {
-      const valid = await passwordsMatch(password, user);
-      if (!valid) {
-        return { status: 401, body: { success: false, error: 'Invalid credentials', message: 'Invalid credentials' } };
-      }
-      const extras = { ...(localExpert || {}), ...(localUser || {}), ...(supaExpert || {}) };
-      if (isExpVerified) {
-        user.verified = true;
-        user.is_verified = true;
-        user.verificationStatus = 'approved';
-        extras.verified = true;
-        extras.is_verified = true;
-        extras.verificationStatus = 'approved';
-      }
-      const mappedRole = isAdminEmail(email) ? 'admin' : (user.role || extras.role);
-      return { status: 200, body: loginPayload({ ...user, role: mappedRole }, extras) };
-    }
-  } catch {}
-
-  if (!localUser) {
-    return { status: 401, body: { success: false, error: 'MUST REGISTER FIRST', message: 'Account not found. MUST REGISTER FIRST.' } };
+async function updateClientProfile(req, payload) {
+  const actor = await readActor(req);
+  if (actor?.role !== 'client') return result(actor ? 403 : 401, 'A client session is required');
+  if (payload.email && normalizeEmail(payload.email) !== actor.email) {
+    return result(400, 'Sign-in email changes require account verification');
   }
-  const valid = await passwordsMatch(password, localUser);
-  if (!valid) {
-    return { status: 401, body: { success: false, error: 'Invalid credentials', message: 'Invalid credentials' } };
+  const fields = [['name', 'full_name'], ['company', 'company'], ['field', 'field'], ['phone', 'phone'], ['bio', 'bio']];
+  const updates = {};
+  for (const [key, column] of fields) if (typeof payload[key] === 'string') updates[column] = payload[key].trim();
+  if (!updates.full_name || updates.full_name.length > 255 || (updates.phone && updates.phone.replace(/\D/g, '').length < 8)) {
+    return result(400, 'Enter a valid name and phone number');
   }
-  const mappedRole = isAdminEmail(email) ? 'admin' : localUser.role;
-  const extras = { ...(localExpert || {}), ...(localUser || {}), ...(supaExpert || {}) };
-  if (isExpVerified) {
-    localUser.verified = true;
-    localUser.is_verified = true;
-    localUser.verificationStatus = 'approved';
-    extras.verified = true;
-    extras.is_verified = true;
-    extras.verificationStatus = 'approved';
-  }
-  return { status: 200, body: loginPayload({ ...localUser, role: mappedRole }, extras) };
+  const query = await supabase.from('users').update(updates).eq('id', actor.id).eq('role', 'client')
+    .select('id, email, full_name, phone, company, field, role, is_verified, bio').maybeSingle();
+  if (query.error) throw query.error;
+  return query.data ? signedIn(query.data) : result(404, 'Client profile not found');
 }
 
 export async function handleApiMiddleware(req, res, next) {
@@ -454,6 +274,36 @@ export async function handleApiMiddleware(req, res, next) {
   }
 
   try {
+    if (['PUT', 'PATCH'].includes(req.method) && pathname === '/api/auth/profile') {
+      const response = await updateClientProfile(req, await readBody(req));
+      sendJson(res, response.status, response.body);
+      return;
+    }
+    if (req.method === 'GET' && pathname === '/api/auth/verify-admin') {
+      const actor = await readActor(req);
+      sendJson(res, 200, { success: true, authenticated: actor?.role === 'admin' });
+      return;
+    }
+    if (req.method === 'POST' && pathname === '/api/auth/admin-logout') {
+      const token = getRequestToken(req);
+      if (/^adm_[a-f0-9]{64}$/.test(token)) {
+        const { error } = await supabase.from('admin_credentials')
+          .update({ current_token_hash: null, session_expires_at: null }).eq('current_token_hash', hashAdminToken(token));
+        if (error) throw error;
+      }
+      sendJson(res, 200, { success: true });
+      return;
+    }
+    if (req.method === 'POST' && pathname === '/api/auth/change-password') {
+      const response = await changeAdminPassword(req, await readBody(req));
+      sendJson(res, response.status, response.body);
+      return;
+    }
+    if (req.method === 'POST' && pathname === '/api/auth/session') {
+      const response = await exchangeSupabaseSession(req);
+      sendJson(res, response.status, response.body);
+      return;
+    }
     if (req.method === 'POST' && (pathname === '/api/auth/register' || pathname.endsWith('/register'))) {
       const payload = await readBody(req);
       const result = await registerUser(payload);
@@ -470,6 +320,7 @@ export async function handleApiMiddleware(req, res, next) {
 
     sendJson(res, 404, { success: false, error: 'Auth endpoint not found', message: 'Auth endpoint not found' });
   } catch (err) {
-    sendJson(res, 500, { success: false, error: err.message, message: err.message });
+    console.error('[auth]', err.code || err.name);
+    sendJson(res, 503, { success: false, error: 'Authentication service unavailable. Please try again.' });
   }
 }

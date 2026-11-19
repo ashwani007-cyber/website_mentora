@@ -1,4 +1,4 @@
-import { mongoDB } from '../mongoDBService';
+import { apiSessionHeaders } from '../lib/apiSession';
 
 // ---------------------------------------------------------------------------
 // Wallet service (browser side).
@@ -30,79 +30,34 @@ export interface WalletTransaction {
 export interface WalletBalanceResult {
   balance: number;
   transactions: WalletTransaction[];
+  earnings?: number;
+  trend?: Array<{ week: string; amount: number }>;
 }
 
-const walletKey = (email: string) => `client_wallet_${email || 'guest'}`;
+const walletKey = (email: string, role: string) => `${role}_wallet_${email || 'guest'}`;
 
-function cacheBalanceLocally(email: string, balance: number) {
-  if (typeof window === 'undefined') return;
-  try {
-    localStorage.setItem(walletKey(email), String(balance));
-  } catch {}
-}
-
-/**
- * Fetches the client's authoritative wallet balance and latest 50 transactions.
- * If there are no transactions yet, a legacy local balance (from before Supabase) is
- * migrated once as an "Opening Balance" credit — same behaviour as before, but now through
- * the server so it is saved safely (and only once).
- */
 export async function fetchWalletBalance(
   userId?: string,
   userEmail?: string,
-  localFallback?: number
+  localFallback = 0,
+  role: 'client' | 'expert' = 'client'
 ): Promise<WalletBalanceResult> {
-  const cleanEmail = (userEmail || '').toLowerCase().trim();
-  const cleanId = String(userId || '').trim();
-  if (!cleanEmail && !cleanId) return { balance: 0, transactions: [] };
-
+  const email = (userEmail || '').toLowerCase().trim();
+  if (!email && !userId) return { balance: 0, transactions: [] };
+  const key = walletKey(email, role);
   try {
-    const params = new URLSearchParams({ userId: cleanId, userEmail: cleanEmail });
-    const res = await fetch(`/api/wallet?${params.toString()}`);
-    const json = await res.json().catch(() => ({}));
-    if (res.ok && json?.success) {
-      const transactions: WalletTransaction[] = Array.isArray(json.transactions) ? json.transactions : [];
-      const balance = Number(json.balance) || 0;
-
-      if (transactions.length > 0 || balance > 0) {
-        cacheBalanceLocally(cleanEmail, balance);
-        return { balance, transactions };
-      }
-
-      // No server-side history yet → one-time migration of a legacy local balance.
-      const legacy = typeof localFallback === 'number' && localFallback > 0 ? localFallback : 0;
-      if (legacy > 0) {
-        const migrated = await recordWalletTransaction({
-          userId: cleanId || cleanEmail,
-          userEmail: cleanEmail || cleanId,
-          userRole: 'client',
-          amount: legacy,
-          type: 'CREDIT',
-          description: 'Opening Balance (Migrated from Previous Session)'
-        });
-        if (migrated.success) {
-          return { balance: migrated.newBalance, transactions: migrated.transaction ? [migrated.transaction] : [] };
-        }
-      }
-      return { balance, transactions };
+    const response = await fetch('/api/wallet', { headers: apiSessionHeaders(role) });
+    const result = await response.json();
+    if (response.ok && result.success) {
+      const balance = Number(result.balance) || 0;
+      localStorage.setItem(key, String(balance));
+      return { balance, transactions: result.transactions || [], earnings: result.earnings, trend: result.trend };
     }
-    console.error('[WALLET] balance request failed:', json?.error || `HTTP ${res.status}`);
-  } catch (err) {
-    console.error('[WALLET] balance request failed:', err);
-  }
-
-  // Network/server problem: show the last known balance, but don't write anything.
-  try {
-    const cached = typeof window !== 'undefined' ? localStorage.getItem(walletKey(cleanEmail)) : null;
-    if (cached !== null && !isNaN(Number(cached))) return { balance: Number(cached), transactions: [] };
   } catch {}
-  return { balance: typeof localFallback === 'number' ? localFallback : 0, transactions: [] };
+  const cached = localStorage.getItem(key);
+  return { balance: cached !== null && Number.isFinite(Number(cached)) ? Number(cached) : localFallback, transactions: [] };
 }
 
-/**
- * Records a wallet transaction (CREDIT or DEBIT) through the server and returns the new balance.
- * Returns { success: false, error } if it could not be saved — callers must show that error.
- */
 export async function recordWalletTransaction(params: {
   userId?: string;
   userEmail: string;
@@ -112,9 +67,10 @@ export async function recordWalletTransaction(params: {
   description?: string;
   relatedBookingId?: string | null;
   relatedProjectReviewId?: string | null;
+  requestId?: string;
 }): Promise<{ success: boolean; newBalance: number; transaction?: WalletTransaction; error?: string; duplicate?: boolean }> {
   const cleanEmail = (params.userEmail || '').toLowerCase().trim();
-  const cleanId = String(params.userId || cleanEmail).trim();
+  const role = params.userRole || 'client';
   const amount = Number(params.amount);
 
   if (!Number.isFinite(amount) || amount <= 0) {
@@ -124,16 +80,8 @@ export async function recordWalletTransaction(params: {
   try {
     const res = await fetch(params.type === 'CREDIT' ? '/api/wallet/deposit' : '/api/wallet/deduct', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        userId: cleanId,
-        userEmail: cleanEmail,
-        userRole: params.userRole || 'client',
-        amount,
-        description: params.description || (params.type === 'CREDIT' ? 'Wallet Top-up' : 'Consultation Booking Payment'),
-        relatedBookingId: params.relatedBookingId || null,
-        relatedProjectReviewId: params.relatedProjectReviewId || null
-      })
+      headers: { 'Content-Type': 'application/json', ...apiSessionHeaders(role) },
+      body: JSON.stringify({ amount, requestId: params.requestId || crypto.randomUUID() })
     });
     const json = await res.json().catch(() => ({}));
     if (!res.ok || !json?.success) {
@@ -142,12 +90,11 @@ export async function recordWalletTransaction(params: {
       return { success: false, newBalance: 0, error };
     }
     const newBalance = Number(json.balance) || 0;
-    cacheBalanceLocally(cleanEmail, newBalance);
-    try { mongoDB.syncKv(walletKey(cleanEmail), String(newBalance)); } catch {}
+    localStorage.setItem(walletKey(cleanEmail, role), String(newBalance));
     return { success: true, newBalance, transaction: json.transaction, duplicate: Boolean(json.duplicate) };
   } catch (err: any) {
     console.error('[WALLET] save failed:', err);
-    return { success: false, newBalance: 0, error: 'Could not reach the server. Your wallet was NOT changed — please try again.' };
+    return { success: false, newBalance: 0, error: 'Could not confirm the wallet update. Try again to check whether it was saved.' };
   }
 }
 
@@ -160,6 +107,7 @@ export async function depositWallet(params: {
   userRole?: string;
   amount: number;
   description?: string;
+  requestId?: string;
 }) {
   return recordWalletTransaction({
     ...params,

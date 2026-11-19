@@ -1,5 +1,5 @@
 import { supabase } from '../supabaseClient';
-import { COLUMNS, PAGE } from '../lib/columns';
+import { apiSessionHeaders } from '../lib/apiSession';
 import { sendRealtimeBroadcast } from '../lib/realtimeBroadcast';
 import {
   BOOKING_STATUS,
@@ -133,6 +133,10 @@ export interface ConsultationBooking {
   isLive: boolean;
   reviewed?: boolean;
   payoutTransferred?: boolean;
+  payout?: number;
+  workflowManaged?: boolean;
+  declineReason?: string;
+  availabilitySlotId?: string;
 }
 
 export interface CreateBookingInput {
@@ -269,161 +273,34 @@ export function normalizeBooking(row: any): ConsultationBooking {
     completed: isCompleted,
     isLive,
     reviewed: row.reviewed === true,
-    payoutTransferred: row.payoutTransferred === true
+    payoutTransferred: row.payout_transferred === true || row.payoutTransferred === true,
+    payout: row.workflow_managed ? value - Number(row.platform_fee || 0) : (row.payout ?? Math.round(value * 0.85)),
+    workflowManaged: row.workflow_managed === true || row.workflowManaged === true,
+    declineReason: row.decline_reason || row.declineReason,
+    availabilitySlotId: row.availability_id || row.availabilitySlotId
   };
 }
 
-/**
- * Creates a consultation booking record and writes it into Supabase bookings table.
- * Falls back to local Express server endpoint if direct client insert is blocked.
- */
 export async function createConsultationBooking(
   input: CreateBookingInput
-): Promise<{ success: boolean; booking?: ConsultationBooking; error?: string; code?: string }> {
+): Promise<{ success: boolean; booking?: ConsultationBooking; balance?: number; duplicate?: boolean; error?: string; code?: string }> {
   try {
-    const bookingId = input.id || `bkg-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
-    
-    const clientId = String(input.clientId || input.client_id || 'client-1');
-    const clientName = String(input.clientName || input.client_name || input.client || 'Client');
-    const clientEmail = String(input.clientEmail || input.client_email || 'client@company.com').toLowerCase();
-
-    const expertId = String(input.expertId || input.expert_id || '');
-    const expertName = String(input.expertName || input.expert_name || input.expert || 'Expert');
-    const expertEmail = String(input.expertEmail || input.expert_email || '').toLowerCase();
-
-    let scheduledDate = String(input.scheduledDate || input.scheduled_date || input.date || '');
-    let scheduledTime = String(input.scheduledTime || input.scheduled_time || input.timeSlot || input.time || '');
-
-    if (!scheduledDate && input.when && input.when.includes(',')) {
-      const parts = input.when.split(',');
-      scheduledDate = parts[0]?.trim() || '';
-      if (!scheduledTime && parts[1]) {
-        scheduledTime = parts[1]?.trim() || '';
-      }
-    }
-
-    const dateToUse = scheduledDate || new Date().toISOString().split('T')[0];
-    const timeToUse = scheduledTime || '10:00 AM';
-
-    const topic = String(input.topic || 'Consultation');
-    const durationMinutes = Number(input.durationMinutes || input.duration_minutes || 60);
-
-    // FIX 4: Build scheduled_start from scheduled_date + scheduled_time as IST (+05:30), converting to UTC timestamptz
-    const timeParse = parseIstDateTimeToUtc(dateToUse, timeToUse, durationMinutes);
-    if (!timeParse.valid) {
-      console.error('❌ [BOOKINGS INSERT] Date/Time parsing error:', timeParse.error);
-      return { success: false, error: timeParse.error || 'Invalid scheduled date or time' };
-    }
-
-    const scheduledStart = timeParse.scheduledStart!;
-    const scheduledEnd = timeParse.scheduledEnd!;
-
-    const packageType = String(input.packageType || input.package_type || (input.type === 'hourly' || input.type === 'Hourly' ? 'Hourly Consultation' : 'Project Advisory'));
-    const val = Number(input.value !== undefined ? input.value : (input.price !== undefined ? input.price : (input.rate !== undefined ? input.rate : 600)));
-    const cost = isNaN(val) ? 600 : val;
-    const initialStatus = input.status ? normalizeBookingStatus(input.status) : BOOKING_STATUS.PENDING;
-    const meetLink = input.meetLink || input.meet_link || null;
-
-    // Full Supabase row payload with non-null columns and UTC timestamptz
-    const sbPayload: Record<string, any> = {
-      id: bookingId,
-      client_id: clientId,
-      client_name: clientName,
-      client_email: clientEmail,
-      expert_id: expertId,
-      expert_name: expertName,
-      expert_email: expertEmail,
-      topic: topic,
-      scheduled_date: dateToUse,
-      scheduled_time: timeToUse,
-      scheduled_start: scheduledStart,
-      scheduled_end: scheduledEnd,
-      duration_minutes: durationMinutes,
-      package_type: packageType,
-      value: cost,
-      price: cost,
-      status: initialStatus,
-      meet_link: meetLink,
-      meeting_link: meetLink,
-      // Legacy column compatibility
-      booking_date: dateToUse,
-      start_time: timeToUse,
-      end_time: '11:00 AM',
-      notes: topic,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    };
-
-    console.log('📝 [BOOKINGS INSERT] Payload:', sbPayload);
-
-    // 1. Primary Write Path: Call backend endpoint /api/bookings with caller headers
-    try {
-      const res = await fetch('/api/bookings', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-user-id': clientId,
-          'x-user-email': clientEmail,
-          'x-user-role': 'client'
-        },
-        body: JSON.stringify(sbPayload)
-      });
-      const json = await res.json();
-      if (json.success && json.booking) {
-        console.log('✅ [BOOKINGS INSERT] Booking created via backend endpoint:', json.booking.id);
-        return { success: true, booking: normalizeBooking(json.booking) };
-      }
-      if (json.code === '23505' || String(json.error).includes('23505') || String(json.error).includes('just booked') || String(json.error).includes('unique constraint')) {
-        return {
-          success: false,
-          code: '23505',
-          error: 'This slot was just booked, please choose another time'
-        };
-      }
-      if (json.error) {
-        return { success: false, code: json.code, error: json.error };
-      }
-    } catch (backendErr: any) {
-      console.warn('[BOOKINGS INSERT] Backend endpoint call failed, attempting direct Supabase fallback:', backendErr.message);
-    }
-
-    // 2. Direct Supabase Client fallback (if backend endpoint unreachable)
-    const { data, error } = await supabase
-      .from('bookings')
-      .insert(sbPayload)
-      .select(COLUMNS.BOOKING)
-      .maybeSingle();
-
-    console.log('📡 [BOOKINGS INSERT] Direct Supabase Response/Error:', { data, error: error?.message });
-
-    if (!error && data) {
-      console.log('✅ [BOOKINGS INSERT] Booking successfully created in Supabase directly:', data.id);
-      return { success: true, booking: normalizeBooking(data) };
-    }
-
-    if (error) {
-      console.warn('[BOOKINGS INSERT] Direct Supabase insert warning:', error.message);
-      if (error.code === '23505' || error.message?.includes('23505') || error.message?.includes('unique constraint') || error.message?.includes('idx_bookings_no_double_booking')) {
-        return {
-          success: false,
-          code: '23505',
-          error: 'This slot was just booked, please choose another time'
-        };
-      }
-      return { success: false, code: error.code, error: error.message };
-    }
-
-    return { success: true, booking: normalizeBooking(sbPayload) };
-  } catch (err: any) {
-    console.error('❌ [BOOKINGS INSERT] Unexpected error creating booking:', err);
-    return { success: false, error: err.message };
+    const request = await fetch('/api/bookings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...apiSessionHeaders('client') },
+      body: JSON.stringify({
+        id: input.id, expert_id: input.expertId || input.expert_id, availability_id: input.availability_id || input.availabilitySlotId,
+        scheduled_date: input.scheduledDate || input.scheduled_date || input.date, topic: input.topic,
+        package_type: input.packageType || input.package_type, price: input.price ?? input.value ?? input.rate
+      })
+    });
+    const result = await request.json();
+    if (!request.ok || !result.booking) return { success: false, error: result.error, code: result.code };
+    return { success: true, booking: normalizeBooking(result.booking), balance: Number(result.balance), duplicate: result.duplicate };
+  } catch {
+    return { success: false, error: 'Unable to confirm the booking. Try again to check whether it was saved.' };
   }
 }
 
-/**
- * Role-scoped soft-delete persistence helpers.
- * Ensures soft-deleted bookings stay hidden per role across reloads and real-time events.
- */
 export function isClientRoleDeleted(id: string, email?: string): boolean {
   if (!id) return false;
   try {
@@ -492,406 +369,84 @@ export function recordRoleDeleted(id: string, role: string, email?: string): voi
   } catch {}
 }
 
-/**
- * Fetches all bookings for a client by ID and/or email.
- */
-export async function fetchClientBookings(
-  clientId: string,
-  clientEmail?: string,
-  bookingIds?: string[]
-): Promise<ConsultationBooking[]> {
-  const cleanEmail = (clientEmail || '').toLowerCase().trim();
-  const cleanId = (clientId || '').trim();
-
-  // 1. Primary Read Path: Call backend endpoint /api/bookings
-  try {
-    const params = new URLSearchParams();
-    if (cleanId) params.append('clientId', cleanId);
-    if (cleanEmail) params.append('clientEmail', cleanEmail);
-    params.append('role', 'client');
-
-    const res = await fetch(`/api/bookings?${params.toString()}`, {
-      headers: {
-        'x-user-id': cleanId,
-        'x-user-email': cleanEmail,
-        'x-user-role': 'client'
-      }
-    });
-    if (res.ok) {
-      const json = await res.json();
-      const list = json.bookings || json.data;
-      if (json.success && Array.isArray(list)) {
-        const normalized = list.map(normalizeBooking);
-        return normalized.filter(b => !b.deletedByClient && !isClientRoleDeleted(b.id, cleanEmail));
-      }
-    }
-  } catch (apiErr: any) {
-    console.warn('[BOOKINGS SERVICE] /api/bookings endpoint fetch failed, falling back:', apiErr.message);
-  }
-
-  // 2. Direct Supabase Query fallback
-  try {
-    // Only real booking columns (never select('*')); newest first, capped — see src/lib/columns.ts
-    let query = supabase.from('bookings').select(COLUMNS.BOOKING);
-
-    const validIds = Array.isArray(bookingIds) ? bookingIds.filter(Boolean) : [];
-
-    if (validIds.length > 0 && cleanEmail) {
-      query = query.or(`client_email.ilike.${cleanEmail},id.in.(${validIds.join(',')})`);
-    } else if (validIds.length > 0) {
-      query = query.in('id', validIds);
-    } else if (cleanId && cleanEmail) {
-      query = query.or(`client_id.eq.${cleanId},client_email.ilike.${cleanEmail}`);
-    } else if (cleanEmail) {
-      query = query.ilike('client_email', cleanEmail);
-    } else if (cleanId) {
-      query = query.eq('client_id', cleanId);
-    }
-
-    query = query.order('created_at', { ascending: false }).order('id', { ascending: true }).limit(PAGE.BOOKINGS);
-
-    const { data, error } = await query;
-    if (!error && Array.isArray(data)) {
-      const normalized = data.map(normalizeBooking);
-      return normalized.filter(b => !b.deletedByClient && !isClientRoleDeleted(b.id, cleanEmail));
-    }
-  } catch (sbErr: any) {
-    console.warn('[BOOKINGS SERVICE] Supabase direct query fallback note:', sbErr.message);
-  }
-
-  // 3. Ephemeral local storage cache fallback
-  try {
-    if (typeof localStorage !== 'undefined' && cleanEmail) {
-      const localRaw = localStorage.getItem(`client_upcoming_${cleanEmail}`);
-      if (localRaw) {
-        const parsed = JSON.parse(localRaw);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed.map(normalizeBooking).filter(b => !b.deletedByClient && !isClientRoleDeleted(b.id, cleanEmail));
-        }
-      }
-    }
-  } catch {}
-
-  return [];
+async function fetchBookings(role: 'client' | 'expert' | 'admin') {
+  const response = await fetch('/api/bookings', { headers: apiSessionHeaders(role) });
+  if (!response.ok) throw new Error('Could not load consultations');
+  const result = await response.json();
+  return Array.isArray(result.bookings) ? result.bookings.map(normalizeBooking) : [];
 }
 
-/**
- * Fetches bookings for an expert by ID and/or email, optionally filtering by status.
- */
-export async function fetchExpertBookings(
-  expertId: string,
-  expertEmail?: string,
-  statusFilter?: 'pending' | 'accepted' | 'all',
-  expertUserId?: string
-): Promise<ConsultationBooking[]> {
-  const cleanEmail = (expertEmail || '').toLowerCase().trim();
-  const cleanId = (expertId || '').trim();
-  const cleanUserId = (expertUserId || '').trim();
-
-  console.log('🔍 [EXPERT PORTAL FETCH] Query params:', { expertId: cleanId, expertEmail: cleanEmail, expertUserId: cleanUserId, statusFilter });
-
-  // 1. Primary Read Path: Call backend endpoint /api/bookings
+function cachedBookings(key: string): ConsultationBooking[] {
   try {
-    const params = new URLSearchParams();
-    if (cleanId) params.append('expertId', cleanId);
-    if (cleanEmail) params.append('expertEmail', cleanEmail);
-    if (cleanUserId) params.append('expertUserId', cleanUserId);
-    params.append('role', 'expert');
-
-    const res = await fetch(`/api/bookings?${params.toString()}`, {
-      headers: {
-        'x-user-id': cleanId || cleanUserId,
-        'x-user-email': cleanEmail,
-        'x-user-role': 'expert'
-      }
-    });
-    if (res.ok) {
-      const json = await res.json();
-      const list = json.bookings || json.data;
-      if (json.success && Array.isArray(list)) {
-        let normalized = list.map(normalizeBooking);
-        normalized = normalized.filter(b => !b.deletedByExpert && !isExpertRoleDeleted(b.id, cleanEmail));
-        if (statusFilter === 'pending') {
-          return normalized.filter(b => {
-            const st = (b.status || '').toLowerCase();
-            return st === 'pending' || st.includes('pending');
-          });
-        } else if (statusFilter === 'accepted') {
-          return normalized.filter(b => {
-            const st = (b.status || '').toLowerCase();
-            return st === 'accepted' || st.includes('accept') || st.includes('confirmed');
-          });
-        }
-        return normalized;
-      }
-    }
-  } catch (apiErr: any) {
-    console.warn('[EXPERT PORTAL FETCH] /api/bookings endpoint fetch failed, falling back:', apiErr.message);
+    const data = JSON.parse(localStorage.getItem(key) || '[]');
+    return Array.isArray(data) ? data.map(normalizeBooking) : [];
+  } catch {
+    return [];
   }
-
-  // 2. Direct Supabase Query fallback
-  try {
-    // Only real booking columns (never select('*')); newest first, capped — see src/lib/columns.ts
-    let query = supabase.from('bookings').select(COLUMNS.BOOKING);
-
-    const orClauses: string[] = [];
-    if (cleanId) orClauses.push(`expert_id.eq.${cleanId}`);
-    if (cleanUserId && cleanUserId !== cleanId) orClauses.push(`expert_id.eq.${cleanUserId}`);
-    if (cleanEmail) orClauses.push(`expert_email.ilike.${cleanEmail}`);
-
-    if (orClauses.length > 0) {
-      query = query.or(orClauses.join(','));
-    }
-
-    if (statusFilter === 'pending') {
-      query = query.or('status.eq.pending,status.ilike.%pending%');
-    } else if (statusFilter === 'accepted') {
-      query = query.or('status.eq.accepted,status.ilike.%accepted%,status.ilike.%confirmed%');
-    }
-
-    query = query.order('created_at', { ascending: false }).order('id', { ascending: true }).limit(PAGE.BOOKINGS);
-
-    const { data, error } = await query;
-    if (!error && Array.isArray(data)) {
-      const normalized = data.map(normalizeBooking);
-      return normalized.filter(b => !b.deletedByExpert && !isExpertRoleDeleted(b.id, cleanEmail));
-    }
-  } catch (sbErr: any) {
-    console.warn('[EXPERT PORTAL FETCH] Supabase direct query fallback note:', sbErr.message);
-  }
-
-  // 3. Ephemeral local storage cache fallback
-  try {
-    if (typeof localStorage !== 'undefined' && cleanEmail) {
-      const accRaw = localStorage.getItem(`expert_accepted_sessions_${cleanEmail}`);
-      const reqRaw = localStorage.getItem(`expert_requests_${cleanEmail}`);
-      const accList = accRaw ? JSON.parse(accRaw) : [];
-      const reqList = reqRaw ? JSON.parse(reqRaw) : [];
-      const combined = [...(Array.isArray(accList) ? accList : []), ...(Array.isArray(reqList) ? reqList : [])];
-      if (combined.length > 0) {
-        const normalized = combined.map(normalizeBooking).filter(b => !b.deletedByExpert && !isExpertRoleDeleted(b.id, cleanEmail));
-        if (statusFilter === 'pending') {
-          return normalized.filter(b => (b.status || '').toLowerCase().includes('pending'));
-        } else if (statusFilter === 'accepted') {
-          return normalized.filter(b => (b.status || '').toLowerCase().includes('accept') || (b.status || '').toLowerCase().includes('confirmed'));
-        }
-        return normalized;
-      }
-    }
-  } catch {}
-
-  return [];
 }
 
-/**
- * Fetches all bookings across the platform for the Admin Ops Desk.
- */
-export async function fetchAllBookingsForAdmin(): Promise<ConsultationBooking[]> {
-  console.log('🔍 [ADMIN PORTAL FETCH] Fetching all bookings for Admin Ops Desk...');
-
-  // 1. Primary Read Path: Call backend endpoint /api/bookings?role=admin
-  try {
-    const res = await fetch('/api/bookings?role=admin', {
-      headers: {
-        'x-user-role': 'admin'
-      }
-    });
-    if (res.ok) {
-      const json = await res.json();
-      const list = json.bookings || json.data;
-      if (json.success && Array.isArray(list) && list.length > 0) {
-        const normalized = list.map(normalizeBooking);
-        return normalized.filter(b => !b.deletedByAdmin && !isAdminRoleDeleted(b.id));
-      }
-    }
-  } catch (apiErr: any) {
-    console.warn('[ADMIN PORTAL FETCH] /api/bookings endpoint fetch failed, falling back:', apiErr.message);
-  }
-
-  // 2. Direct Supabase Query fallback
-  try {
-    const { data, error } = await supabase
-      .from('bookings')
-      .select(COLUMNS.BOOKING)
-      .order('created_at', { ascending: false })
-      .order('id', { ascending: true })
-      .limit(PAGE.BOOKINGS);
-
-    if (!error && Array.isArray(data) && data.length > 0) {
-      const normalized = data.map(normalizeBooking);
-      return normalized.filter(b => !b.deletedByAdmin && !isAdminRoleDeleted(b.id));
-    }
-  } catch (sbErr: any) {
-    console.warn('[ADMIN PORTAL FETCH] Supabase direct query fallback note:', sbErr.message);
-  }
-
-  // 3. Ephemeral local storage cache fallback
-  try {
-    if (typeof localStorage !== 'undefined') {
-      const saved = localStorage.getItem('app_platform_sessions');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed.map(normalizeBooking).filter(b => !b.deletedByAdmin && !isAdminRoleDeleted(b.id));
-        }
-      }
-    }
-  } catch {}
-
-  return [];
+export async function fetchClientBookings(_clientId: string, clientEmail?: string, _bookingIds?: string[]) {
+  const email = (clientEmail || '').toLowerCase().trim();
+  const list = await fetchBookings('client').catch(() => email ? cachedBookings(`client_upcoming_${email}`) : []);
+  return list.filter(booking => !booking.deletedByClient && !isClientRoleDeleted(booking.id, email));
 }
 
-/**
- * Updates booking status (e.g. 'accepted', 'rejected', 'completed', 'live') and extra fields.
- */
+export async function fetchExpertBookings(_expertId: string, expertEmail?: string, statusFilter?: 'pending' | 'accepted' | 'all', _expertUserId?: string) {
+  const email = (expertEmail || '').toLowerCase().trim();
+  const list = await fetchBookings('expert').catch(() => email ? [...cachedBookings(`expert_requests_${email}`), ...cachedBookings(`expert_accepted_sessions_${email}`)] : []);
+  const visible = list.filter(booking => !booking.deletedByExpert && !isExpertRoleDeleted(booking.id, email));
+  return !statusFilter || statusFilter === 'all' ? visible : visible.filter(booking => normalizeBookingStatus(booking.status) === statusFilter);
+}
+
+export async function fetchAllBookingsForAdmin() {
+  const list = await fetchBookings('admin').catch(() => cachedBookings('app_platform_sessions'));
+  return list.filter(booking => !booking.deletedByAdmin && !isAdminRoleDeleted(booking.id));
+}
+
 export async function updateBookingStatus(
   bookingId: string,
   status: BookingStatus | string,
   extraFields: Record<string, any> = {},
   callerInfo: { userId?: string; userEmail?: string; userRole?: string } = {}
-): Promise<{ success: boolean; error?: string; booking?: ConsultationBooking }> {
+): Promise<{ success: boolean; error?: string; booking?: ConsultationBooking; duplicate?: boolean }> {
   try {
-    const canonicalStatus = normalizeBookingStatus(status);
-    
-    // Whitelist and map only valid columns in Supabase bookings table schema
-    const payload: Record<string, any> = {
-      status: canonicalStatus,
-      updated_at: new Date().toISOString()
-    };
-
-    const meet = extraFields.meet_link ?? extraFields.meeting_link ?? extraFields.meetUrl ?? extraFields.meetLink;
-    if (meet !== undefined) {
-      payload.meet_link = meet;
-      payload.meeting_link = meet;
-    }
-    const sentAt = extraFields.meeting_link_sent_at ?? extraFields.meetingLinkSentAt;
-    if (sentAt !== undefined) {
-      payload.meeting_link_sent_at = sentAt;
-    } else if (meet !== undefined && meet) {
-      payload.meeting_link_sent_at = new Date().toISOString();
-    }
-    if (extraFields.notes !== undefined) payload.notes = extraFields.notes;
-    if (extraFields.scheduled_date !== undefined) payload.scheduled_date = extraFields.scheduled_date;
-    if (extraFields.scheduled_time !== undefined) payload.scheduled_time = extraFields.scheduled_time;
-    if (extraFields.scheduled_start !== undefined) payload.scheduled_start = extraFields.scheduled_start;
-    if (extraFields.scheduled_end !== undefined) payload.scheduled_end = extraFields.scheduled_end;
-    if (extraFields.duration_minutes !== undefined) payload.duration_minutes = extraFields.duration_minutes;
-    if (extraFields.deleted_by_client !== undefined) payload.deleted_by_client = extraFields.deleted_by_client;
-    if (extraFields.deleted_by_expert !== undefined) payload.deleted_by_expert = extraFields.deleted_by_expert;
-    if (extraFields.deleted_by_admin !== undefined) payload.deleted_by_admin = extraFields.deleted_by_admin;
-
-    console.log('🔄 [BOOKINGS UPDATE] Updating booking status:', { bookingId, status: canonicalStatus, payload });
-
-    // Primary write path: Call backend endpoint /api/bookings/:id with caller headers
-    let updatedBookingData: any = null;
-    try {
-      const res = await fetch(`/api/bookings/${bookingId}`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-user-id': callerInfo.userId || '',
-          'x-user-email': callerInfo.userEmail || '',
-          'x-user-role': callerInfo.userRole || 'admin'
-        },
-        body: JSON.stringify(payload)
-      });
-      const json = await res.json();
-      if (json.success) {
-        updatedBookingData = json.booking || { id: bookingId, ...payload };
-      } else if (json.error) {
-        console.warn('[BOOKINGS UPDATE] API endpoint returned error:', json.error);
-        return { success: false, error: json.error };
-      }
-    } catch (apiErr: any) {
-      console.warn('[BOOKINGS UPDATE] API endpoint call failed, attempting direct Supabase fallback:', apiErr.message);
-    }
-
-    // Direct Supabase Client fallback (or primary if API failed)
-    if (!updatedBookingData) {
-      const { data, error } = await supabase
-        .from('bookings')
-        .update(payload)
-        .eq('id', bookingId)
-        .select(COLUMNS.BOOKING)
-        .maybeSingle();
-
-      if (error) {
-        console.warn('[BOOKINGS UPDATE] Direct update error:', error.message);
-        return { success: false, error: error.message };
-      }
-      updatedBookingData = data || { id: bookingId, ...payload };
-    }
-
-    // Broadcast update across cross-portal channels
-    try {
-      broadcastBookingUpdate(normalizeBooking(updatedBookingData));
-    } catch (bcErr) {
-      console.warn('[BOOKINGS UPDATE] Broadcast note:', bcErr);
-    }
-
-    return { success: true, booking: normalizeBooking(updatedBookingData) };
-  } catch (err: any) {
-    return { success: false, error: err.message };
+    const response = await fetch(`/api/bookings/${encodeURIComponent(bookingId)}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json', ...apiSessionHeaders(callerInfo.userRole) },
+      body: JSON.stringify({ ...extraFields, status: normalizeBookingStatus(status) })
+    });
+    const result = await response.json();
+    if (!response.ok || !result.booking) return { success: false, error: result.error };
+    const booking = normalizeBooking(result.booking);
+    if (!result.duplicate) broadcastBookingUpdate(booking);
+    return { success: true, booking, duplicate: result.duplicate };
+  } catch {
+    return { success: false, error: 'Could not save the consultation change. Please try again.' };
   }
 }
 
-/**
- * Soft-deletes a booking for the caller's role (client, expert, or admin).
- * NEVER hard-deletes the row or touches other portals' visibility.
- */
 export async function deleteBooking(
-  bookingId: string,
-  callerInfo: { userId?: string; userEmail?: string; userRole?: string } = {}
+  bookingId: string, callerInfo: { userId?: string; userEmail?: string; userRole?: string } = {}
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const role = (callerInfo.userRole || 'admin').toLowerCase().trim();
-    console.log(`🗑️ [BOOKINGS SOFT-DELETE] Soft-deleting booking ${bookingId} for role: ${role}`);
-
-    // Track in local persistent role deleted store immediately
+    const role = callerInfo.userRole || 'admin';
+    const response = await fetch(`/api/bookings/${encodeURIComponent(bookingId)}`, { method: 'DELETE', headers: apiSessionHeaders(role) });
+    const result = await response.json();
+    if (!response.ok) return { success: false, error: result.error };
     recordRoleDeleted(bookingId, role, callerInfo.userEmail);
-
-    const updateField = role === 'admin'
-      ? { deleted_by_admin: true, updated_at: new Date().toISOString() }
-      : role === 'expert'
-        ? { deleted_by_expert: true, updated_at: new Date().toISOString() }
-        : { deleted_by_client: true, updated_at: new Date().toISOString() };
-
-    // Primary write path: Call backend endpoint /api/bookings/:id with caller headers & body
-    try {
-      const res = await fetch(`/api/bookings/${bookingId}`, {
-        method: 'DELETE',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-user-id': callerInfo.userId || '',
-          'x-user-email': callerInfo.userEmail || '',
-          'x-user-role': role
-        },
-        body: JSON.stringify({ role })
-      });
-      const json = await res.json();
-      if (json.success) return { success: true };
-      if (json.error) console.warn('[BOOKINGS SOFT-DELETE] API endpoint note:', json.error);
-    } catch (apiErr: any) {
-      console.warn('[BOOKINGS SOFT-DELETE] API endpoint call failed, attempting direct Supabase fallback:', apiErr.message);
-    }
-
-    // Direct Supabase Client fallback (SOFT DELETE - UPDATE ONLY, NEVER DELETE)
-    try {
-      const { error } = await supabase
-        .from('bookings')
-        .update(updateField)
-        .eq('id', bookingId);
-
-      if (error) {
-        console.warn('[BOOKINGS SOFT-DELETE] Direct Supabase update note (columns might need migration):', error.message);
-      }
-    } catch (sbErr: any) {
-      console.warn('[BOOKINGS SOFT-DELETE] Supabase fallback catch note:', sbErr.message);
-    }
-
     return { success: true };
-  } catch (err: any) {
-    return { success: false, error: err.message };
+  } catch {
+    return { success: false, error: 'Could not hide the consultation. Please try again.' };
+  }
+}
+
+export async function disburseConsultationPayout(bookingId: string) {
+  try {
+    const response = await fetch(`/api/bookings/${encodeURIComponent(bookingId)}/payout`, { method: 'POST', headers: apiSessionHeaders('admin') });
+    const result = await response.json();
+    if (!response.ok || !result.booking) return { success: false, error: result.error };
+    return { success: true, booking: normalizeBooking(result.booking), balance: Number(result.balance), duplicate: Boolean(result.duplicate) };
+  } catch {
+    return { success: false, error: 'Could not disburse the consultation payout. Please try again.' };
   }
 }
 

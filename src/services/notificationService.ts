@@ -1,3 +1,4 @@
+import { apiSessionHeaders } from '../lib/apiSession';
 import { AppNotification, NotificationTarget, NotificationType, NotificationChannel } from '../types';
 
 const STORAGE_KEY = 'app_platform_notifications';
@@ -82,7 +83,7 @@ export const notificationService = {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed) && parsed.length > 0) {
+        if (Array.isArray(parsed)) {
           return parsed;
         }
       }
@@ -107,19 +108,16 @@ export const notificationService = {
       params.append('role', effectiveRole);
       if (recipientId) params.append('recipientId', recipientId);
 
-      const res = await fetch(`/api/notifications?${params.toString()}`);
+      const res = await fetch(`/api/notifications?${params.toString()}`, { headers: effectiveRole === 'landing' ? {} : apiSessionHeaders(effectiveRole) });
       if (res.ok) {
         const data = await res.json();
         if (data && data.success && Array.isArray(data.notifications)) {
-          if (effectiveRole === 'admin') {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(data.notifications));
-          } else {
-            const existing = this.getLocal();
-            const map = new Map(existing.map(n => [n.id, n]));
-            data.notifications.forEach((n: AppNotification) => map.set(n.id, n));
-            const merged = Array.from(map.values());
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
-          }
+          const scopeKey = `${STORAGE_KEY}_server_ids_${effectiveRole}:${(recipientId || '').toLowerCase()}`;
+          const previousIds = new Set<string>(JSON.parse(localStorage.getItem(scopeKey) || '[]'));
+          const map = new Map(this.getLocal().filter(notification => !previousIds.has(notification.id)).map(n => [n.id, n]));
+          data.notifications.forEach((notification: AppNotification) => map.set(notification.id, notification));
+          localStorage.setItem(scopeKey, JSON.stringify(data.notifications.map((notification: AppNotification) => notification.id)));
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(Array.from(map.values())));
           if (typeof window !== 'undefined') {
             window.dispatchEvent(new CustomEvent(NOTIFICATION_EVENT_NAME, { detail: { action: 'sync' } }));
           }
@@ -254,7 +252,7 @@ export const notificationService = {
     if (typeof fetch !== 'undefined') {
       fetch('/api/notifications', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...apiSessionHeaders() },
         body: JSON.stringify({
           id: newNotif.id,
           senderId: newNotif.senderId,
@@ -309,7 +307,7 @@ export const notificationService = {
     if (typeof fetch !== 'undefined') {
       fetch('/api/notifications/mark-read', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...apiSessionHeaders() },
         body: JSON.stringify({ id })
       }).catch(() => {});
     }
@@ -332,7 +330,7 @@ export const notificationService = {
     if (typeof fetch !== 'undefined') {
       fetch('/api/notifications/mark-all-read', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...apiSessionHeaders() },
         body: JSON.stringify({ role, recipientId })
       }).catch(() => {});
     }
@@ -355,7 +353,7 @@ export const notificationService = {
     if (typeof fetch !== 'undefined') {
       fetch('/api/notifications/clear', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...apiSessionHeaders() },
         body: JSON.stringify({ role, recipientId })
       }).catch(() => {});
     }

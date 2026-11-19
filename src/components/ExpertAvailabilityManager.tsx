@@ -363,18 +363,11 @@ export const ExpertAvailabilityManager: React.FC<ExpertAvailabilityManagerProps>
     setIsSaving(true);
     let addedCount = 0;
     try {
-      for (const slot of standardSlots) {
-        const err = validateSlot(selectedDate, slot.start, slot.end);
-        if (!err) {
-          await mongoDB.saveAvailability({
-            expertId,
-            availabilityDate: selectedDate,
-            startTime: slot.start,
-            endTime: slot.end,
-            status: 'AVAILABLE'
-          });
-          addedCount++;
-        }
+      const slots = standardSlots.filter(slot => !validateSlot(selectedDate, slot.start, slot.end))
+        .map(slot => ({ startTime: slot.start, endTime: slot.end }));
+      if (slots.length) {
+        const result = await mongoDB.saveAvailabilityBatch(expertId, selectedDate, slots);
+        addedCount = result.availabilities.length;
       }
 
       if (addedCount > 0) {

@@ -1,3 +1,5 @@
+import { getConsultationReviews, moderateConsultationReview, notifyReviewsUpdated } from '../services/reviewService';
+import { apiSessionHeaders } from '../lib/apiSession';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { supabase } from '../supabaseClient';
 import { startVisibleInterval } from '../lib/polling'; // egress-safe timers (skip hidden tabs)
@@ -80,6 +82,7 @@ import { AdminBlogsDesk } from './AdminBlogsDesk';
 import {
   fetchAllBookingsForAdmin,
   updateBookingStatus,
+  disburseConsultationPayout,
   deleteBooking,
   subscribeToBookingsRealtime,
   isAdminRoleDeleted,
@@ -126,7 +129,7 @@ interface AdminGovernancePortalProps {
   setPage: (p: string) => void;
   experts?: ExpertDoc[];
   pendingVerifications?: any[];
-  onUpdateExpertMarkup: (expId: string, base: number, markup: number) => void;
+  onUpdateExpertMarkup: (expId: string, base: number, markup: number) => Promise<boolean>;
   onOpenMongoModal: () => void;
   onToggleFeatured?: (expId: string, featured: boolean) => void;
   onUpdateHeroSpotlight?: (expId: string, heroSpotlight: boolean, heroPosition?: "top" | "bottom") => void;
@@ -1059,220 +1062,59 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
     cardBorder: isLight ? "#E2E8F0" : "rgba(244, 239, 234, 0.12)"
   };
 
-  // Platform Reviews Moderation State
-  const [platformReviews, setPlatformReviews] = useState<any[]>(() => {
-    try {
-      const saved = localStorage.getItem("app_platform_reviews");
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          const cleaned = parsed.filter((r: any) => r && r.id !== "rev-2" && !(r.expertName === "JK" && r.clientName === "Northwind Retail Pvt Ltd"));
-          return cleaned;
-        }
-      }
-    } catch {}
-    return [
-      {
-        id: "rev-1",
-        clientName: "Priya Sharma",
-        clientAvatar: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80",
-        expertName: "Sunita Rao",
-        rating: 5,
-        comment: "Sunita explained our corporate GST exposure clearly without any fluff or expensive law firm rates. We booked her again the exact same week for our valuation audit.",
-        date: "2026-09-01",
-        status: "approved",
-        visibleToExpert: true,
-        featuredOnLanding: true,
-      }
-    ];
-  });
-
+  const [platformReviews, setPlatformReviews] = useState<any[]>([]);
   useEffect(() => {
-    const handleSync = (e?: any) => {
-      if (e?.detail) {
-        if (Array.isArray(e.detail)) {
-          setPlatformReviews(e.detail);
-          return;
-        }
-        if (e.detail?.key === "app_platform_reviews" && Array.isArray(e.detail.value)) {
-          setPlatformReviews(e.detail.value);
-          return;
-        }
-        if (e.detail?.kv?.app_platform_reviews && Array.isArray(e.detail.kv.app_platform_reviews)) {
-          setPlatformReviews(e.detail.kv.app_platform_reviews);
-          return;
-        }
-      }
+    let active = true;
+    const refresh = async () => {
       try {
-        const saved = localStorage.getItem("app_platform_reviews");
-        if (saved) {
-          const parsed = JSON.parse(saved);
-          if (Array.isArray(parsed)) {
-            setPlatformReviews(parsed);
-          }
-        }
+        const reviews = await getConsultationReviews('admin');
+        if (active) setPlatformReviews(reviews);
       } catch {}
     };
-    window.addEventListener("app_platform_reviews_updated", handleSync);
-    window.addEventListener("storage", handleSync);
-    window.addEventListener("mongo_kv_updated", handleSync);
-    window.addEventListener("mongo_db_updated", handleSync);
-    const syncPoll = setInterval(handleSync, 2000);
+    void refresh();
+    const stop = startVisibleInterval(refresh, 60_000);
+    const onStorage = (event: StorageEvent) => { if (event.key === 'consultation_reviews_updated') void refresh(); };
+    window.addEventListener('app_platform_reviews_updated', refresh);
+    window.addEventListener('storage', onStorage);
     return () => {
-      window.removeEventListener("app_platform_reviews_updated", handleSync);
-      window.removeEventListener("storage", handleSync);
-      window.removeEventListener("mongo_kv_updated", handleSync);
-      window.removeEventListener("mongo_db_updated", handleSync);
-      clearInterval(syncPoll);
+      active = false;
+      stop();
+      window.removeEventListener('app_platform_reviews_updated', refresh);
+      window.removeEventListener('storage', onStorage);
     };
   }, []);
 
-  const syncPlatformReviews = (updated: any[]) => {
-    setPlatformReviews(updated);
-    localStorage.setItem("app_platform_reviews", JSON.stringify(updated));
-    mongoDB.syncKv("app_platform_reviews", updated);
-    if (typeof window !== "undefined") {
-      window.dispatchEvent(new CustomEvent("app_platform_reviews_updated", { detail: updated }));
-      window.dispatchEvent(new Event("storage"));
-      window.dispatchEvent(new CustomEvent("mongo_kv_updated", { detail: { key: "app_platform_reviews" } }));
-      window.dispatchEvent(new CustomEvent("mongo_db_updated"));
-    }
+  const toggleVisibleToExpert = async (id: string) => {
+    const review = platformReviews.find(r => r.id === id);
+    if (!review) return;
+    try {
+      const updated = await moderateConsultationReview(id, 'visibility', !review.visibleToExpert);
+      setPlatformReviews(prev => prev.map(item => item.id === id ? updated : item));
+      notifyReviewsUpdated();
+      if (updated.visibleToExpert) notificationService.add({ target: 'expert', recipientId: updated.expertEmail,
+        type: 'review', title: 'Client Review Approved and Published', message: `${updated.clientName} left a ${updated.rating}★ review.`, actionLink: 'expert' });
+    } catch (error) { alert((error as Error).message); }
   };
 
-  const toggleVisibleToExpert = (id: string) => {
-    let toggledReview: any = null;
-    const updated = platformReviews.map((r) => {
-      if (r.id === id) {
-        const nextState = !r.visibleToExpert;
-        toggledReview = { ...r, visibleToExpert: nextState, status: nextState ? "approved" : r.status };
-        if (nextState) {
-          notificationService.add({
-            target: "expert",
-            recipientId: r.expertName,
-            type: "review",
-            title: "Client Review Approved & Published!",
-            message: `${r.clientName} left you a ${r.rating}★ review: "${r.comment.slice(0, 65)}..."`,
-            actionLink: "expert"
-          });
-        }
-        return toggledReview;
-      }
-      return r;
-    });
-    syncPlatformReviews(updated);
-
-    // Synchronize directly with the target expert's dedicated review keys
-    if (toggledReview) {
-      const expNameLower = (toggledReview.expertName || "").toLowerCase().trim();
-      const expClean = expNameLower.replace(/[^a-z0-9]/g, "_");
-      const expEmailLower = (toggledReview.expertEmail || "").toLowerCase().trim();
-
-      const targetKeys = new Set<string>();
-      if (expClean) targetKeys.add(`expert_reviews_${expClean}`);
-      if (expEmailLower) targetKeys.add(`expert_reviews_${expEmailLower}`);
-      if (expClean === "jk" || expNameLower.includes("jk")) {
-        targetKeys.add("expert_reviews_jk");
-        targetKeys.add("expert_reviews_jk@registry.com");
-      }
-
-      // Also check experts list prop
-      const matchedExp = experts?.find((e: any) => 
-        e.name?.toLowerCase() === expNameLower || 
-        (e.initials && e.initials.toLowerCase() === expNameLower) ||
-        (e.name && e.name.toLowerCase().includes(expNameLower))
-      );
-      if (matchedExp) {
-        if (matchedExp.email) targetKeys.add(`expert_reviews_${matchedExp.email.toLowerCase().trim()}`);
-        if (matchedExp.id) targetKeys.add(`expert_reviews_${matchedExp.id.toLowerCase().trim()}`);
-      }
-
-      targetKeys.forEach(key => {
-        try {
-          const raw = localStorage.getItem(key);
-          let list: any[] = [];
-          if (raw) {
-            try { list = JSON.parse(raw); } catch {}
-          }
-          if (!Array.isArray(list)) list = [];
-
-          if (toggledReview.visibleToExpert) {
-            const existingIdx = list.findIndex((item: any) => item.id === toggledReview.id);
-            const reviewItem = {
-              id: toggledReview.id,
-              from: toggledReview.clientName,
-              note: toggledReview.comment,
-              stars: toggledReview.rating,
-              date: toggledReview.date,
-              visibleToExpert: true
-            };
-            if (existingIdx >= 0) {
-              list[existingIdx] = reviewItem;
-            } else {
-              list.unshift(reviewItem);
-            }
-          } else {
-            list = list.filter((item: any) => item.id !== toggledReview.id);
-          }
-
-          localStorage.setItem(key, JSON.stringify(list));
-          mongoDB.syncKv(key, list);
-        } catch {}
-      });
-    }
+  const toggleFeaturedOnLanding = async (id: string) => {
+    const review = platformReviews.find(r => r.id === id);
+    if (!review) return;
+    try {
+      const updated = await moderateConsultationReview(id, 'feature', !review.featuredOnLanding);
+      setPlatformReviews(prev => prev.map(item => item.id === id ? updated : item));
+      notifyReviewsUpdated();
+      if (updated.featuredOnLanding && updated.visibleToExpert) notificationService.add({ target: 'all', type: 'announcement',
+        title: 'Featured Story Spotlighted on Homepage!', message: `A client review for ${updated.expertName} was featured.`, actionLink: 'landing' });
+    } catch (error) { alert((error as Error).message); }
   };
 
-  const toggleFeaturedOnLanding = (id: string) => {
-    const updated = platformReviews.map((r) => {
-      if (r.id === id) {
-        const nextState = !r.featuredOnLanding;
-        if (nextState) {
-          notificationService.add({
-            target: "all",
-            type: "announcement",
-            title: "Featured Story Spotlighted on Homepage!",
-            message: `New client review for ${r.expertName} from ${r.clientName} has been spotlighted on the Mentora homepage.`,
-            actionLink: "landing"
-          });
-        }
-        return { ...r, featuredOnLanding: nextState };
-      }
-      return r;
-    });
-    syncPlatformReviews(updated);
-  };
-
-  const deletePlatformReview = (id: string) => {
-    if (confirm("Are you sure you want to reject/delete this review?")) {
-      const updated = platformReviews.filter((r) => r.id !== id);
-
-      // Purge this deleted review from all expert-specific review keys
-      try {
-        const keysToClean: string[] = [];
-        for (let i = 0; i < localStorage.length; i++) {
-          const k = localStorage.key(i);
-          if (k && k.startsWith("expert_reviews_")) {
-            keysToClean.push(k);
-          }
-        }
-        keysToClean.forEach(k => {
-          try {
-            const raw = localStorage.getItem(k);
-            if (raw) {
-              const list = JSON.parse(raw);
-              if (Array.isArray(list)) {
-                const cleaned = list.filter((item: any) => item && item.id !== id);
-                if (cleaned.length !== list.length) {
-                  localStorage.setItem(k, JSON.stringify(cleaned));
-                  mongoDB.syncKv(k, cleaned);
-                }
-              }
-            }
-          } catch {}
-        });
-      } catch {}
-
-      syncPlatformReviews(updated);
-    }
+  const deletePlatformReview = async (id: string) => {
+    if (!confirm('Delete this review?')) return;
+    try {
+      await moderateConsultationReview(id, 'delete');
+      setPlatformReviews(prev => prev.filter(item => item.id !== id));
+      notifyReviewsUpdated();
+    } catch (error) { alert((error as Error).message); }
   };
 
   // ==============================================================
@@ -1499,7 +1341,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
                             meetUrl: b.meetUrl || "",
                             meetCode: b.meetCode || "",
                             reviewed: b.reviewed === true,
-                            payoutTransferred: isDone
+                            payoutTransferred: false
                           });
                         }
                       }
@@ -1556,7 +1398,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
                             meetUrl: s.meetUrl || "",
                             meetCode: s.meetCode || "",
                             reviewed: s.reviewed === true,
-                            payoutTransferred: isDone
+                            payoutTransferred: false
                           });
                         }
                       }
@@ -1751,11 +1593,16 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
   };
 
   // Action: Admin marks session as completed
-  const handleMarkSessionCompleted = (sessId: string) => {
+  const handleMarkSessionCompleted = async (sessId: string) => {
     const target = platformSessions.find(s => s.id === sessId);
     if (!target) return;
-    if (!confirm(`Mark consultation "${target.topic}" between ${target.client} and ${target.expert} as Completed?\n\nThis will trigger the Client to submit Rating & Review, and release escrow payout.`)) {
+    if (!confirm(`Mark consultation "${target.topic}" between ${target.client} and ${target.expert} as Completed?\n\nThis will invite the client to submit a rating and review.`)) {
       return;
+    }
+
+    if (!target.manualSession && !/^sess-\d+$/.test(target.id)) {
+      const result = await updateBookingStatus(sessId, 'completed', {}, { userRole: 'admin' });
+      if (!result.success) { alert(result.error); return; }
     }
 
     const updated = platformSessions.map(s => {
@@ -1765,15 +1612,13 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
           completed: true,
           isLive: false,
           status: "Completed",
-          completedAt: new Date().toISOString(),
-          payoutTransferred: true
+          completedAt: new Date().toISOString()
         };
       }
       return s;
     });
     setPlatformSessions(updated);
     syncPlatformSessions(updated);
-    updateBookingStatus(sessId, 'completed', {}, { userRole: 'admin' }).catch(() => {});
 
     // Sync to all client_upcoming_* keys
     for (let i = 0; i < localStorage.length; i++) {
@@ -1835,7 +1680,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
       recipientId: target.expertEmail || target.expert,
       type: "session",
       title: "Consultation Marked Completed by Admin ✅",
-      message: `Session "${target.topic}" with ${target.client} marked Completed. Payout of ₹${target.payout || 600} disbursed to your wallet.`,
+      message: `Session "${target.topic}" with ${target.client} marked Completed.`,
       actionLink: "expert"
     });
     notificationService.add({
@@ -1848,14 +1693,19 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
     });
 
     confetti({ particleCount: 50, spread: 50, origin: { y: 0.5 } });
-    alert(`✅ Consultation Marked Completed!\nClient invited to rate expert, and payout disbursed.`);
+    alert(`✅ Consultation Marked Completed!\nThe client has been invited to rate the expert.`);
   };
 
   // Action: Admin deletes session (Soft delete for Admin Portal only)
-  const handleDeleteSession = (sessId: string) => {
+  const handleDeleteSession = async (sessId: string) => {
     const target = platformSessions.find(s => s.id === sessId);
-    if (!confirm(`Are you sure you want to delete session "${target?.topic || sessId}"? This will remove it from all active records.`)) {
+    if (!confirm(`Are you sure you want to delete session "${target?.topic || sessId}"? This will hide it from the Admin portal.`)) {
       return;
+    }
+
+    if (!target?.manualSession && !/^sess-\d+$/.test(sessId)) {
+      const result = await deleteBooking(sessId, { userRole: 'admin' });
+      if (!result.success) { alert(result.error); return; }
     }
 
     try {
@@ -1870,7 +1720,6 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
 
     const updated = platformSessions.filter(s => s.id !== sessId);
     syncPlatformSessions(updated);
-    deleteBooking(sessId, { userRole: 'admin' }).catch(() => {});
 
     if (typeof window !== "undefined") {
       window.dispatchEvent(new CustomEvent("mongo_kv_updated", { detail: { key: "app_platform_sessions" } }));
@@ -1880,54 +1729,26 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
   };
 
   // Action: Admin disburses payout from escrow to expert wallet
-  const handleDisbursePayout = (sessId: string) => {
+  const handleDisbursePayout = async (sessId: string) => {
     const target = platformSessions.find(s => s.id === sessId);
     if (!target) return;
-    const amt = target.payout || 600;
-    if (!confirm(`Release and disburse payout of ₹${amt.toLocaleString("en-IN")} to ${target.expert}'s wallet now?`)) {
-      return;
-    }
-
-    const updated = platformSessions.map(s => {
-      if (s.id === sessId) {
-        return { ...s, payoutTransferred: true };
-      }
-      return s;
-    });
-    syncPlatformSessions(updated);
-
-    // Credit expert wallet in localStorage & mongoDB
-    const expEmailKey = (target.expertEmail || target.expert || "").toLowerCase().trim();
-    const walletKey = `expert_wallet_${expEmailKey}`;
-    const curWall = Number(localStorage.getItem(walletKey) || "0");
-    const nextWall = curWall + amt;
-    localStorage.setItem(walletKey, String(nextWall));
-    mongoDB.syncKv(walletKey, String(nextWall));
-
-    // Also credit JK fallback if target is JK
-    if (expEmailKey.includes("jk") || target.expert?.toLowerCase().includes("jk")) {
-      ["expert_wallet_jk", "expert_wallet_jk@registry.com"].forEach(wk => {
-        const val = Number(localStorage.getItem(wk) || "0") + amt;
-        localStorage.setItem(wk, String(val));
-        mongoDB.syncKv(wk, String(val));
-      });
-    }
-
+    const amount = target.payout ?? Math.round(Number(target.rate || 0) * 0.85);
+    if (!confirm(`Release ₹${amount.toLocaleString("en-IN")} to ${target.expert}'s wallet?`)) return;
+    const result = await disburseConsultationPayout(sessId);
+    if (!result.success) { alert(result.error); return; }
+    syncPlatformSessions(platformSessions.map(s => s.id === sessId ? { ...s, payoutTransferred: true } : s));
+    if (result.duplicate) return;
     notificationService.add({
-      target: "expert",
-      recipientId: target.expertEmail || target.expert,
-      type: "wallet",
-      title: "Escrow Payout Released by Admin 💳",
-      message: `₹${amt.toLocaleString("en-IN")} from completed session "${target.topic}" has been credited to your wallet balance.`,
-      actionLink: "expert"
+      target: "expert", recipientId: target.expertEmail || target.expert, type: "wallet",
+      title: "Consultation payout released",
+      message: `₹${amount.toLocaleString("en-IN")} for "${target.topic}" was credited to your wallet.`, actionLink: "expert"
     });
-
     confetti({ particleCount: 60, spread: 60, origin: { y: 0.5 } });
-    alert(`✅ Payout Disbursed Successfully!\n₹${amt.toLocaleString("en-IN")} credited to ${target.expert}'s registered account.`);
+    alert(`₹${amount.toLocaleString("en-IN")} was credited to ${target.expert}'s wallet.`);
   };
 
   // Action: Admin starts live meeting
-  const handleStartLiveMeeting = (sessId: string) => {
+  const handleStartLiveMeeting = async (sessId: string) => {
     const target = platformSessions.find(s => s.id === sessId);
     if (!target) return;
 
@@ -1935,6 +1756,11 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
     if (!meetUrl) {
       alert(`⚠️ Cannot launch live meeting for "${target.topic}".\n\nThe Expert has not provided a Google Meet link yet for this session.`);
       return;
+    }
+
+    if (!target.manualSession && !/^sess-\d+$/.test(target.id)) {
+      const result = await updateBookingStatus(sessId, 'live', { meet_link: meetUrl }, { userRole: 'admin' });
+      if (!result.success) { alert(result.error); return; }
     }
 
     const updated = platformSessions.map(s => {
@@ -1951,7 +1777,6 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
     });
     setPlatformSessions(updated);
     syncPlatformSessions(updated);
-    updateBookingStatus(sessId, 'live', { meet_link: meetUrl }, { userRole: 'admin' }).catch(() => {});
 
     alert(`🔴 Session Moved to LIVE Now!\n\nClient: ${target.client}\nExpert: ${target.expert}\nGoogle Meet: ${meetUrl}\n\nBoth participants and Admin can join the active Google Meet consultation.`);
   };
@@ -1970,6 +1795,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
 
     const newSess = {
       id: `sess-${Date.now()}`,
+      manualSession: true,
       client: newSessClient.trim(),
       clientEmail: `${newSessClient.toLowerCase().replace(/[^a-z0-9]/g, "")}@client.com`,
       expert: newSessExpert,
@@ -2032,12 +1858,12 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
     }));
   };
 
-  const handleSaveMarkup = (id: string) => {
+  const handleSaveMarkup = async (id: string) => {
     const item = markupState[id];
     if (!item) return;
-    onUpdateExpertMarkup(id, item.base, item.markup);
+    if (!await onUpdateExpertMarkup(id, item.base, item.markup)) return;
     confetti({ particleCount: 40, spread: 40, origin: { y: 0.5 } });
-    alert(`✅ Saved Pricing Rule to MongoDB! Client Price updated to ₹${item.base + item.markup}/hr (Base ₹${item.base} + Admin Profit ₹${item.markup}).`);
+    alert(`✅ Pricing rule saved. Client Price updated to ₹${item.base + item.markup}/hr (Base ₹${item.base} + Admin Profit ₹${item.markup}).`);
   };
 
   const handleApprove = async (id: string) => {
@@ -2049,8 +1875,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-admin-id': 'admin',
-          'x-admin-token': 'admin-session-token'
+          ...apiSessionHeaders('admin')
         },
         body: JSON.stringify({ expertId: id, email: item?.email, adminId: 'admin' })
       });
@@ -2113,8 +1938,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-admin-id': 'admin',
-          'x-admin-token': 'admin-session-token'
+          ...apiSessionHeaders('admin')
         },
         body: JSON.stringify({
           expertId: rejectModalItem.id,
@@ -2185,8 +2009,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-admin-id': 'admin',
-          'x-admin-token': 'admin-session-token'
+          ...apiSessionHeaders('admin')
         },
         body: JSON.stringify({ expertId: id, adminId: 'admin' })
       });

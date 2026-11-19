@@ -1,6 +1,6 @@
+import { apiSessionHeaders } from './lib/apiSession';
 // Temporary stub service to maintain compatibility while migrating to Supabase
 // This service bridges the old MongoDB API calls to new Supabase services
-import { supabase } from './supabaseClient';
 import { expertiseService, getExpertSlimByKey } from './services/supabaseExpertiseService';
 import { cached, invalidate } from './lib/requestCache';
 import { notificationService } from './services/supabaseNotificationService';
@@ -84,6 +84,47 @@ const mapAvailability = (slot: any): ExpertAvailabilityDoc => ({
 });
 
 // Stub implementation to maintain API compatibility
+async function postProjectReview(path: string, body: unknown, role?: string) {
+  try {
+    const response = await fetch(`/api/project-reviews/${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...apiSessionHeaders(role) },
+      body: JSON.stringify(body)
+    });
+    return await response.json();
+  } catch {
+    return { success: false, error: 'Project Review service unavailable. Check your connection and try again.' };
+  }
+}
+
+async function requestBlog(path: string, method = 'GET', body?: unknown, admin = false) {
+  try {
+    const response = await fetch(path, {
+      method, headers: { ...(body !== undefined && { 'Content-Type': 'application/json' }), ...(admin && apiSessionHeaders('admin')) },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+    const result = await response.json();
+    if (response.ok && method !== 'GET') {
+      localStorage.setItem('mentora_blogs_updated', String(Date.now()));
+      window.dispatchEvent(new Event('blogs_updated'));
+    }
+    return result;
+  } catch {
+    return { success: false, error: 'Blog service unavailable. Please try again.' };
+  }
+}
+
+async function writeAvailability(path: string, method: string, data?: unknown) {
+  const response = await fetch(path, {
+    method, headers: { 'Content-Type': 'application/json', ...apiSessionHeaders() },
+    body: data === undefined ? undefined : JSON.stringify(data)
+  });
+  const result = await response.json();
+  if (!response.ok || !result.success) throw new Error(result.error || 'Unable to save availability');
+  window.dispatchEvent(new Event('mongo_db_updated'));
+  return result;
+}
+
 export const mongoDB = {
   // Slim + cached list (see supabaseExpertiseService). { force: true } skips the cache.
   async getExperts(opts: { force?: boolean } = {}): Promise<any[]> {
@@ -228,9 +269,9 @@ export const mongoDB = {
   },
 
   async verifyAdminSession(token: string): Promise<{ success: boolean; authenticated: boolean }> {
-    const adminToken = localStorage.getItem('admin_token') || sessionStorage.getItem('admin_token') || localStorage.getItem('admin_session_token');
-    const valid = Boolean(token && (token === adminToken || token === localStorage.getItem('admin_session_token') || token.length > 5));
-    return { success: valid, authenticated: valid };
+    const response = await fetch('/api/auth/verify-admin', { headers: { Authorization: `Bearer ${token}` } });
+    if (!response.ok) throw new Error('Administrator session verification unavailable');
+    return response.json();
   },
 
   subscribe(listener: () => void) {
@@ -242,10 +283,13 @@ export const mongoDB = {
     };
   },
 
-  adminLogout() {
+  async adminLogout() {
+    const headers = apiSessionHeaders('admin');
     localStorage.removeItem('admin_session_token');
     localStorage.removeItem('admin_logged_in');
     window.dispatchEvent(new Event('mongo_db_updated'));
+    const response = await fetch('/api/auth/admin-logout', { method: 'POST', headers });
+    if (!response.ok) throw new Error('Administrator session could not be revoked.');
   },
 
   async submitExpertVerification(data: any): Promise<any> {
@@ -257,7 +301,7 @@ export const mongoDB = {
 
   async saveExpertMarkup(expertId: string, baseRate: number, markup: number): Promise<any> {
     const response = await fetch('/api/experts/markup', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...apiSessionHeaders('admin') },
       body: JSON.stringify({ expertId, baseRate, markup })
     });
     return await response.json();
@@ -283,13 +327,12 @@ export const mongoDB = {
   async approvePendingVerification(item: any): Promise<any> {
     const id = item?.id ?? item?.expertId;
     const email = item?.email;
-    const adminId = localStorage.getItem('admin_token') || localStorage.getItem('admin_session_token') || 'admin';
 
     try {
       const response = await fetch('/api/admin/approve-expert', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ expertId: id, email, adminId, comments: item.comments || '' })
+        headers: { 'Content-Type': 'application/json', ...apiSessionHeaders('admin') },
+        body: JSON.stringify({ expertId: id, email, comments: item.comments || '' })
       });
       const result = await response.json();
 
@@ -298,13 +341,8 @@ export const mongoDB = {
         return { success: true, experts: await this.getExperts(), pendingVerifications: await this.getPendingVerifications() };
       }
       throw new Error(result.error || 'Approval failed');
-    } catch (err) {
-      console.error('Error approving expert:', err);
-      // Fallback
-      if (id) await this.updateExpertProfile(id, { verified: true, verificationStatus: 'approved' });
-      const pending = await this.getPendingVerifications();
-      writeStored('pending_verifications', pending.filter((entry: any) => entry.id !== id && (!email || entry.email?.toLowerCase() !== email.toLowerCase())));
-      return { success: true, experts: await this.getExperts(), pendingVerifications: await this.getPendingVerifications() };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Approval failed' };
     }
   },
 
@@ -356,10 +394,6 @@ export const mongoDB = {
     });
     const result = await response.json();
     const user = result.user ? { ...result.user, name: result.user.name || result.user.full_name, token: result.token || result.user.token } : result.user;
-    if (result.success && (result.token || user?.token)) {
-      localStorage.setItem('admin_session_token', result.token || user.token);
-      localStorage.setItem('admin_token', result.token || user.token);
-    }
     return { ...result, user, message: result.message || result.error || '' };
   },
 
@@ -371,24 +405,28 @@ export const mongoDB = {
     });
     const result = await response.json();
     const user = result.user ? { ...result.user, name: result.user.name || result.user.full_name, token: result.token || result.user.token } : result.user;
-    if (result.success && (result.token || user?.token)) {
-      localStorage.setItem('admin_session_token', result.token || user.token);
-      localStorage.setItem('admin_token', result.token || user.token);
-    }
     return { ...result, user, message: result.message || result.error || '' };
   },
 
   // Experts
   async searchAndRankExperts(query: string) {
-    const experts = await expertiseService.getExperts();
-    // Simple ranking based on rating and rate
-    return experts
-      .filter(e => 
-        e.name?.toLowerCase().includes(query.toLowerCase()) ||
-        e.field?.toLowerCase().includes(query.toLowerCase()) ||
-        e.skills?.some(s => s.toLowerCase().includes(query.toLowerCase()))
-      )
-      .sort((a, b) => (b.rating || 0) - (a.rating || 0));
+    const stopWords = new Set(['an', 'and', 'at', 'for', 'help', 'in', 'is', 'me', 'my', 'of', 'on', 'the', 'to', 'with']);
+    const terms = (query.toLowerCase().match(/[a-z0-9]+/g) || []).filter(term => term.length > 1 && !stopWords.has(term));
+    const related = [
+      ['math', 'maths', 'mathematics', 'teaching', 'education'], ['civil', 'construction', 'infrastructure'],
+      ['bank', 'banking', 'lending', 'credit'], ['tax', 'taxation', 'gst', 'cfo', 'finance'],
+      ['legal', 'law', 'compliance'], ['hr', 'recruitment', 'personnel'], ['marketing', 'branding', 'advertising'],
+      ['manufacturing', 'production', 'factory'], ['textile', 'apparel', 'garment']
+    ];
+    const expanded = new Set(terms);
+    for (const group of related) if (group.some(word => expanded.has(word))) group.forEach(word => expanded.add(word));
+    const experts = await this.getExperts();
+    return experts.filter(expert => {
+      if (expert.verified !== true || expert.rejected || expert.verificationStatus === 'rejected') return false;
+      const searchable = [expert.name, expert.field, expert.title, expert.bio, expert.company, expert.education, expert.skills]
+        .flat().filter(Boolean).join(' ').toLowerCase();
+      return Array.from(expanded).some(term => searchable.includes(term));
+    }).sort((a, b) => (Number(b.rating) - Number(a.rating)) || (Number(a.rate) - Number(b.rate)));
   },
 
   getExpertDocuments(_idOrEmailOrName: string): ExpertDocumentsRecord | null {
@@ -398,8 +436,12 @@ export const mongoDB = {
 
   // Availability
   async getAvailabilities(expertId: string): Promise<any[]> {
-    const data = await expertiseService.getExpertAvailability(expertId);
-    return data.map(mapAvailability);
+    const response = await fetch(`/api/availability?expertId=${encodeURIComponent(expertId)}`, { headers: apiSessionHeaders() });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'Unable to load availability');
+    const slots = (result.availabilities || []).map(mapAvailability);
+    writeStored(`availabilities_${expertId}`, slots);
+    return slots;
   },
 
   getLocalAvailabilities(expertId?: string): ExpertAvailabilityDoc[] {
@@ -414,7 +456,7 @@ export const mongoDB = {
   async bookAvailability(slotId: string, data: any) {
     const response = await fetch('/api/availability/book', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...apiSessionHeaders('client') },
       body: JSON.stringify({ slotId, ...data })
     });
     return await response.json();
@@ -424,7 +466,7 @@ export const mongoDB = {
     try {
       const response = await fetch('/api/availability/release', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...apiSessionHeaders('client') },
         body: JSON.stringify({ slotId, bookingId })
       });
       return await response.json();
@@ -439,76 +481,50 @@ export const mongoDB = {
   // pages of 20. We follow `nextOffset` until every page is loaded (max 10 pages = 200 reviews),
   // so the lists stay complete. Full details load only when one review is opened (?id=…).
   async getProjectReviews(filters: any) {
-    try {
-      // Drop empty filters so the URL never contains "clientId=undefined".
-      const clean: Record<string, string> = {};
-      for (const [k, v] of Object.entries(filters || {})) {
-        if (v !== undefined && v !== null && v !== '') clean[k] = String(v);
-      }
-      if (clean.id) {
-        const response = await fetch(`/api/project-reviews?${new URLSearchParams(clean)}`);
-        if (!response.ok) return [];
-        const data = await response.json();
-        return data?.projectReview ? [data.projectReview] : [];
-      }
-
-      const all: any[] = [];
-      let offset = 0;
-      for (let page = 0; page < 10; page++) {
-        const params = new URLSearchParams({ ...clean, offset: String(offset) });
-        const response = await fetch(`/api/project-reviews?${params}`);
-        if (!response.ok) break;
-        const data = await response.json();
-        const rows = Array.isArray(data) ? data : Array.isArray(data?.projectReviews) ? data.projectReviews : [];
-        all.push(...rows);
-        if (!data?.hasMore || data?.nextOffset == null) break;
-        offset = data.nextOffset;
-      }
-      return all;
-    } catch {
-      return [];
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(filters || {})) {
+      if (value !== undefined && value !== null && value !== '') params.set(key, String(value));
     }
-  },
-
-  // Latest audit events across all project reviews (admin audit tab), computed on the server.
-  async getProjectReviewActivity(limit = 100): Promise<any[]> {
-    try {
-      const response = await fetch(`/api/project-reviews/activity?limit=${limit}`);
-      if (!response.ok) return [];
+    const headers = apiSessionHeaders();
+    if (params.has('id')) {
+      const response = await fetch(`/api/project-reviews?${params}`, { headers });
+      const data = response.ok ? await response.json() : {};
+      return data.projectReview ? [data.projectReview] : [];
+    }
+    const all: any[] = [];
+    let offset = 0;
+    for (let page = 0; page < 10; page++) {
+      params.set('offset', String(offset));
+      const response = await fetch(`/api/project-reviews?${params}`, { headers });
+      if (!response.ok) break;
       const data = await response.json();
-      return Array.isArray(data?.events) ? data.events : [];
-    } catch {
-      return [];
+      all.push(...(Array.isArray(data.projectReviews) ? data.projectReviews : []));
+      if (!data.hasMore || data.nextOffset == null) break;
+      offset = data.nextOffset;
     }
+    return all;
   },
 
-  async getProjectReviewPricing(expertId: string | undefined, all: boolean, _role: string): Promise<any> {
-    const experts = await expertiseService.getExperts();
-    const selectedExperts = expertId ? experts.filter(expert => expert.id === expertId) : experts;
-    const platformFeeConfig = readStored('project_review_platform_fee', { feeType: 'fixed', feeValue: 200 });
-    return {
-      success: true,
-      experts: selectedExperts.map(expert => ({ ...expert, projectRate: expert.project_rate })),
-      projectRate: selectedExperts[0]?.project_rate,
-      platformFeeConfig,
-      all
-    };
+  async getProjectReviewActivity(limit = 100): Promise<any[]> {
+    const response = await fetch(`/api/project-reviews/activity?limit=${limit}`, { headers: apiSessionHeaders('admin') });
+    if (!response.ok) return [];
+    const data = await response.json();
+    return Array.isArray(data.events) ? data.events : [];
   },
 
-  async updateProjectReviewPrice(expertId: string, price: number, ..._metadata: any[]): Promise<any> {
-    const expert = await expertiseService.updateExpert(expertId, { project_rate: price });
-    return expert
-      ? { success: true, projectRate: price, expert }
-      : { success: false, error: 'Expert not found or unavailable' };
+  async getProjectReviewPricing(expertId: string | undefined, all: boolean, role: string) {
+    const params = new URLSearchParams({ all: String(all) });
+    if (expertId) params.set('expertId', expertId);
+    const response = await fetch(`/api/project-reviews/pricing?${params}`, { headers: apiSessionHeaders(role) });
+    return response.json();
+  },
+
+  async updateProjectReviewPrice(expertId: string, price: number, role?: string, ..._metadata: any[]) {
+    return postProjectReview('pricing', { expertId, price }, role);
   },
 
   async respondProjectReview(reviewId: string, action: string, data: any) {
-    const response = await fetch(`/api/project-reviews/${reviewId}/respond`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action, ...data })
-    });
-    return await response.json();
+    return postProjectReview(`${encodeURIComponent(reviewId)}/respond`, { action, ...data }, 'expert');
   },
 
   // KV Storage (synced to backend /api/kv with localStorage caching/fallback)
@@ -563,295 +579,125 @@ export const mongoDB = {
   },
 
   // Additional methods for compatibility
-  async getProjectReviewPlatformFee(): Promise<any> {
+  async getProjectReviewPlatformFee() {
     try {
       const response = await fetch('/api/platform-settings');
-      const data = await response.json();
-      return { ...data, config: data.config || { feeType: 'fixed', feeValue: 200 } };
+      return await response.json();
     } catch {
-      return { success: true, config: readStored('project_review_platform_fee', { feeType: 'fixed', feeValue: 200 }) };
+      return { success: false, config: readStored('project_review_platform_fee', { feeType: 'fixed', feeValue: 200 }) };
     }
   },
 
-  async updateProjectReviewPlatformFee(feeType: string, feeValue: number, ...metadata: any[]): Promise<any> {
-    const response = await fetch('/api/platform-settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ feeType, feeValue, ...(metadata[0] || {}) })
-    });
-    const result = await response.json();
-    if (result.success) writeStored('project_review_platform_fee', { feeType, feeValue });
+  async updateProjectReviewPlatformFee(feeType: string, feeValue: number, ..._metadata: any[]) {
+    const result = await postProjectReview('platform-fee', { feeType, feeValue }, 'admin');
+    if (result.success) {
+      writeStored('project_review_platform_fee', result.config);
+      window.dispatchEvent(new Event('platform_fee_updated'));
+    }
     return result;
   },
 
   async requestProjectReview(data: any) {
-    const response = await fetch('/api/project-reviews/request', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data)
-    });
-    return await response.json();
+    return postProjectReview('request', data, 'client');
   },
 
   async getProjectReview(id: string) {
-    const response = await fetch(`/api/project-reviews?id=${id}`);
+    const response = await fetch(`/api/project-reviews/${encodeURIComponent(id)}`, { headers: apiSessionHeaders() });
     const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Unable to open this Project Review');
     return data.projectReview;
   },
 
-  async sendProjectReviewChat(reviewId: string, message: any): Promise<any> {
-    const response = await fetch(`/api/project-reviews/${reviewId}/chat`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(message)
-    });
-    return await response.json();
+  async sendProjectReviewChat(reviewId: string, message: any) {
+    return postProjectReview(`${encodeURIComponent(reviewId)}/chat`, message);
   },
 
-  async submitProjectMaterials(reviewId: string, materials: any): Promise<any> {
-    const response = await fetch(`/api/project-reviews/${reviewId}/materials`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(materials)
-    });
-    return await response.json();
+  async submitProjectMaterials(reviewId: string, materials: any) {
+    return postProjectReview(`${encodeURIComponent(reviewId)}/submit-project`, materials, 'client');
   },
 
-  async proposeProjectReviewTime(reviewId: string, time: any): Promise<any> {
-    const response = await fetch(`/api/project-reviews/${reviewId}/times`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(time)
-    });
-    return await response.json();
+  async proposeProjectReviewTime(reviewId: string, time: any) {
+    return postProjectReview(`${encodeURIComponent(reviewId)}/propose-time`, time);
   },
 
-  async respondProjectReviewTime(reviewId: string, proposedTimeId: string, action: string, responderRole: string): Promise<any> {
-    const response = await fetch(`/api/project-reviews/${reviewId}/times/${proposedTimeId}/respond`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, responderRole })
-    });
-    return await response.json();
+  async respondProjectReviewTime(reviewId: string, proposedTimeId: string, action: string, _responderRole: string) {
+    return postProjectReview(`${encodeURIComponent(reviewId)}/respond-time`, { proposedTimeId, action });
   },
 
-  async sendProjectReviewMeetLink(reviewId: string, meetingId: string, link: string): Promise<any> {
-    const response = await fetch(`/api/project-reviews/${reviewId}/meet-link`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ meetingId, link })
-    });
-    return await response.json();
+  async sendProjectReviewMeetLink(reviewId: string, meetingId: string, link: string) {
+    return postProjectReview(`${encodeURIComponent(reviewId)}/send-meet-link`, { meetingId, googleMeetLink: link }, 'expert');
   },
 
-  async completeProjectReviewMeeting(reviewId: string, meetingId: string): Promise<any> {
-    const response = await fetch(`/api/project-reviews/${reviewId}/meetings/${meetingId}/complete`, { method: 'POST' });
-    return await response.json();
+  async completeProjectReviewMeeting(reviewId: string, meetingId: string) {
+    return postProjectReview(`${encodeURIComponent(reviewId)}/complete-meeting`, { meetingId });
   },
 
-  async completeProjectReview(reviewId: string, feedback: any): Promise<any> {
-    const response = await fetch(`/api/project-reviews/${reviewId}/complete`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(feedback)
-    });
-    return await response.json();
+  async completeProjectReview(reviewId: string, feedback: any) {
+    return postProjectReview(`${encodeURIComponent(reviewId)}/complete-review`, feedback, 'expert');
   },
 
-  async archiveProjectReview(reviewId: string, role: string): Promise<any> {
-    const response = await fetch(`/api/project-reviews/${reviewId}/archive`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role })
-    });
-    return await response.json();
+  async archiveProjectReview(reviewId: string, role: string) {
+    return postProjectReview(`${encodeURIComponent(reviewId)}/archive`, {}, role);
   },
 
-  async getPublicBlogs(): Promise<any> {
-    try {
-      const response = await fetch('/api/blogs');
-      const data = await response.json();
-      if (data?.articles || data?.success) {
-        return {
-          success: true,
-          articles: data.articles || data.blogs || [],
-          categories: data.categories || []
-        };
-      }
-    } catch {}
-    const articles = readStored<any[]>('admin_blogs', []).filter(article => article.status === 'published');
-    const categories = readStored<any[]>('admin_blog_categories', []);
-    return { success: true, articles, categories };
+  async getPublicBlogs() {
+    return requestBlog('/api/blogs');
   },
 
-  async getPublicBlogBySlug(slug: string): Promise<any> {
-    const article = readStored<any[]>('admin_blogs', []).find(item => item.slug === slug && item.status === 'published') || null;
-    return { success: Boolean(article), article };
+  async getPublicBlogBySlug(slug: string) {
+    return requestBlog(`/api/blogs/${encodeURIComponent(slug)}`);
   },
 
-  async getAdminBlogs(_role: string, filters: Record<string, any> = {}): Promise<any> {
-    const allArticles = readStored<any[]>('admin_blogs', []);
-    let articles = allArticles;
-    if (filters.status && filters.status !== 'all') articles = articles.filter(item => item.status === filters.status);
-    if (filters.category && filters.category !== 'all') articles = articles.filter(item => item.category === filters.category);
-    if (filters.type && filters.type !== 'all') articles = articles.filter(item => item.type === filters.type);
-    if (filters.featured === 'featured') articles = articles.filter(item => item.featured);
-    if (filters.featured === 'unfeatured') articles = articles.filter(item => !item.featured);
-    if (filters.search) articles = articles.filter(item => `${item.title} ${item.excerpt} ${item.content}`.toLowerCase().includes(String(filters.search).toLowerCase()));
-    return {
-      success: true,
-      articles,
-      categories: readStored<any[]>('admin_blog_categories', []),
-      stats: { total: allArticles.length, published: allArticles.filter(item => item.status === 'published').length }
-    };
+  async getAdminBlogs(_role: string, filters: Record<string, any> = {}) {
+    return requestBlog(`/api/admin/blogs?${new URLSearchParams(filters)}`, 'GET', undefined, true);
   },
 
-  async createAdminBlog(payload: any, _role: string): Promise<any> {
-    const articles = readStored<any[]>('admin_blogs', []);
-    const article = { ...payload, id: payload.id || `blog-${Date.now()}`, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-    writeStored('admin_blogs', [...articles, article]);
-    window.dispatchEvent(new Event('blogs_updated'));
-    return { success: true, article, message: 'Article saved.' };
+  async createAdminBlog(payload: any, _role: string) {
+    return requestBlog('/api/admin/blogs', 'POST', payload, true);
   },
 
-  async updateAdminBlog(id: string, payload: any, _role: string): Promise<any> {
-    const articles = readStored<any[]>('admin_blogs', []).map(article => article.id === id
-      ? { ...article, ...payload, updatedAt: new Date().toISOString() }
-      : article);
-    writeStored('admin_blogs', articles);
-    window.dispatchEvent(new Event('blogs_updated'));
-    return { success: true, article: articles.find(article => article.id === id), message: 'Article updated.' };
+  async updateAdminBlog(id: string, payload: any, _role: string) {
+    return requestBlog(`/api/admin/blogs/${encodeURIComponent(id)}`, 'PUT', payload, true);
   },
 
-  async publishAdminBlog(id: string, role: string) {
-    return this.updateAdminBlog(id, { status: 'published' }, role);
+  async publishAdminBlog(id: string, _role: string) {
+    return requestBlog(`/api/admin/blogs/${encodeURIComponent(id)}/publish`, 'POST', {}, true);
   },
 
-  async unpublishAdminBlog(id: string, role: string) {
-    return this.updateAdminBlog(id, { status: 'draft' }, role);
+  async unpublishAdminBlog(id: string, _role: string) {
+    return requestBlog(`/api/admin/blogs/${encodeURIComponent(id)}/unpublish`, 'POST', {}, true);
   },
 
-  async toggleFeatureAdminBlog(id: string, featured: boolean, role: string) {
-    return this.updateAdminBlog(id, { featured }, role);
+  async toggleFeatureAdminBlog(id: string, featured: boolean, _role: string) {
+    return requestBlog(`/api/admin/blogs/${encodeURIComponent(id)}/feature`, 'POST', { featured }, true);
   },
 
-  async deleteAdminBlog(id: string, _role: string): Promise<any> {
-    writeStored('admin_blogs', readStored<any[]>('admin_blogs', []).filter(article => article.id !== id));
-    window.dispatchEvent(new Event('blogs_updated'));
-    return { success: true };
+  async deleteAdminBlog(id: string, _role: string) {
+    return requestBlog(`/api/admin/blogs/${encodeURIComponent(id)}`, 'DELETE', undefined, true);
   },
 
-  async createBlogCategory(category: any, _role: string): Promise<any> {
-    const categories = readStored<any[]>('admin_blog_categories', []);
-    const created = { ...category, id: category.id || `category-${Date.now()}` };
-    writeStored('admin_blog_categories', [...categories, created]);
-    window.dispatchEvent(new Event('blogs_updated'));
-    return { success: true, category: created };
+  async createBlogCategory(category: any, _role: string) {
+    return requestBlog('/api/admin/blogs/categories', 'POST', category, true);
   },
 
-  async deleteBlogCategory(id: string, force: boolean, _role: string): Promise<any> {
-    const categories = readStored<any[]>('admin_blog_categories', []);
-    const category = categories.find(item => item.id === id);
-    const articles = readStored<any[]>('admin_blogs', []);
-    if (!force && category && articles.some(article => article.category === category.name)) {
-      return { success: false, error: 'Category still contains articles.' };
-    }
-    writeStored('admin_blog_categories', categories.filter(item => item.id !== id));
-    if (force && category) writeStored('admin_blogs', articles.map(article => article.category === category.name ? { ...article, category: 'Uncategorized' } : article));
-    window.dispatchEvent(new Event('blogs_updated'));
-    return { success: true };
+  async deleteBlogCategory(id: string, force: boolean, _role: string) {
+    return requestBlog(`/api/admin/blogs/categories/${encodeURIComponent(id)}?force=${force}`, 'DELETE', undefined, true);
   },
 
   async saveAvailability(data: any) {
-    const isEdit = Boolean(data.id);
-    const url = isEdit ? `/api/availability/${data.id}` : '/api/availability';
-    const method = isEdit ? 'PUT' : 'POST';
+    const path = data.id ? `/api/availability/${encodeURIComponent(data.id)}` : '/api/availability';
+    const result = await writeAvailability(path, data.id ? 'PUT' : 'POST', data);
+    return { ...result, availability: mapAvailability(result.availability) };
+  },
 
-    let result: any = null;
-    try {
-      const response = await fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...data,
-          expert_id: data.expert_id ?? data.expertId,
-          availability_date: data.availability_date ?? data.availabilityDate,
-          start_time: data.start_time ?? data.startTime,
-          end_time: data.end_time ?? data.endTime
-        })
-      });
-      if (response.ok) {
-        result = await response.json();
-      } else {
-        const errJson = await response.json().catch(() => ({}));
-        console.warn('saveAvailability server error:', errJson);
-      }
-    } catch (e) {
-      console.warn('Network request failed for saveAvailability, falling back to local store:', e);
-    }
-
-    const slot: ExpertAvailabilityDoc = result?.availability
-      ? mapAvailability(result.availability)
-      : mapAvailability({
-          ...data,
-          id: data.id || `avail-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-          updatedAt: new Date().toISOString()
-        });
-
-    if (slot.expertId) {
-      const key = `availabilities_${slot.expertId}`;
-      const current = readStored<any[]>(key, []);
-      writeStored(key, [...current.filter(item => item.id !== slot.id), slot]);
-    }
-
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('mongo_db_updated'));
-    }
-
-    return result || { success: true, availability: slot };
+  async saveAvailabilityBatch(expertId: string, availabilityDate: string, slots: Array<{ startTime: string; endTime: string }>) {
+    return writeAvailability('/api/availability/batch', 'POST', { expertId, availabilityDate, slots });
   },
 
   async deleteAvailability(id: string) {
-    let apiSuccess = false;
-    let apiErrorMsg: string | null = null;
-
-    try {
-      const response = await fetch(`/api/availability/${id}`, {
-        method: 'DELETE',
-        headers: { 'x-admin-override': 'true' }
-      });
-      if (response.ok) {
-        const json = await response.json().catch(() => ({ success: true }));
-        if (json.success) {
-          apiSuccess = true;
-        } else {
-          apiErrorMsg = json.error || 'Failed to delete slot';
-        }
-      } else {
-        const errJson = await response.json().catch(() => ({}));
-        apiErrorMsg = errJson.error || `Failed to delete slot (HTTP ${response.status})`;
-      }
-    } catch (e: any) {
-      console.warn('Network request failed for deleteAvailability:', e);
-    }
-
-    // Direct Supabase delete if available
-    try {
-      await supabase.from('expert_availability').delete().eq('id', id);
-    } catch {}
-
-    // Clean up from all localStorage caches
-    let foundInLocalStorage = false;
-    if (typeof localStorage !== 'undefined') {
-      for (let i = 0; i < localStorage.length; i++) {
-        const k = localStorage.key(i);
-        if (k && k.startsWith('availabilities_')) {
-          const list = readStored<any[]>(k, []);
-          const filtered = list.filter(item => (item.id || item.availability_id) !== id);
-          if (filtered.length !== list.length) {
-            writeStored(k, filtered);
-            foundInLocalStorage = true;
-          }
-        }
-      }
-    }
-
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('mongo_db_updated'));
-    }
-
-    if (!apiSuccess && !foundInLocalStorage && apiErrorMsg) {
-      throw new Error(apiErrorMsg);
-    }
-
-    return { success: true };
+    return writeAvailability(`/api/availability/${encodeURIComponent(id)}`, 'DELETE');
   }
+
 };
 
 export interface ExpertAvailabilityDoc {
