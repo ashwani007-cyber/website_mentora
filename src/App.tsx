@@ -5101,6 +5101,9 @@ function ClientPage({
     // 2. Real-time Subscription to Supabase bookings table
     const unsubRealtime = subscribeToBookingsRealtime({
       channelName: 'bookings-realtime-channel',
+      // Only this client's bookings (emails are stored lowercase). Without a filter every booking in
+      // the whole table was pushed to every client's browser.
+      filter: clientEmailClean ? `client_email=eq.${clientEmailClean}` : undefined,
       onInsert: (newBooking) => {
         if (newBooking.deletedByClient || isClientRoleDeleted(newBooking.id, clientEmailClean)) {
           return;
@@ -7797,6 +7800,9 @@ function ExpertPage({
     // 2. Real-time Subscription to Supabase bookings table
     const unsubRealtime = subscribeToBookingsRealtime({
       channelName: 'bookings-realtime-channel',
+      // Only this expert's bookings (emails are stored lowercase). Without a filter every booking in
+      // the whole table was pushed to every expert's browser.
+      filter: expEmail ? `expert_email=eq.${expEmail}` : undefined,
       onInsert: (newBooking) => {
         if (newBooking.deletedByExpert || isExpertRoleDeleted(newBooking.id, expEmail)) {
           return;

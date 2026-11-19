@@ -178,23 +178,15 @@ export const DomainsProvider: React.FC<{ children: React.ReactNode }> = ({ child
     refreshDomains();
   }, [refreshDomains]);
 
-  // Realtime Supabase Subscription & Multi-Tab Broadcast
+  // Multi-tab sync (no Supabase Realtime here).
+  // CONNECTION-LIMIT FIX: this provider wraps the WHOLE app, so its Supabase Realtime channel made
+  // EVERY visitor — including anonymous landing-page visitors and bots — hold an open realtime
+  // connection (the Free Plan allows 200 at the same time). Domains change only when an admin
+  // edits them, so instead:
+  //  - tabs in the same browser are told instantly via BroadcastChannel below,
+  //  - everyone else sees the change on their next page load / 60 s cached refresh.
+  // (An older version also listened to the WHOLE experts table here; that was removed too.)
   useEffect(() => {
-    const channel = supabase
-      .channel('realtime:public:domains')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'domains' },
-        (payload) => {
-          console.log('[REALTIME DOMAIN EVENT]:', payload.eventType);
-          refreshDomains(true);
-        }
-      )
-      // EGRESS FIX: removed the realtime listener on the WHOLE experts table. It pushed every
-      // expert row change (incl. the large documents column, twice with REPLICA IDENTITY FULL)
-      // to every visitor just to update domain counts. Counts now refresh with the 60 s cache.
-      .subscribe();
-
     // Listen on browser BroadcastChannel for 0ms cross-tab sync
     if (broadcastChannel) {
       broadcastChannel.onmessage = (event) => {
@@ -209,7 +201,6 @@ export const DomainsProvider: React.FC<{ children: React.ReactNode }> = ({ child
     window.addEventListener(DOMAINS_EVENT_NAME, handleWindowEvent);
 
     return () => {
-      supabase.removeChannel(channel);
       window.removeEventListener(DOMAINS_EVENT_NAME, handleWindowEvent);
     };
   }, [broadcastChannel, refreshDomains]);

@@ -1,5 +1,6 @@
 import { supabase } from '../supabaseClient';
 import { COLUMNS, PAGE } from '../lib/columns';
+import { sendRealtimeBroadcast } from '../lib/realtimeBroadcast';
 import {
   BOOKING_STATUS,
   BookingStatus,
@@ -900,11 +901,19 @@ export async function deleteBooking(
  */
 export function subscribeToBookingsRealtime({
   channelName = 'bookings-realtime-channel',
+  filter,
   onInsert,
   onUpdate,
   onDelete
 }: {
   channelName?: string;
+  /**
+   * Row filter, e.g. "client_email=eq.ana@x.com". Without it, EVERY booking change in the whole
+   * table is pushed to this browser (other users' data too). Only the admin should omit it.
+   * Note: Supabase cannot filter DELETE events, so filtered listeners don't get deletes — the
+   * 60 s refresh picks those up (bookings are normally soft-deleted, i.e. updated, anyway).
+   */
+  filter?: string;
   onInsert?: (booking: ConsultationBooking) => void;
   onUpdate?: (booking: ConsultationBooking) => void;
   onDelete?: (deletedId: string) => void;
@@ -917,7 +926,8 @@ export function subscribeToBookingsRealtime({
       {
         event: '*',
         schema: 'public',
-        table: 'bookings'
+        table: 'bookings',
+        ...(filter ? { filter } : {})
       },
       (payload: any) => {
         const { eventType, new: newRec, old: oldRec } = payload;
@@ -1018,20 +1028,8 @@ export function broadcastBookingUpdate(payload: Partial<ConsultationBooking> & {
     timestamp: new Date().toISOString()
   };
 
-  try {
-    const broadcastChannel = supabase.channel('bookings-realtime-channel');
-    broadcastChannel.subscribe((status) => {
-      if (status === 'SUBSCRIBED') {
-        broadcastChannel.send({
-          type: 'broadcast',
-          event: 'booking_updated',
-          payload: detail
-        });
-      }
-    });
-  } catch (err) {
-    console.warn('[BROADCAST ERROR]:', err);
-  }
+  // Tell other browsers (one short message, no new channel left open — see realtimeBroadcast.ts).
+  void sendRealtimeBroadcast('bookings-realtime-channel', 'booking_updated', detail as Record<string, unknown>);
 
   // Native Web API BroadcastChannel for instant cross-tab / cross-window sync (do NOT close channel immediately)
   try {
@@ -1084,20 +1082,8 @@ export function broadcastBookingDecision(payload: {
     timestamp: new Date().toISOString()
   };
 
-  try {
-    const broadcastChannel = supabase.channel('bookings-realtime-channel');
-    broadcastChannel.subscribe((status) => {
-      if (status === 'SUBSCRIBED') {
-        broadcastChannel.send({
-          type: 'broadcast',
-          event: 'booking_decision_updated',
-          payload: detail
-        });
-      }
-    });
-  } catch (err) {
-    console.warn('[BROADCAST ERROR]:', err);
-  }
+  // Tell other browsers (one short message, no new channel left open — see realtimeBroadcast.ts).
+  void sendRealtimeBroadcast('bookings-realtime-channel', 'booking_decision_updated', detail as Record<string, unknown>);
 
   // Native Web API BroadcastChannel for instant cross-tab / cross-window sync (do NOT close channel immediately)
   try {
