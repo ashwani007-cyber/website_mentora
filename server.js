@@ -10,6 +10,16 @@ import { fileURLToPath } from 'url';
 import express from 'express';
 import cors from 'cors';
 import { supabase } from './server/supabaseClient.js';
+import {
+  clearMemo,
+  fetchExpertsSlim,
+  fetchExpertByKeySlim,
+  fetchUnverifiedExpertsSlim,
+  getWalletBalance,
+  getWalletHistory,
+  applyWalletTransaction,
+  uploadAvatarFromDataUrl
+} from './server/egressHelpers.js';
 import { handleApiMiddleware } from './server/authHandler.js';
 import { handleDomainApiMiddleware } from './server/domainHandler.js';
 
@@ -35,6 +45,26 @@ app.use((err, req, res, next) => {
     return res.status(400).json({ success: false, error: 'Malformed JSON payload' });
   }
   next(err);
+});
+
+// After any write request (POST/PUT/PATCH/DELETE) finishes, drop the short server-side read
+// cache so the next read returns the freshly saved data (see server/egressHelpers.js).
+app.use((req, res, next) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') res.on('finish', () => clearMemo());
+  next();
+});
+
+// Compressed profile photos → public "avatars" bucket (CDN cached). Only the URL is stored in
+// the database — never the image itself. The browser compresses to WebP first.
+app.post('/api/uploads/avatar', async (req, res) => {
+  try {
+    const { ownerId, fileData, contentType } = req.body || {};
+    const url = await uploadAvatarFromDataUrl({ ownerId, fileData, contentType });
+    res.json({ success: true, url });
+  } catch (err) {
+    console.error('[uploads/avatar] failed:', err.message);
+    res.status(err.status || 500).json({ success: false, error: err.message || 'Upload failed' });
+  }
 });
 
 console.log('🚀 Starting Mentora Server with Supabase...');
@@ -81,12 +111,8 @@ app.get('/api/db', (req, res) => {
 // Get All Experts
 app.get('/api/experts', async (req, res) => {
   try {
-    const { data: experts, error } = await supabase
-      .from('experts')
-      .select('*')
-      .order('created_at', { ascending: false });
-
-    if (error) throw error;
+    // Slim list (no base64 documents), cached for 10 s on the server.
+    const experts = await fetchExpertsSlim();
     res.json(experts || []);
   } catch (err) {
     try {
@@ -103,13 +129,8 @@ app.get('/api/experts', async (req, res) => {
 app.get('/api/experts/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { data: expert, error } = await supabase
-      .from('experts')
-      .select('*')
-      .eq('id', id)
-      .single();
-
-    if (error) throw error;
+    const expert = await fetchExpertByKeySlim(id); // slim, no base64 documents
+    if (!expert) return res.status(404).json({ success: false, error: 'Expert not found' });
     res.json(expert);
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -238,8 +259,9 @@ app.get('/api/admin/pending-verifications', async (req, res) => {
     // 1. Fetch from Supabase experts table
     let supaList = [];
     try {
-      const { data: expRows, error } = await supabase.from('experts').select('*');
-      if (!error && Array.isArray(expRows)) {
+      // Only unverified experts, without base64 file data, cached 10 s (egress fix).
+      const expRows = await fetchUnverifiedExpertsSlim();
+      if (Array.isArray(expRows)) {
         supaList = expRows;
       }
     } catch (err) {
@@ -1716,7 +1738,9 @@ app.get('/api/project-reviews', async (req, res) => {
     if (expertId) query = query.eq('expert_id', expertId);
     if (status) query = query.eq('status', status);
 
-    query = query.order('updated_at', { ascending: false });
+    // Stable newest-first order; lists are capped at 100 (a single review by id is unaffected).
+    query = query.order('updated_at', { ascending: false }).order('project_review_id', { ascending: true });
+    if (!id) query = query.limit(100);
 
     const { data: reviews, error } = await query;
     if (error) throw error;
@@ -1918,9 +1942,11 @@ app.get('/api/notifications', async (req, res) => {
     const { userId } = req.query;
     const { data: notifications, error } = await supabase
       .from('notifications')
-      .select('*')
+      // Only the fields the notification centre shows, newest 50 (egress fix).
+      .select('id, user_id, user_role, title, message, type, link, is_read, metadata, created_at')
       .eq('user_id', userId)
-      .order('created_at', { ascending: false });
+      .order('created_at', { ascending: false })
+      .limit(50);
 
     if (error) throw error;
     res.json({ success: true, notifications: notifications || [] });
@@ -2499,54 +2525,61 @@ app.post('/api/kv', (req, res) => {
   }
 });
 
+// ============================================================
+// WALLET (egress-safe + data-safe)
+// ------------------------------------------------------------
+// - The balance is computed IN THE DATABASE (wallet_balance SQL function) → one number,
+//   instead of downloading every transaction on every request.
+// - History is capped to the latest 50 rows, newest first.
+// - Deposits/deductions go through wallet_apply_transaction(): one atomic step, and the same
+//   payment for the same booking/project review is never recorded twice (double-click/retry safe).
+// - The db.json mirror is best-effort only: on Vercel the disk is read-only, and a failure there
+//   must NOT turn a successful payment into an error (which made users retry → double charge).
+// ============================================================
+function mirrorWalletBalanceToDbJson(cleanEmail, balance) {
+  try {
+    const db = readDb();
+    if (!db.kv) db.kv = {};
+    db.kv[`client_wallet_${cleanEmail}`] = String(balance);
+    writeDb(db);
+  } catch {
+    /* read-only filesystem (Vercel) — Supabase is the source of truth */
+  }
+}
+
 app.get('/api/wallet', async (req, res) => {
   try {
     const userId = req.query.userId || '';
     const userEmail = (req.query.userEmail || '').toLowerCase().trim();
 
-    let query = supabase.from('wallet_transactions').select('*');
-    if (userEmail && userId && userEmail !== userId) {
-      query = query.or(`user_email.ilike.${userEmail},user_id.eq.${userId}`);
-    } else if (userEmail) {
-      query = query.ilike('user_email', userEmail);
-    } else if (userId) {
-      query = query.eq('user_id', userId);
-    }
-    query = query.order('created_at', { ascending: false });
+    const [balanceFromDb, transactions] = await Promise.all([
+      getWalletBalance(userEmail, userId),
+      getWalletHistory(userEmail, userId, 50)
+    ]);
 
-    const { data, error } = await query;
-    if (error) throw error;
-
-    let balance = 0;
-    if (Array.isArray(data) && data.length > 0) {
-      data.forEach(tx => {
-        const amt = Number(tx.amount) || 0;
-        if ((tx.status || 'SUCCESS').toUpperCase() === 'SUCCESS') {
-          if (tx.type === 'CREDIT') balance += amt;
-          else if (tx.type === 'DEBIT') balance -= amt;
-        }
-      });
-      balance = Math.max(0, balance);
-    } else {
-      const db = readDb();
-      const kv = db.kv || {};
-      const kvBal = Number(kv[`client_wallet_${userEmail}`]);
-      if (!isNaN(kvBal) && kvBal > 0) balance = kvBal;
+    let balance = balanceFromDb;
+    if (transactions.length === 0) {
+      // Legacy local-only balance (from before Supabase), kept for compatibility.
+      try {
+        const kvBal = Number((readDb().kv || {})[`client_wallet_${userEmail}`]);
+        if (!isNaN(kvBal) && kvBal > 0) balance = kvBal;
+      } catch {}
     }
 
-    res.json({ success: true, balance, transactions: data || [] });
+    res.json({ success: true, balance, transactions });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-app.post('/api/wallet/deposit', async (req, res) => {
+async function handleWalletWrite(req, res, type) {
   try {
-    const { userId, userEmail, userRole, amount, description } = req.body || {};
+    const { userId, userEmail, userRole, amount, description, relatedBookingId, relatedProjectReviewId } = req.body || {};
     const cleanEmail = (userEmail || '').toLowerCase().trim();
     const cleanId = userId || cleanEmail;
-    const numAmount = Number(amount) || 0;
-    if (numAmount <= 0) return res.status(400).json({ success: false, error: 'Amount must be > 0' });
+    const numAmount = Number(amount);
+    if (!cleanEmail && !cleanId) return res.status(400).json({ success: false, error: 'userEmail or userId is required' });
+    if (!Number.isFinite(numAmount) || numAmount <= 0) return res.status(400).json({ success: false, error: 'Amount must be > 0' });
 
     const txRecord = {
       id: `tx-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
@@ -2554,84 +2587,24 @@ app.post('/api/wallet/deposit', async (req, res) => {
       user_email: cleanEmail,
       user_role: userRole || 'client',
       amount: numAmount,
-      type: 'CREDIT',
+      type,
       status: 'SUCCESS',
-      description: description || 'Wallet Top-up'
+      description: description || (type === 'CREDIT' ? 'Wallet Top-up' : 'Consultation Booking Payment'),
+      related_booking_id: relatedBookingId || null,
+      related_project_review_id: relatedProjectReviewId || null
     };
 
-    const { data: inserted, error } = await supabase.from('wallet_transactions').insert(txRecord).select().single();
-    if (error) throw error;
-
-    const { data: allTx } = await supabase.from('wallet_transactions').select('*').ilike('user_email', cleanEmail);
-    let newBal = 0;
-    if (Array.isArray(allTx)) {
-      allTx.forEach(tx => {
-        const a = Number(tx.amount) || 0;
-        if ((tx.status || 'SUCCESS').toUpperCase() === 'SUCCESS') {
-          if (tx.type === 'CREDIT') newBal += a;
-          else if (tx.type === 'DEBIT') newBal -= a;
-        }
-      });
-      newBal = Math.max(0, newBal);
-    }
-
-    const db = readDb();
-    if (!db.kv) db.kv = {};
-    db.kv[`client_wallet_${cleanEmail}`] = String(newBal);
-    writeDb(db);
-
-    res.json({ success: true, balance: newBal, transaction: inserted });
+    const result = await applyWalletTransaction(txRecord);
+    mirrorWalletBalanceToDbJson(cleanEmail, result.balance);
+    res.json({ success: true, balance: result.balance, transaction: result.transaction, duplicate: result.duplicate });
   } catch (err) {
+    console.error(`[wallet] ${type} failed:`, err.message);
     res.status(500).json({ success: false, error: err.message });
   }
-});
+}
 
-app.post('/api/wallet/deduct', async (req, res) => {
-  try {
-    const { userId, userEmail, userRole, amount, description, relatedBookingId } = req.body || {};
-    const cleanEmail = (userEmail || '').toLowerCase().trim();
-    const cleanId = userId || cleanEmail;
-    const numAmount = Number(amount) || 0;
-    if (numAmount <= 0) return res.status(400).json({ success: false, error: 'Amount must be > 0' });
-
-    const txRecord = {
-      id: `tx-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      user_id: cleanId,
-      user_email: cleanEmail,
-      user_role: userRole || 'client',
-      amount: numAmount,
-      type: 'DEBIT',
-      status: 'SUCCESS',
-      description: description || 'Consultation Booking Payment',
-      related_booking_id: relatedBookingId || null
-    };
-
-    const { data: inserted, error } = await supabase.from('wallet_transactions').insert(txRecord).select().single();
-    if (error) throw error;
-
-    const { data: allTx } = await supabase.from('wallet_transactions').select('*').ilike('user_email', cleanEmail);
-    let newBal = 0;
-    if (Array.isArray(allTx)) {
-      allTx.forEach(tx => {
-        const a = Number(tx.amount) || 0;
-        if ((tx.status || 'SUCCESS').toUpperCase() === 'SUCCESS') {
-          if (tx.type === 'CREDIT') newBal += a;
-          else if (tx.type === 'DEBIT') newBal -= a;
-        }
-      });
-      newBal = Math.max(0, newBal);
-    }
-
-    const db = readDb();
-    if (!db.kv) db.kv = {};
-    db.kv[`client_wallet_${cleanEmail}`] = String(newBal);
-    writeDb(db);
-
-    res.json({ success: true, balance: newBal, transaction: inserted });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
+app.post('/api/wallet/deposit', (req, res) => handleWalletWrite(req, res, 'CREDIT'));
+app.post('/api/wallet/deduct', (req, res) => handleWalletWrite(req, res, 'DEBIT'));
 
 // ============================================================
 // START SERVER

@@ -21,5 +21,5 @@ export interface DomainsContextType {
   resetDefaults: () => Promise<{ success: boolean; message?: string; error?: string }>;
   getDomainById: (id: string) => DomainItem | undefined;
   getDomainName: (expertOrId?: any) => string;
-  refreshDomains: () => Promise<void>;
+  refreshDomains: (force?: boolean) => Promise<void>;
 }

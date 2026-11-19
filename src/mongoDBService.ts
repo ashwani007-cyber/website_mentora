@@ -1,7 +1,8 @@
 // Temporary stub service to maintain compatibility while migrating to Supabase
 // This service bridges the old MongoDB API calls to new Supabase services
 import { supabase } from './supabaseClient';
-import { expertiseService } from './services/supabaseExpertiseService';
+import { expertiseService, getExpertSlimByKey } from './services/supabaseExpertiseService';
+import { cached, invalidate } from './lib/requestCache';
 import { notificationService } from './services/supabaseNotificationService';
 import type { AvailabilityStatus } from './types';
 
@@ -84,7 +85,8 @@ const mapAvailability = (slot: any): ExpertAvailabilityDoc => ({
 
 // Stub implementation to maintain API compatibility
 export const mongoDB = {
-  async getExperts(): Promise<any[]> {
+  // Slim + cached list (see supabaseExpertiseService). { force: true } skips the cache.
+  async getExperts(opts: { force?: boolean } = {}): Promise<any[]> {
     const mapExpert = (expert: any) => {
       const isVerified = Boolean(expert.verified === true);
       const status = isVerified ? 'approved' : (expert.verificationStatus || expert.documents?.verificationStatus || 'pending');
@@ -106,7 +108,7 @@ export const mongoDB = {
       };
     };
 
-    const remote = await expertiseService.getExperts();
+    const remote = await expertiseService.getExperts(opts);
     if (remote.length > 0) return remote.map(mapExpert);
 
     try {
@@ -118,15 +120,20 @@ export const mongoDB = {
     }
   },
 
-  async getPendingVerifications(status?: string): Promise<any[]> {
+  // Admin KYC queue. Cached for 15 s and shared between callers so several components asking
+  // at once cause ONE request. { force: true } skips the cache (e.g. right after approve/reject).
+  async getPendingVerifications(status?: string, opts: { force?: boolean } = {}): Promise<any[]> {
     try {
       const url = status ? `/api/admin/pending-verifications?status=${status}` : '/api/admin/pending-verifications';
-      const response = await fetch(url);
-      if (response.ok) {
-        const data = await response.json();
-        if (Array.isArray(data)) {
-          return data.filter((e: any) => !e.verified && e.verificationStatus !== 'approved');
-        }
+      const cacheKey = `pending:${status || 'all'}`;
+      if (opts.force) invalidate(cacheKey);
+      const data = await cached(cacheKey, 15_000, async () => {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`pending-verifications HTTP ${response.status}`);
+        return response.json();
+      });
+      if (Array.isArray(data)) {
+        return data.filter((e: any) => !e.verified && e.verificationStatus !== 'approved');
       }
     } catch (err) {
       console.error('[AUDIT] Error fetching pending verifications from API:', err);
@@ -173,18 +180,14 @@ export const mongoDB = {
     return fallback.filter((e: any) => !e.verified && e.verificationStatus !== 'approved');
   },
 
-  async getAuditStatus(id: string): Promise<any> {
+  async getAuditStatus(id: string, opts: { force?: boolean } = {}): Promise<any> {
     try {
       const key = (id || '').trim().toLowerCase();
       if (!key) return { success: false, status: null };
 
-      // 1. Query Supabase experts table (authoritative single source of truth)
-      const { data } = await supabase
-        .from('experts')
-        .select('*')
-        .or(`id.eq.${key},email.ilike.${key}`);
-
-      const expert = Array.isArray(data) && data.length > 0 ? data[0] : null;
+      // 1. Query Supabase experts table (authoritative single source of truth).
+      //    Slim (no base64 documents) and cached for 15 s — see getExpertSlimByKey.
+      const expert: any = await getExpertSlimByKey(key, opts);
       if (expert) {
         const isVerified = Boolean(expert.verified === true);
         const status = isVerified ? 'approved' : (expert.verificationStatus || expert.documents?.verificationStatus || 'pending');

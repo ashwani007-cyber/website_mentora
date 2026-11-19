@@ -1,3 +1,4 @@
+import { startVisibleInterval } from '../lib/polling'; // egress-safe polling (skips hidden tabs)
 import React, { useState, useEffect, useRef } from 'react';
 import {
   X, ShieldCheck, FileText, Send, Calendar, Clock, Video, CheckCircle2,
@@ -115,14 +116,15 @@ export const ProjectReviewWorkspace: React.FC<ProjectReviewWorkspaceProps> = ({
 
   useEffect(() => {
     loadReviewData();
-    const interval = setInterval(loadReviewData, 2500);
+    // EGRESS FIX: was every 2.5 s; 15 s while visible keeps chat reasonably live (events above refresh instantly).
+    const stopReviewPoll = startVisibleInterval(loadReviewData, 15_000);
 
     const handleUpdate = () => loadReviewData();
     window.addEventListener('project_review_updated', handleUpdate);
     window.addEventListener('storage', handleUpdate);
 
     return () => {
-      clearInterval(interval);
+      stopReviewPoll();
       window.removeEventListener('project_review_updated', handleUpdate);
       window.removeEventListener('storage', handleUpdate);
     };

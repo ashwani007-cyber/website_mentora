@@ -107,6 +107,15 @@ async function findSupabaseExpert(sbClient: any, expertId?: string | null, email
   return Array.isArray(data) && data.length > 0 ? data[0] : null
 }
 
+// One shared server-side Supabase client for every dev API route (see server/supabaseClient.js).
+// Keys come from .env — never hard-code the service_role key in source code.
+// Shared egress-safe helpers (slim reads, wallet RPCs, avatar upload) — same code as server.js.
+const getEgressHelpers = async (): Promise<any> =>
+  await import(pathToFileURL(path.resolve(__dirname, "server/egressHelpers.js")).href)
+
+const getSharedSupabase = async (): Promise<any> =>
+  (await import(pathToFileURL(path.resolve(__dirname, "server/supabaseClient.js")).href)).supabase
+
 function sharedDbPlugin(): Plugin {
   const DB_PATH = path.resolve(__dirname, 'db.json')
 
@@ -170,6 +179,31 @@ function sharedDbPlugin(): Plugin {
 
   const handleMiddleware = async (req: any, res: any, next: any) => {
     const url = req.url || ''
+
+    // After any write request finishes, clear the short server-side read cache so the next
+    // read returns the freshly saved data.
+    if (url.startsWith('/api/') && req.method !== 'GET' && req.method !== 'HEAD') {
+      res.on('finish', () => { getEgressHelpers().then((h: any) => h.clearMemo()).catch(() => {}) })
+    }
+
+    // Endpoint: /api/uploads/avatar — compressed profile photo → public "avatars" bucket.
+    // Only the returned URL is stored in the database (never the image itself).
+    if (url.startsWith('/api/uploads/avatar') && req.method === 'POST') {
+      let body = ''
+      req.on('data', (chunk: any) => { body += chunk })
+      req.on('end', async () => {
+        res.setHeader('Content-Type', 'application/json')
+        try {
+          const { ownerId, fileData, contentType } = JSON.parse(body || '{}')
+          const publicUrl = await (await getEgressHelpers()).uploadAvatarFromDataUrl({ ownerId, fileData, contentType })
+          res.end(JSON.stringify({ success: true, url: publicUrl }))
+        } catch (err: any) {
+          res.statusCode = err.status || 500
+          res.end(JSON.stringify({ success: false, error: err.message || 'Upload failed' }))
+        }
+      })
+      return
+    }
 
     // Endpoint: /api/auth (MongoDB Authenticated Sessions & Admin Flow)
     if (url.startsWith('/api/auth')) {
@@ -256,8 +290,8 @@ function sharedDbPlugin(): Plugin {
 
       let supaList: any[] = []
       try {
-        const { supabase: sClient } = await import(pathToFileURL(path.resolve(__dirname, 'server/supabaseClient.js')).href)
-        const { data: supaAll } = await sClient.from('experts').select('*')
+        // EGRESS FIX: only unverified experts, without base64 file data, cached 10 s.
+        const supaAll = await (await getEgressHelpers()).fetchUnverifiedExpertsSlim()
         if (Array.isArray(supaAll)) supaList = supaAll
       } catch {}
 
@@ -1169,10 +1203,8 @@ function sharedDbPlugin(): Plugin {
             }
 
             try {
-              const { createClient } = await import('@supabase/supabase-js')
-              const sbUrl = process.env.VITE_SUPABASE_URL || 'https://oitxwcspkelduxbuczux.supabase.co'
-              const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9pdHh3Y3Nwa2VsZHV4YnVjenV4Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MjM5NjU2NCwiZXhwIjoyMTA3OTcyNTY0fQ.WGi0P4ENT5nhKPmp4zQN5VgmZ1twXLb4INXTSu1jxdw'
-              const sb = createClient(sbUrl, sbKey)
+              // Re-use the ONE shared server client (no per-request clients, no hard-coded keys)
+              const sb = await getSharedSupabase()
               let q = sb.from('expert_availability').update({
                 status: 'AVAILABLE',
                 booking_id: null,
@@ -1399,10 +1431,8 @@ function sharedDbPlugin(): Plugin {
       const pathname = parsedUrl.pathname
 
       const getSbAdmin = async () => {
-        const { createClient } = await import('@supabase/supabase-js')
-        const sbUrl = process.env.VITE_SUPABASE_URL || 'https://oitxwcspkelduxbuczux.supabase.co'
-        const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9pdHh3Y3Nwa2VsZHV4YnVjenV4Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MjM5NjU2NCwiZXhwIjoyMTA3OTcyNTY0fQ.WGi0P4ENT5nhKPmp4zQN5VgmZ1twXLb4INXTSu1jxdw'
-        return createClient(sbUrl, sbKey)
+        // Re-use the ONE shared server client (no per-request clients, no hard-coded keys)
+        return getSharedSupabase()
       }
 
       // Helper to retrieve and filter bookings from db.json
@@ -1854,65 +1884,38 @@ function sharedDbPlugin(): Plugin {
       }
     }
 
-    // Endpoint: /api/wallet (Authoritative Client Wallet Balance & Transactions)
+    // Endpoint: /api/wallet (same logic as server.js — see server/egressHelpers.js)
+    //  - balance computed in the database (one number), history capped to 50 rows,
+    //  - writes are atomic + idempotent (no double charge for the same booking),
+    //  - the db.json mirror is best-effort and can never turn a saved payment into an error.
     if (url.startsWith('/api/wallet')) {
       const parsedUrl = new URL(req.url, 'http://localhost:5173')
       const pathname = parsedUrl.pathname
-
-      const getSbAdmin = async () => {
-        const { createClient } = await import('@supabase/supabase-js')
-        const sbUrl = process.env.VITE_SUPABASE_URL || 'https://oitxwcspkelduxbuczux.supabase.co'
-        const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9pdHh3Y3Nwa2VsZHV4YnVjenV4Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MjM5NjU2NCwiZXhwIjoyMTA3OTcyNTY0fQ.WGi0P4ENT5nhKPmp4zQN5VgmZ1twXLb4INXTSu1jxdw'
-        return createClient(sbUrl, sbKey)
+      const sendJson = (status: number, body: any) => {
+        res.statusCode = status
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify(body))
       }
 
       if (req.method === 'GET' && pathname === '/api/wallet') {
         const userId = parsedUrl.searchParams.get('userId') || ''
         const userEmail = (parsedUrl.searchParams.get('userEmail') || '').toLowerCase().trim()
-
         try {
-          const sb = await getSbAdmin()
-          let query = sb.from('wallet_transactions').select('*')
-          if (userEmail && userId && userEmail !== userId) {
-            query = query.or(`user_email.ilike.${userEmail},user_id.eq.${userId}`)
-          } else if (userEmail) {
-            query = query.ilike('user_email', userEmail)
-          } else if (userId) {
-            query = query.eq('user_id', userId)
+          const h = await getEgressHelpers()
+          const [balanceFromDb, transactions] = await Promise.all([
+            h.getWalletBalance(userEmail, userId),
+            h.getWalletHistory(userEmail, userId, 50)
+          ])
+          let balance = balanceFromDb
+          if (transactions.length === 0) {
+            const kvBal = Number((readDb().kv || {})[`client_wallet_${userEmail}`])
+            if (!isNaN(kvBal) && kvBal > 0) balance = kvBal
           }
-          query = query.order('created_at', { ascending: false })
-
-          const { data, error } = await query
-          if (error) throw error
-
-          let balance = 0
-          if (Array.isArray(data) && data.length > 0) {
-            data.forEach((tx: any) => {
-              const amt = Number(tx.amount) || 0
-              if ((tx.status || 'SUCCESS').toUpperCase() === 'SUCCESS') {
-                if (tx.type === 'CREDIT') balance += amt
-                else if (tx.type === 'DEBIT') balance -= amt
-              }
-            })
-            balance = Math.max(0, balance)
-          } else {
-            const db = readDb()
-            const kv = db.kv || {}
-            const kvBal = Number(kv[`client_wallet_${userEmail}`])
-            if (!isNaN(kvBal) && kvBal > 0) {
-              balance = kvBal
-            }
-          }
-
-          res.setHeader('Content-Type', 'application/json')
-          res.end(JSON.stringify({ success: true, balance, transactions: data || [] }))
-          return
+          sendJson(200, { success: true, balance, transactions })
         } catch (err: any) {
-          res.statusCode = 500
-          res.setHeader('Content-Type', 'application/json')
-          res.end(JSON.stringify({ success: false, error: err.message }))
-          return
+          sendJson(500, { success: false, error: err.message })
         }
+        return
       }
 
       if (req.method === 'POST') {
@@ -1921,63 +1924,38 @@ function sharedDbPlugin(): Plugin {
         req.on('end', async () => {
           try {
             const payload = JSON.parse(body || '{}')
-            const userId = payload.userId || payload.userEmail || ''
             const userEmail = (payload.userEmail || '').toLowerCase().trim()
-            const userRole = payload.userRole || 'client'
-            const amount = Number(payload.amount) || 0
+            const userId = payload.userId || userEmail || ''
+            const amount = Number(payload.amount)
             const type = pathname.includes('/deduct') ? 'DEBIT' : 'CREDIT'
-            const description = payload.description || (type === 'CREDIT' ? 'Wallet Top-up' : 'Consultation Booking Payment')
+            if (!userEmail && !userId) return sendJson(400, { success: false, error: 'userEmail or userId is required' })
+            if (!Number.isFinite(amount) || amount <= 0) return sendJson(400, { success: false, error: 'Amount must be greater than 0' })
 
-            if (amount <= 0) {
-              res.statusCode = 400
-              res.setHeader('Content-Type', 'application/json')
-              res.end(JSON.stringify({ success: false, error: 'Amount must be greater than 0' }))
-              return
-            }
-
-            const sb = await getSbAdmin()
-            const txRecord = {
+            const h = await getEgressHelpers()
+            const result = await h.applyWalletTransaction({
               id: `tx-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
               user_id: userId,
               user_email: userEmail,
-              user_role: userRole,
+              user_role: payload.userRole || 'client',
               amount,
               type,
               status: 'SUCCESS',
-              description,
+              description: payload.description || (type === 'CREDIT' ? 'Wallet Top-up' : 'Consultation Booking Payment'),
               related_booking_id: payload.relatedBookingId || null,
               related_project_review_id: payload.relatedProjectReviewId || null
-            }
+            })
 
-            const { data: inserted, error } = await sb.from('wallet_transactions').insert(txRecord).select().single()
-            if (error) throw error
+            try {
+              const db = readDb()
+              if (!db.kv) db.kv = {}
+              db.kv[`client_wallet_${userEmail}`] = String(result.balance)
+              writeDb(db)
+            } catch {}
 
-            const { data: allTx } = await sb.from('wallet_transactions').select('*').ilike('user_email', userEmail)
-            let newBal = 0
-            if (Array.isArray(allTx)) {
-              allTx.forEach((tx: any) => {
-                const a = Number(tx.amount) || 0
-                if ((tx.status || 'SUCCESS').toUpperCase() === 'SUCCESS') {
-                  if (tx.type === 'CREDIT') newBal += a
-                  else if (tx.type === 'DEBIT') newBal -= a
-                }
-              })
-              newBal = Math.max(0, newBal)
-            }
-
-            const db = readDb()
-            if (!db.kv) db.kv = {}
-            db.kv[`client_wallet_${userEmail}`] = String(newBal)
-            writeDb(db)
-
-            res.setHeader('Content-Type', 'application/json')
-            res.end(JSON.stringify({ success: true, balance: newBal, transaction: inserted }))
-            return
+            sendJson(200, { success: true, balance: result.balance, transaction: result.transaction, duplicate: result.duplicate })
           } catch (err: any) {
-            res.statusCode = 500
-            res.setHeader('Content-Type', 'application/json')
-            res.end(JSON.stringify({ success: false, error: err.message }))
-            return
+            console.error('[wallet] write failed:', err.message)
+            sendJson(500, { success: false, error: err.message })
           }
         })
         return
@@ -3218,10 +3196,8 @@ function sharedDbPlugin(): Plugin {
       }
 
       const getSupabaseAdmin = async () => {
-        const { createClient } = await import('@supabase/supabase-js')
-        const sbUrl = process.env.VITE_SUPABASE_URL || 'https://oitxwcspkelduxbuczux.supabase.co'
-        const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9pdHh3Y3Nwa2VsZHV4YnVjenV4Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MjM5NjU2NCwiZXhwIjoyMTA3OTcyNTY0fQ.WGi0P4ENT5nhKPmp4zQN5VgmZ1twXLb4INXTSu1jxdw'
-        return createClient(sbUrl, sbKey)
+        // Re-use the ONE shared server client (no per-request clients, no hard-coded keys)
+        return getSharedSupabase()
       }
 
       const parsedUrl = new URL(req.url || '', 'http://localhost:5173')

@@ -80,6 +80,10 @@ import mentoraLogoHorizontalDark from "./assets/mentora-logo-horizontal-dark.png
 import mentoraLogoLight from "./assets/mentora-logo-light.png";
 import mentoraLogoDark from "./assets/mentora-logo-dark.png";
 import mentoraSymbol from "./assets/mentora-symbol.png";
+// Egress-safe polling helpers (skip ticks in hidden tabs, collapse event bursts)
+import { startVisibleInterval, debounce } from "./lib/polling";
+import { getExpertSlimByKey } from "./services/supabaseExpertiseService";
+import { uploadAvatarImage } from "./lib/imageUpload";
 
 
 /* ---------------------------------------------------------------
@@ -1655,9 +1659,16 @@ function EditExpertProfileModal({ profile, onClose, onSave, theme = "dark" }: { 
   const [phone, setPhone] = useState(profile?.phone || "+91 98765 43210");
   const [bio, setBio] = useState(profile?.bio || "Ex-CFO with 34 years in corporate tax audits, ESOP design, valuation readiness, and M&A compliance.");
   const [img, setImg] = useState(profile?.img || "https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=300&auto=format&fit=crop&q=80");
+  const [isUploadingImg, setIsUploadingImg] = useState(false);
+  const [imgUploadError, setImgUploadError] = useState<string | null>(null);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    // Don't save while the photo is still uploading (the preview URL is only temporary).
+    if (isUploadingImg) {
+      alert("Please wait — your photo is still uploading.");
+      return;
+    }
     const updated = {
       ...profile,
       name,
@@ -1738,16 +1749,28 @@ function EditExpertProfileModal({ profile, onClose, onSave, theme = "dark" }: { 
                     type="file"
                     accept="image/*"
                     className="hidden"
-                    onChange={(e) => {
+                    disabled={isUploadingImg}
+                    onChange={async (e) => {
+                      // EGRESS FIX: the photo used to be saved as a full-size base64 string inside
+                      // the experts table. Now it is resized to WebP in the browser, uploaded to
+                      // Supabase Storage, and only the short URL is saved.
                       const file = e.target.files?.[0];
-                      if (file) {
-                        const reader = new FileReader();
-                        reader.onload = () => {
-                          if (typeof reader.result === "string") {
-                            setImg(reader.result);
-                          }
-                        };
-                        reader.readAsDataURL(file);
+                      e.target.value = ""; // allow choosing the same file again
+                      if (!file) return;
+                      const previous = img;
+                      const preview = URL.createObjectURL(file);
+                      setImg(preview); // instant preview while uploading
+                      setIsUploadingImg(true);
+                      setImgUploadError(null);
+                      try {
+                        const url = await uploadAvatarImage(file, profile?.id || profile?.email || email || "expert");
+                        setImg(url);
+                      } catch (err: any) {
+                        setImg(previous);
+                        setImgUploadError(err?.message || "Photo upload failed. Please try again.");
+                      } finally {
+                        URL.revokeObjectURL(preview);
+                        setIsUploadingImg(false);
                       }
                     }}
                   />
@@ -1755,6 +1778,8 @@ function EditExpertProfileModal({ profile, onClose, onSave, theme = "dark" }: { 
               </div>
             </div>
             <p className={`text-[10px] mt-1 ${isLight ? "text-slate-500" : "text-slate-500"}`}>Upload your professional headshot image to showcase on the Mentora landing page.</p>
+            {isUploadingImg && <p className="text-[10px] mt-1 text-amber-500">Optimising and uploading photo…</p>}
+            {imgUploadError && <p role="alert" className="text-[10px] mt-1 text-red-500">❌ {imgUploadError}</p>}
           </div>
 
           <div>
@@ -4511,7 +4536,8 @@ function AuthPage({
           try {
             const { data: supaUser } = await supabase
               .from('users')
-              .select('*')
+              // Never download password_hash to the browser — only the profile fields we use.
+              .select('id, email, full_name, role, phone, bio, avatar_url, is_verified')
               .eq('email', cleanEmail)
               .maybeSingle();
             if (supaUser) userProfile = supaUser;
@@ -4533,11 +4559,8 @@ function AuthPage({
 
         if (!userProfile) {
           try {
-            const { data: supaExp } = await supabase
-              .from('experts')
-              .select('*')
-              .eq('email', cleanEmail)
-              .maybeSingle();
+            // Slim lookup (no base64 documents), cached 15 s — see supabaseExpertiseService.
+            const supaExp: any = await getExpertSlimByKey(cleanEmail);
             if (supaExp) userProfile = { ...supaExp, role: 'expert' };
           } catch {}
         }
@@ -4595,11 +4618,8 @@ function AuthPage({
         }
         if (assignedRole === "expert" || userProfile?.role === "expert") {
           try {
-            const { data: supaExp } = await supabase
-              .from('experts')
-              .select('*')
-              .eq('email', cleanEmail)
-              .maybeSingle();
+            // Slim lookup (no base64 documents), cached 15 s — see supabaseExpertiseService.
+            const supaExp: any = await getExpertSlimByKey(cleanEmail);
             if (supaExp) {
               const isVerified = Boolean(supaExp.verified === true);
               const status = isVerified ? 'approved' : (supaExp.verificationStatus || supaExp.documents?.verificationStatus || 'pending');
@@ -5274,10 +5294,14 @@ function ClientPage({
     };
 
     refreshUpcoming();
-    window.addEventListener("focus", refreshUpcoming);
-    window.addEventListener("mongo_db_updated", refreshUpcoming);
-    window.addEventListener("mongo_kv_updated", refreshUpcoming);
-    const interval = setInterval(refreshUpcoming, 5000);
+    // EGRESS FIX: was every 5 s even in hidden tabs. Booking changes already arrive instantly via
+    // the realtime subscription + BroadcastChannel above, so this is only a safety-net refresh:
+    // every 60 s while the tab is visible, and bursts of events are collapsed into one call.
+    const debouncedRefreshUpcoming = debounce(refreshUpcoming, 400);
+    window.addEventListener("focus", debouncedRefreshUpcoming);
+    window.addEventListener("mongo_db_updated", debouncedRefreshUpcoming);
+    window.addEventListener("mongo_kv_updated", debouncedRefreshUpcoming);
+    const stopPolling = startVisibleInterval(refreshUpcoming, 60_000);
 
     return () => {
       unsubRealtime();
@@ -5286,10 +5310,11 @@ function ClientPage({
       window.removeEventListener("storage", handleStorageEvent);
       window.removeEventListener("booking_decision_updated", handleCustomBookingDecision);
       window.removeEventListener("booking_updated", handleCustomBookingDecision);
-      window.removeEventListener("focus", refreshUpcoming);
-      window.removeEventListener("mongo_db_updated", refreshUpcoming);
-      window.removeEventListener("mongo_kv_updated", refreshUpcoming);
-      clearInterval(interval);
+      window.removeEventListener("focus", debouncedRefreshUpcoming);
+      window.removeEventListener("mongo_db_updated", debouncedRefreshUpcoming);
+      window.removeEventListener("mongo_kv_updated", debouncedRefreshUpcoming);
+      debouncedRefreshUpcoming.cancel();
+      stopPolling();
     };
   }, [clientProfile?.email, storageKey, walletStorageKey]);
 
@@ -5338,12 +5363,13 @@ function ClientPage({
     window.addEventListener('project_review_updated', handlePRUpdate);
     window.addEventListener('storage', handlePRUpdate);
     window.addEventListener('mongo_kv_updated', handlePRUpdate);
-    const interval = setInterval(loadClientProjectReviews, 3000);
+    // EGRESS FIX: was every 3 s. Updates also arrive through the events above.
+    const stopPolling = startVisibleInterval(loadClientProjectReviews, 30_000);
     return () => {
       window.removeEventListener('project_review_updated', handlePRUpdate);
       window.removeEventListener('storage', handlePRUpdate);
       window.removeEventListener('mongo_kv_updated', handlePRUpdate);
-      clearInterval(interval);
+      stopPolling();
     };
   }, [clientProfile?.email]);
 
@@ -5627,10 +5653,15 @@ function ClientPage({
       userEmail: bookingWithClient.clientEmail,
       amount: cost,
       description: `Consultation Booking: ${confirmedBooking.topic} with ${confirmedBooking.expert}`,
-      relatedBookingId: confirmedBooking.id
-    }).then(res => {
-      if (res && typeof res.newBalance === 'number') {
+      relatedBookingId: confirmedBooking.id // same booking can never be charged twice
+    }).then(async res => {
+      if (res?.success) {
         setWalletBalance(res.newBalance);
+      } else {
+        // Don't hide a failed payment: tell the user and show the real balance from the server.
+        alert(`⚠️ Your booking is confirmed, but the wallet payment could not be recorded: ${res?.error || "unknown error"}. Please contact support.`);
+        const fresh = await fetchWalletBalance(clientProfile?.id, clientProfile?.email);
+        setWalletBalance(fresh.balance);
       }
     }).catch(() => {});
 
@@ -5769,9 +5800,14 @@ function ClientPage({
       userEmail: clientProfile?.email || 'client@company.com',
       amount: amt,
       description: `Wallet Funded via UPI (₹${amt})`
-    }).then(res => {
-      if (res && typeof res.newBalance === 'number') {
+    }).then(async res => {
+      if (res?.success) {
         setWalletBalance(res.newBalance);
+      } else {
+        // Undo the optimistic balance and tell the user the top-up was not saved.
+        alert(`⚠️ Your top-up could not be saved: ${res?.error || "unknown error"}. Please try again or contact support.`);
+        const fresh = await fetchWalletBalance(clientProfile?.id, clientProfile?.email);
+        setWalletBalance(fresh.balance);
       }
     }).catch(() => {});
 
@@ -7139,11 +7175,11 @@ function ExpertPage({
     const handlePRUpdate = () => loadExpertProjectReviews();
     window.addEventListener('project_review_updated', handlePRUpdate);
     window.addEventListener('storage', handlePRUpdate);
-    const interval = setInterval(loadExpertProjectReviews, 3000);
+    const interval = startVisibleInterval(loadExpertProjectReviews, 30_000); // EGRESS FIX: was every 3 s, now 30 s and only while the tab is visible
     return () => {
       window.removeEventListener('project_review_updated', handlePRUpdate);
       window.removeEventListener('storage', handlePRUpdate);
-      clearInterval(interval);
+      interval();
     };
   }, [expertProfile?.email, expertProfile?.name, resolvedExpertId]);
 
@@ -7625,7 +7661,7 @@ function ExpertPage({
     window.addEventListener("mongo_db_updated", handleExpertUpdates);
     window.addEventListener("mongo_kv_updated", handleExpertUpdates);
     window.addEventListener("expert_documents_updated", handleExpertUpdates);
-    const expertSyncInterval = setInterval(handleExpertUpdates, 30000);
+    const expertSyncInterval = startVisibleInterval(handleExpertUpdates, 60_000); // EGRESS FIX: skip ticks while the tab is hidden
 
     return () => {
       window.removeEventListener("storage", handleExpertUpdates);
@@ -7634,7 +7670,7 @@ function ExpertPage({
       window.removeEventListener("mongo_db_updated", handleExpertUpdates);
       window.removeEventListener("mongo_kv_updated", handleExpertUpdates);
       window.removeEventListener("expert_documents_updated", handleExpertUpdates);
-      clearInterval(expertSyncInterval);
+      expertSyncInterval();
     };
   }, [expertProfile?.id, expertProfile?.name, expertProfile?.email, earningsKey, walletKey, trendKey, requestsKey, reviewsKey]);
 
@@ -7836,7 +7872,7 @@ function ExpertPage({
     window.addEventListener("booking_decision_updated", handleWindowBookingUpdate);
     window.addEventListener("app_platform_sessions_updated", loadSupabaseExpertBookings);
     window.addEventListener("focus", loadSupabaseExpertBookings);
-    const periodicExpertSync = setInterval(loadSupabaseExpertBookings, 10000);
+    const periodicExpertSync = startVisibleInterval(loadSupabaseExpertBookings, 60_000); // EGRESS FIX: was every 10 s; live changes already arrive via the realtime subscription above
 
     return () => {
       unsubRealtime();
@@ -7846,7 +7882,7 @@ function ExpertPage({
       window.removeEventListener("booking_decision_updated", handleWindowBookingUpdate);
       window.removeEventListener("app_platform_sessions_updated", loadSupabaseExpertBookings);
       window.removeEventListener("focus", loadSupabaseExpertBookings);
-      clearInterval(periodicExpertSync);
+      periodicExpertSync();
     };
   }, [resolvedExpertId, expertProfile?.id, expertProfile?.user_id, expertProfile?.email, expertProfile?.name]);
 
@@ -11952,14 +11988,22 @@ export default function App() {
   const [pendingVerifications, setPendingVerifications] = useState<any[]>([]);
 
   useEffect(() => {
+    // EGRESS FIX: this effect used to run every 1.5 s on EVERY page and download the whole
+    // experts table (incl. base64 files) three times per tick — ~1.7 GB per hour per open tab.
+    // Now: one load on mount, a refresh every 60 s only while the tab is visible, and
+    // event-driven refreshes collapsed by a debounce. Reads are cached (src/lib/requestCache.ts)
+    // and the admin-only KYC queue is only fetched on admin pages.
+    const needsPendingQueue = page === "owner" || isAdminPortal;
     const refreshData = async () => {
       try {
         const [freshExperts, freshPendings] = await Promise.all([
           mongoDB.getExperts(),
-          mongoDB.getPendingVerifications()
+          needsPendingQueue ? mongoDB.getPendingVerifications() : Promise.resolve(null)
         ]);
         setExperts(Array.isArray(freshExperts) ? freshExperts : []);
-        setPendingVerifications(Array.isArray(freshPendings) ? freshPendings : []);
+        if (freshPendings !== null) {
+          setPendingVerifications(Array.isArray(freshPendings) ? freshPendings : []);
+        }
 
         setExpertProfile((prev: any) => {
           if (!prev) return prev;
@@ -12011,18 +12055,20 @@ export default function App() {
     };
 
     refreshData();
-    const unsub = mongoDB.subscribe(() => refreshData());
-    const pollInterval = setInterval(refreshData, 1500);
-    window.addEventListener("focus", refreshData);
-    window.addEventListener("mongo_db_updated", refreshData);
-    window.addEventListener("storage", refreshData);
+    // Many events can fire at once (focus + storage + mongo_db_updated); run ONE refresh 400 ms
+    // after the last of them instead of one per event.
+    const debouncedRefresh = debounce(refreshData, 400);
+    const unsub = mongoDB.subscribe(() => debouncedRefresh());
+    const stopPolling = startVisibleInterval(refreshData, 60_000);
+    window.addEventListener("focus", debouncedRefresh);
+    window.addEventListener("mongo_db_updated", debouncedRefresh);
 
     return () => {
       unsub();
-      clearInterval(pollInterval);
-      window.removeEventListener("focus", refreshData);
-      window.removeEventListener("mongo_db_updated", refreshData);
-      window.removeEventListener("storage", refreshData);
+      stopPolling();
+      debouncedRefresh.cancel();
+      window.removeEventListener("focus", debouncedRefresh);
+      window.removeEventListener("mongo_db_updated", debouncedRefresh);
     };
   }, [page, isAdminPortal]);
 
@@ -12360,24 +12406,38 @@ export default function App() {
     }
   };
 
+  // After an admin save, reload the (slim) expert list from the database, skipping the cache,
+  // so the screen always shows what was really saved. These handlers used to call
+  // setExperts(updated) with a { success, expert } object instead of a list — the old 1.5 s
+  // poll hid that bug by overwriting it a moment later. Failed saves are now reported.
+  const reloadExpertsAfterSave = async (saveResult: any): Promise<any[]> => {
+    if (saveResult && saveResult.success === false) {
+      console.error("[admin] save failed:", saveResult.error);
+      alert(`❌ Could not save the change: ${saveResult.error || "unknown error"}. Please try again.`);
+    }
+    const fresh = await mongoDB.getExperts({ force: true });
+    setExperts(Array.isArray(fresh) ? fresh : []);
+    return Array.isArray(fresh) ? fresh : [];
+  };
+
   const handleUpdateExpertMarkup = async (expId: string, base: number, markup: number) => {
     const updated = await mongoDB.saveExpertMarkup(expId, base, markup);
-    setExperts(updated);
+    await reloadExpertsAfterSave(updated);
   };
 
   const handleToggleFeatured = async (expId: string, featured: boolean) => {
     const updated = await mongoDB.toggleFeaturedOnLanding(expId, featured);
-    setExperts(updated);
+    await reloadExpertsAfterSave(updated);
   };
 
   const handleUpdateHeroSpotlight = async (expId: string, heroSpotlight: boolean, heroPosition?: "top" | "bottom") => {
     const updated = await mongoDB.updateHeroSpotlightCard(expId, heroSpotlight, heroPosition);
-    setExperts(updated);
+    await reloadExpertsAfterSave(updated);
   };
 
   const handleUpdatePhotoUrl = async (expId: string, imgUrl: string) => {
     const updated = await mongoDB.updateExpertProfile(expId, { img: imgUrl });
-    setExperts(updated);
+    await reloadExpertsAfterSave(updated);
   };
 
   const handleApproveVerification = async (item: any) => {
@@ -12580,8 +12640,8 @@ export default function App() {
   };
 
   const handleToggleVerification = async (expId: string, verified: boolean) => {
-    const updated = await mongoDB.toggleExpertVerification(expId, verified);
-    setExperts(updated);
+    const updated = await reloadExpertsAfterSave(await mongoDB.toggleExpertVerification(expId, verified));
+
 
     const targetExp = updated.find(e => e.id === expId || e.name.toLowerCase().trim() === expId.toLowerCase().trim());
     const targetEmail = targetExp?.email?.toLowerCase().trim();

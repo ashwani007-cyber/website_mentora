@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 import { supabase } from '../supabaseClient';
+import { cached, invalidate } from '../lib/requestCache';
 import type { DomainItem, DomainsContextType } from '../types/domain';
 
 const DomainsContext = createContext<DomainsContextType | undefined>(undefined);
@@ -106,16 +107,21 @@ export const DomainsProvider: React.FC<{ children: React.ReactNode }> = ({ child
     return currentDomains;
   }, []);
 
-  // Primary loader for active domains
-  const refreshDomains = useCallback(async () => {
+  // Primary loader for active domains.
+  // EGRESS FIX: results are cached for 60 s (many components and the client dashboard call
+  // this repeatedly). Pass `force = true` when we KNOW something changed (realtime event,
+  // another tab broadcast, or after this tab saved a domain).
+  const refreshDomains = useCallback(async (force: boolean = false) => {
+    if (force) invalidate('domains:');
     try {
+      const enriched = await cached('domains:enriched', 60_000, async () => {
       let loaded: DomainItem[] = [];
 
-      // 1. Try direct Supabase query
+      // 1. Try direct Supabase query (only the columns the UI uses)
       try {
         const { data, error: sbErr } = await supabase
           .from('domains')
-          .select('*')
+          .select('id, name, slug, color, sort_order, is_active, created_at')
           .order('sort_order', { ascending: true });
 
         if (!sbErr && Array.isArray(data) && data.length > 0) {
@@ -142,7 +148,8 @@ export const DomainsProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
 
       // 4. Attach live expert counts
-      const enriched = await fetchDomainCounts(loaded);
+      return fetchDomainCounts(loaded);
+      });
       setDomains(enriched);
       setError(null);
 
@@ -179,30 +186,26 @@ export const DomainsProvider: React.FC<{ children: React.ReactNode }> = ({ child
         'postgres_changes',
         { event: '*', schema: 'public', table: 'domains' },
         (payload) => {
-          console.log('[REALTIME DOMAIN EVENT]:', payload.eventType, payload);
-          refreshDomains();
+          console.log('[REALTIME DOMAIN EVENT]:', payload.eventType);
+          refreshDomains(true);
         }
       )
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'experts' },
-        () => {
-          refreshDomains();
-        }
-      )
+      // EGRESS FIX: removed the realtime listener on the WHOLE experts table. It pushed every
+      // expert row change (incl. the large documents column, twice with REPLICA IDENTITY FULL)
+      // to every visitor just to update domain counts. Counts now refresh with the 60 s cache.
       .subscribe();
 
     // Listen on browser BroadcastChannel for 0ms cross-tab sync
     if (broadcastChannel) {
       broadcastChannel.onmessage = (event) => {
         if (event.data?.type === 'DOMAINS_CHANGED') {
-          refreshDomains();
+          refreshDomains(true);
         }
       };
     }
 
     // Window event listener
-    const handleWindowEvent = () => refreshDomains();
+    const handleWindowEvent = () => refreshDomains(true);
     window.addEventListener(DOMAINS_EVENT_NAME, handleWindowEvent);
 
     return () => {
@@ -213,7 +216,7 @@ export const DomainsProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   // Notify other tabs & components of changes
   const notifyChange = useCallback(() => {
-    refreshDomains();
+    refreshDomains(true); // we just saved — skip the cache so the change shows immediately
     if (broadcastChannel) {
       try {
         broadcastChannel.postMessage({ type: 'DOMAINS_CHANGED', timestamp: Date.now() });

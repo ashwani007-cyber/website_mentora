@@ -1,3 +1,4 @@
+import { startVisibleInterval } from '../lib/polling'; // egress-safe polling (skips hidden tabs)
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   Bell, 
@@ -56,11 +57,12 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
       loadNotifications();
     }).catch(() => {});
 
-    const pollInterval = setInterval(() => {
+    // EGRESS FIX: was every 8 s even in hidden tabs; now 60 s and only while visible.
+    const stopNotificationPoll = startVisibleInterval(() => {
       notificationService.syncWithBackend(role || undefined, recipientId).then(() => {
         loadNotifications();
       }).catch(() => {});
-    }, 8000);
+    }, 60_000);
 
     const handleNewNotification = (e: any) => {
       loadNotifications();
@@ -102,7 +104,7 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
     window.addEventListener(NOTIFICATION_EVENT_NAME, handleNewNotification);
     window.addEventListener(NOTIFICATION_ENGINE_UPDATED, handleEngineUpdate);
     return () => {
-      clearInterval(pollInterval);
+      stopNotificationPoll();
       window.removeEventListener(NOTIFICATION_EVENT_NAME, handleNewNotification);
       window.removeEventListener(NOTIFICATION_ENGINE_UPDATED, handleEngineUpdate);
     };

@@ -27,3 +27,6 @@ dist-ssr
 .env
 .env.local
 .env.*.local
+
+# Local data backups created by scripts (contain personal data — never commit)
+backups/

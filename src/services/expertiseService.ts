@@ -1,4 +1,6 @@
 import { mongoDB } from '../mongoDBService';
+import { cached } from '../lib/requestCache';
+import { startVisibleInterval } from '../lib/polling';
 
 export const EXPERTISE_STORAGE_KEY = 'app_expertise_fields';
 export const EXPERTISE_EVENT_NAME = 'app_expertise_fields_updated';
@@ -85,9 +87,13 @@ export const expertiseService = {
 
   async fetchFromBackend(): Promise<string[]> {
     try {
-      const res = await fetch('/api/domains');
-      if (res.ok) {
-        const domains = await res.json();
+      // Cached for 60 s and shared, so focus events / several components cause one request.
+      const domains = await cached('api:domains', 60_000, async () => {
+        const res = await fetch('/api/domains');
+        if (!res.ok) throw new Error(`/api/domains HTTP ${res.status}`);
+        return res.json();
+      });
+      {
         if (Array.isArray(domains) && domains.length > 0) {
           const names = domains.filter((d: any) => d.is_active !== false).map((d: any) => d.name);
           this.applyFields(names, false);
@@ -223,11 +229,14 @@ export const expertiseService = {
       window.addEventListener("mongo_db_updated", handleMongoDbEvent);
       window.addEventListener("focus", handleFocus);
 
+      // EGRESS FIX: this was a never-ending 1.5 s poll of /api/domains on every page.
+      // Domain names change rarely (only when an admin edits them, which also fires the events
+      // above), so a 5-minute refresh while the tab is visible is plenty.
       if (!isPollingStarted) {
         isPollingStarted = true;
-        setInterval(() => {
+        startVisibleInterval(() => {
           this.fetchFromBackend();
-        }, 1500);
+        }, 5 * 60_000);
       }
     }
 

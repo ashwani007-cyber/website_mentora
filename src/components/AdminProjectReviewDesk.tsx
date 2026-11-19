@@ -1,3 +1,4 @@
+import { startVisibleInterval } from '../lib/polling'; // egress-safe polling (skips hidden tabs)
 import React, { useState, useEffect, useRef } from 'react';
 import {
   FileText, ShieldCheck, IndianRupee, Video, MessageSquare, History, Save,
@@ -113,13 +114,14 @@ export const AdminProjectReviewDesk: React.FC<AdminProjectReviewDeskProps> = ({
     window.addEventListener('platform_fee_updated', handlePricingUpdate);
     window.addEventListener('mongo_db_updated', handlePricingUpdate);
     window.addEventListener('storage', handlePricingUpdate);
-    const pollInterval = setInterval(loadPricingAndFees, 2000);
+    // EGRESS FIX: was every 2 s; pricing changes also arrive via the events above.
+    const stopPricingPoll = startVisibleInterval(loadPricingAndFees, 60_000);
     return () => {
       window.removeEventListener('project_review_updated', handlePricingUpdate);
       window.removeEventListener('platform_fee_updated', handlePricingUpdate);
       window.removeEventListener('mongo_db_updated', handlePricingUpdate);
       window.removeEventListener('storage', handlePricingUpdate);
-      clearInterval(pollInterval);
+      stopPricingPoll();
     };
   }, []);
 
@@ -185,13 +187,14 @@ export const AdminProjectReviewDesk: React.FC<AdminProjectReviewDeskProps> = ({
 
   useEffect(() => {
     loadReviews();
-    const interval = setInterval(loadReviews, 3000);
+    // EGRESS FIX: was every 3 s.
+    const stopReviewsPoll = startVisibleInterval(loadReviews, 30_000);
     const handleUpdate = () => loadReviews();
     window.addEventListener('project_review_updated', handleUpdate);
     window.addEventListener('storage', handleUpdate);
 
     return () => {
-      clearInterval(interval);
+      stopReviewsPoll();
       window.removeEventListener('project_review_updated', handleUpdate);
       window.removeEventListener('storage', handleUpdate);
     };
