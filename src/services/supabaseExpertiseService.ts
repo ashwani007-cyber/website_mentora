@@ -1,6 +1,6 @@
 // Supabase-based Expertise Service
 import { supabase } from '../supabaseClient';
-import { cached, invalidate } from '../lib/requestCache';
+import { cached, invalidate, wroteRecently } from '../lib/requestCache';
 import { COLUMNS } from '../lib/columns';
 
 // ---------------------------------------------------------------------------
@@ -24,7 +24,21 @@ const logSupabaseError = (where: string, error: any) => {
   if (error) console.error(`[experts] ${where} failed:`, error.message || error, error.code ? `(code ${error.code})` : '');
 };
 
-async function loadExpertsSlim(): Promise<Expert[] | null> {
+async function loadExpertsSlim(fresh = false): Promise<Expert[] | null> {
+  // 1) Preferred: our server's cached list (/api/experts/list). It is cached for 60 s on the server
+  //    and by the CDN, so most page loads don't touch the database at all. Right after this browser
+  //    saved something we add ?fresh=… so the user sees their own change immediately.
+  try {
+    const res = await fetch(fresh || wroteRecently() ? `/api/experts/list?fresh=${Date.now()}` : '/api/experts/list');
+    if (res.ok) {
+      const list = await res.json();
+      if (Array.isArray(list)) return list as Expert[];
+    }
+  } catch {
+    /* server unreachable → read Supabase directly below */
+  }
+
+  // 2) Fallback: read the slim list straight from Supabase.
   const { data, error } = await supabase.rpc('get_experts_list', undefined, { get: true });
   if (!error) return Array.isArray(data) ? (data as Expert[]) : [];
   if (!isMissingFunction(error)) {
@@ -138,7 +152,7 @@ export const expertiseService = {
     try {
       if (opts.force) invalidate('experts:list');
       const data = await cached('experts:list', EXPERTS_TTL_MS, async () => {
-        const rows = await loadExpertsSlim();
+        const rows = await loadExpertsSlim(opts.force === true);
         // Don't cache a failure — throw so the next call retries.
         if (rows === null) throw new Error('experts list unavailable');
         return rows;

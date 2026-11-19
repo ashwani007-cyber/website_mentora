@@ -12005,6 +12005,18 @@ export default function App() {
 
         setExpertProfile((prev: any) => {
           if (!prev) return prev;
+          // EGRESS FIX: when nobody is logged in, expertProfile is the built-in demo profile
+          // (DEFAULT_EXPERT_FALLBACK, "Sunita Rao"). Every anonymous visitor used to look up its
+          // verification status in the database. Only check it for a real logged-in expert.
+          let hasLoggedInExpert = false;
+          try {
+            hasLoggedInExpert = Boolean(
+              localStorage.getItem(isAdminPortal ? "admin_logged_in_expert" : "current_logged_in_expert")
+            );
+          } catch {}
+          if (!hasLoggedInExpert || (prev.id === DEFAULT_EXPERT_FALLBACK.id && prev.email === DEFAULT_EXPERT_FALLBACK.email)) {
+            return prev;
+          }
           const queryKey = (prev.email || prev.id || prev.name || "").toLowerCase().trim();
           if (!queryKey) return prev;
 

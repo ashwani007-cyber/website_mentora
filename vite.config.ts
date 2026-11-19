@@ -928,6 +928,24 @@ function sharedDbPlugin(): Plugin {
       return
     }
 
+    // Endpoint: /api/experts/list — same as production (server.js): slim expert list, cached 60 s
+    // on the server, with a CDN cache header. ?fresh=… right after a save skips the cache.
+    if (url.startsWith('/api/experts/list') && req.method === 'GET') {
+      try {
+        const fresh = new URL(url, 'http://localhost').searchParams.has('fresh')
+        const h = await getEgressHelpers()
+        const experts = await h.fetchExpertsListCached({ force: fresh })
+        res.setHeader('Content-Type', 'application/json')
+        res.setHeader('Cache-Control', fresh ? 'no-store' : h.EXPERTS_LIST_CACHE_HEADER)
+        res.end(JSON.stringify(experts || []))
+      } catch (err: any) {
+        res.statusCode = 500
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify({ success: false, error: err.message }))
+      }
+      return
+    }
+
     // Endpoint: /api/experts
     if (url === '/api/experts' || url.startsWith('/api/experts?')) {
       if (req.method === 'GET') {

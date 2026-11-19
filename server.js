@@ -12,6 +12,8 @@ import cors from 'cors';
 import { supabase } from './server/supabaseClient.js';
 import {
   COLUMNS,
+  fetchExpertsListCached,
+  EXPERTS_LIST_CACHE_HEADER,
   PROJECT_REVIEW_PAGE_SIZE,
   withCamelAliases,
   isMissingFunction,
@@ -127,6 +129,20 @@ app.get('/api/experts', async (req, res) => {
     } catch {
       res.status(500).json({ success: false, error: err.message });
     }
+  }
+});
+
+// Expert list for all pages — cached 60 s on the server AND by the CDN (Vercel edge), so repeat
+// visitors and bots don't trigger database queries. ?fresh=… (sent right after a save) skips both.
+// Must stay ABOVE /api/experts/:id, otherwise Express would treat "list" as an expert id.
+app.get('/api/experts/list', async (req, res) => {
+  try {
+    const fresh = Boolean(req.query.fresh);
+    const experts = await fetchExpertsListCached({ force: fresh });
+    res.setHeader('Cache-Control', fresh ? 'no-store' : EXPERTS_LIST_CACHE_HEADER);
+    res.json(experts || []);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 

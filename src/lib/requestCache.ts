@@ -17,6 +17,22 @@
 type Entry = { value: unknown; expiresAt: number };
 
 const store = new Map<string, Entry>();
+let lastWriteAt = 0;
+
+/**
+ * Remember that THIS browser just saved something. For the next 2 minutes, reads that are normally
+ * served from a shared CDN copy (e.g. the public expert list) ask the server for a fresh answer,
+ * so the user always sees their own change immediately.
+ */
+export function markWrite() {
+  lastWriteAt = Date.now();
+  invalidate();
+}
+
+/** True if this browser saved something in the last 2 minutes. */
+export function wroteRecently(): boolean {
+  return Date.now() - lastWriteAt < 2 * 60_000;
+}
 const pending = new Map<string, Promise<unknown>>();
 
 export async function cached<T>(key: string, ttlMs: number, loader: () => Promise<T>): Promise<T> {
@@ -61,7 +77,7 @@ export function installWriteInvalidation() {
         // /api/kv is a local session key/value sync that never changes cached Supabase data,
         // and it is written often — so it is ignored here.
         if (url.origin === window.location.origin && url.pathname.startsWith('/api/') && !url.pathname.startsWith('/api/kv')) {
-          invalidate();
+          markWrite();
         }
       }
     } catch {

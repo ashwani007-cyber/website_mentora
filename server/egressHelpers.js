@@ -142,6 +142,20 @@ export async function fetchExpertsSlim({ force = false } = {}) {
   });
 }
 
+/**
+ * The expert list for EVERY page (landing, directory, portals), cached on the server for 60 s.
+ * 500 visitors (or a bot crawling the site) within a minute → 1 database query.
+ * Route /api/experts/list also sends a CDN cache header, so most visits never reach this server.
+ * { force: true } (used right after a save) skips the cache.
+ */
+export async function fetchExpertsListCached({ force = false } = {}) {
+  if (force) clearMemo('experts:');
+  return memo('experts:list60', 60_000, () => fetchExpertsSlim({ force }));
+}
+
+/** HTTP cache header for the expert list: shared CDN copy for 60 s, then refreshed in the background. */
+export const EXPERTS_LIST_CACHE_HEADER = 'public, max-age=0, s-maxage=60, stale-while-revalidate=300';
+
 /** Unverified experts for the admin KYC queue, slim. Cached 10 s. */
 export async function fetchUnverifiedExpertsSlim({ force = false } = {}) {
   if (force) clearMemo('experts:');

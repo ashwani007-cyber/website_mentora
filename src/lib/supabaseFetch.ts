@@ -15,7 +15,7 @@
  *      console to see a summary table.
  */
 
-import { invalidate } from './requestCache';
+import { markWrite } from './requestCache';
 
 // Event name the UI listens for (see src/components/ServiceStatusBanner.tsx)
 export const SUPABASE_UNAVAILABLE_EVENT = 'supabase-unavailable';
@@ -140,7 +140,7 @@ export const supabaseFetch: typeof fetch = async (input, init) => {
     // A successful direct write to a table means cached reads may be out of date → clear them.
     // (Read-only RPCs are sent as GET, so they never trigger this.)
     if (res.ok && method !== 'GET' && method !== 'HEAD' && url.pathname.startsWith('/rest/v1/')) {
-      invalidate();
+      markWrite();
     }
 
     // 3) Dev-only size + duration logger.
