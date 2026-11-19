@@ -40,19 +40,63 @@ export function isSupabaseUnavailable() {
 /**
  * Wraps fetch for every server-side Supabase request:
  *  - stops calling Supabase for 2 minutes after a 402/540 answer (no retry storms),
+ *  - caps reads per endpoint per minute and shares identical in-flight reads (egress guard),
  *  - in development, logs each response size and time so heavy queries are easy to spot.
  * Server-side responses count toward egress exactly like browser ones.
  */
+// ---- egress guard: per-minute cap per endpoint + in-flight de-duplication ----------------
+// Counts calls per endpoint ("GET /rest/v1/experts") over a rolling minute for this server process.
+//  - development: console warning once an endpoint passes WARN_PER_MINUTE (looks like a loop),
+//  - everywhere: READS beyond HARD_CAP_PER_MINUTE get a 429 until the minute rolls over.
+//    Writes are never blocked, so no save is ever lost.
+const WARN_PER_MINUTE = 30;
+const HARD_CAP_PER_MINUTE = 300;
+const rateWindow = new Map();
+const warned = new Set();
+function allowByRateCap(method, url) {
+  if (url.includes('/auth/v1/')) return true;
+  const endpoint = `${method} ${new URL(url).pathname}`;
+  const now = Date.now();
+  const recent = (rateWindow.get(endpoint) || []).filter((t) => now - t < 60_000);
+  recent.push(now);
+  rateWindow.set(endpoint, recent);
+  if (IS_DEV && recent.length > WARN_PER_MINUTE && !warned.has(endpoint)) {
+    warned.add(endpoint);
+    console.warn(`[egress-guard:server] ${endpoint} called ${recent.length}× in the last minute — check for a loop.`);
+    setTimeout(() => warned.delete(endpoint), 60_000);
+  }
+  const isRead = method === 'GET' || method === 'HEAD';
+  return !(isRead && recent.length > HARD_CAP_PER_MINUTE);
+}
+const inFlight = new Map(); // identical GETs running at the same moment share one request
+
 async function serverFetch(input, init) {
   const url = typeof input === 'string' ? input : input.url;
+  const method = String(init?.method || (typeof input === 'object' && input.method) || 'GET').toUpperCase();
   if (isSupabaseUnavailable() && !url.includes('/auth/v1/')) {
     return new Response(JSON.stringify({ message: 'Supabase temporarily unavailable (quota exceeded or project paused)', code: 'SERVICE_UNAVAILABLE' }), {
       status: 503,
       headers: { 'Content-Type': 'application/json' }
     });
   }
+  if (!allowByRateCap(method, url)) {
+    return new Response(JSON.stringify({ message: 'Too many identical reads in the last minute (egress guard)', code: 'EGRESS_GUARD' }), {
+      status: 429,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+  const dedupeKey = method === 'GET' ? `${url} ${new Headers(init?.headers).get('range') || ''}` : null;
+  if (dedupeKey && inFlight.has(dedupeKey)) {
+    return (await inFlight.get(dedupeKey)).clone();
+  }
   const started = Date.now();
-  const res = await fetch(input, init);
+  const pending = fetch(input, init);
+  if (dedupeKey) {
+    inFlight.set(dedupeKey, pending);
+    pending.finally(() => inFlight.delete(dedupeKey)).catch(() => {});
+  }
+  const shared = await pending;
+  const res = dedupeKey ? shared.clone() : shared;
   if (res.status === 402 || res.status === 540) {
     if (!isSupabaseUnavailable()) console.warn(`[supabase:server] HTTP ${res.status} — project restricted/paused. Pausing requests for 2 minutes.`);
     breakerOpenUntil = Date.now() + BREAKER_COOLDOWN_MS;

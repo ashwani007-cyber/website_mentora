@@ -97,6 +97,39 @@ if (IS_DEV && typeof window !== 'undefined') {
   };
 }
 
+// ---- per-minute request cap ------------------------------------------------
+// Counts requests per endpoint (method + path, e.g. "GET rest/v1/bookings") in a rolling minute.
+//  - In development: a console warning once an endpoint passes WARN_PER_MINUTE — a sign of a loop.
+//  - Everywhere: READS beyond HARD_CAP_PER_MINUTE are refused (429) until the minute rolls over,
+//    so a bug can never download data in a tight loop. WRITES are never blocked (no lost saves).
+const WARN_PER_MINUTE = 10;
+const HARD_CAP_PER_MINUTE = 60;
+const rateWindow = new Map<string, number[]>();
+const warned = new Set<string>();
+
+function checkRateCap(method: string, url: URL): boolean {
+  if (url.pathname.startsWith('/auth/')) return true; // never block sign-in / token refresh
+  const endpoint = `${method} ${url.pathname}`;
+  const now = Date.now();
+  const recent = (rateWindow.get(endpoint) || []).filter((t) => now - t < 60_000);
+  recent.push(now);
+  rateWindow.set(endpoint, recent);
+
+  if (IS_DEV && recent.length > WARN_PER_MINUTE && !warned.has(endpoint)) {
+    warned.add(endpoint);
+    console.warn(`[egress-guard] ${endpoint} called ${recent.length}× in the last minute — check for a loop.`);
+    setTimeout(() => warned.delete(endpoint), 60_000);
+  }
+  const isRead = method === 'GET' || method === 'HEAD';
+  if (isRead && recent.length > HARD_CAP_PER_MINUTE) {
+    if (recent.length === HARD_CAP_PER_MINUTE + 1) {
+      console.error(`[egress-guard] Blocking ${endpoint} for the rest of this minute (> ${HARD_CAP_PER_MINUTE} reads).`);
+    }
+    return false;
+  }
+  return true;
+}
+
 // ---- in-flight de-duplication ----------------------------------------------
 const inFlight = new Map<string, Promise<Response>>();
 
@@ -124,7 +157,15 @@ export const supabaseFetch: typeof fetch = async (input, init) => {
     );
   }
 
-  // 2) De-duplicate identical concurrent GETs.
+  // 2) Per-minute request cap (egress safety net). See checkRateCap below.
+  if (!checkRateCap(method, url)) {
+    return new Response(
+      JSON.stringify({ message: 'Too many identical reads from this tab in the last minute (egress guard)', code: 'EGRESS_GUARD' }),
+      { status: 429, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  // 3) De-duplicate identical concurrent GETs.
   const key = dedupeKey(method, request.url, request.headers);
   if (key && inFlight.has(key)) {
     const shared = await inFlight.get(key)!;
