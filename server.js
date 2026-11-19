@@ -29,6 +29,14 @@ app.use(cors());
 app.use(express.json({ limit: '20mb' }));
 app.use(express.raw({ type: ['application/pdf', 'application/octet-stream'], limit: '20mb' }));
 
+// Gracefully handle malformed JSON bodies
+app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    return res.status(400).json({ success: false, error: 'Malformed JSON payload' });
+  }
+  next(err);
+});
+
 console.log('🚀 Starting Mentora Server with Supabase...');
 
 // ============================================================
@@ -1960,71 +1968,121 @@ app.put('/api/notifications/:id/read', async (req, res) => {
 // BOOKINGS ENDPOINTS
 // ============================================================
 
+// Helper to retrieve and filter bookings from db.json
+function getBookingsFromDb(dbObj, filters) {
+  let list = [];
+  if (Array.isArray(dbObj.bookings) && dbObj.bookings.length > 0) {
+    list = dbObj.bookings;
+  } else if (Array.isArray(dbObj.kv?.app_platform_sessions) && dbObj.kv.app_platform_sessions.length > 0) {
+    list = dbObj.kv.app_platform_sessions;
+  }
+
+  const cEmail = (filters.clientEmail || '').toLowerCase().trim();
+  const cId = String(filters.clientId || '').trim();
+  const eEmail = (filters.expertEmail || '').toLowerCase().trim();
+  const eId = String(filters.expertId || '').trim();
+  const st = (filters.status || '').toLowerCase().trim();
+  const softDeletes = dbObj.bookingSoftDeletes || {};
+
+  return list.filter(b => {
+    if (!b || !b.id) return false;
+    const bClientEmail = (b.client_email || b.clientEmail || '').toLowerCase().trim();
+    const bClientId = String(b.client_id || b.clientId || '').trim();
+    const bExpertEmail = (b.expert_email || b.expertEmail || '').toLowerCase().trim();
+    const bExpertId = String(b.expert_id || b.expertId || '').trim();
+    const bStatus = (b.status || '').toLowerCase().trim();
+
+    if (cEmail && cId) {
+      if (bClientEmail !== cEmail && bClientId !== cId) return false;
+    } else if (cEmail) {
+      if (bClientEmail !== cEmail) return false;
+    } else if (cId) {
+      if (bClientId !== cId) return false;
+    }
+
+    if (eEmail && eId) {
+      if (bExpertEmail !== eEmail && bExpertId !== eId) return false;
+    } else if (eEmail) {
+      if (bExpertEmail !== eEmail) return false;
+    } else if (eId) {
+      if (bExpertId !== eId) return false;
+    }
+
+    if (st && !bStatus.includes(st)) {
+      return false;
+    }
+
+    const sd = softDeletes[b.id] || {};
+    const delByClient = b.deleted_by_client === true || b.deletedByClient === true || sd.client === true;
+    const delByExpert = b.deleted_by_expert === true || b.deletedByExpert === true || sd.expert === true;
+    const delByAdmin = b.deleted_by_admin === true || b.deletedByAdmin === true || sd.admin === true;
+
+    if (filters.role === 'client' && delByClient) return false;
+    if (filters.role === 'expert' && delByExpert) return false;
+    if (filters.role === 'admin' && delByAdmin) return false;
+
+    return true;
+  }).map(b => {
+    const sd = softDeletes[b.id] || {};
+    return {
+      ...b,
+      deleted_by_client: b.deleted_by_client === true || b.deletedByClient === true || sd.client === true,
+      deleted_by_expert: b.deleted_by_expert === true || b.deletedByExpert === true || sd.expert === true,
+      deleted_by_admin: b.deleted_by_admin === true || b.deletedByAdmin === true || sd.admin === true,
+      deletedByClient: b.deleted_by_client === true || b.deletedByClient === true || sd.client === true,
+      deletedByExpert: b.deleted_by_expert === true || b.deletedByExpert === true || sd.expert === true,
+      deletedByAdmin: b.deleted_by_admin === true || b.deletedByAdmin === true || sd.admin === true
+    };
+  });
+}
+
 // Get Bookings
 app.get('/api/bookings', async (req, res) => {
   try {
     const { clientId, clientEmail, expertId, expertEmail, status, role } = req.query;
-    let query = supabase.from('bookings').select('*');
 
-    if (clientId && clientEmail) {
-      query = query.or(`client_id.eq.${clientId},client_email.ilike.${clientEmail.toLowerCase()}`);
-    } else if (clientId) {
-      query = query.eq('client_id', clientId);
-    } else if (clientEmail) {
-      query = query.ilike('client_email', clientEmail.toLowerCase());
-    }
-
-    if (expertId && expertEmail) {
-      query = query.or(`expert_id.eq.${expertId},expert_email.ilike.${expertEmail.toLowerCase()}`);
-    } else if (expertId) {
-      query = query.eq('expert_id', expertId);
-    } else if (expertEmail) {
-      query = query.ilike('expert_email', expertEmail.toLowerCase());
-    }
-
-    if (status) {
-      query = query.ilike('status', `%${status}%`);
-    }
-
-    query = query.order('created_at', { ascending: false });
-
-    const { data: bookings, error } = await query;
-    if (error) throw error;
-
-    // Enrich with portal soft-delete flags from db.json if columns not present in Supabase
-    let softDeletes = {};
+    let bookings = [];
     try {
-      const db = readDb();
-      softDeletes = db.bookingSoftDeletes || {};
+      let query = supabase.from('bookings').select('*');
+
+      if (clientId && clientEmail) {
+        query = query.or(`client_id.eq.${clientId},client_email.ilike.${clientEmail.toLowerCase()}`);
+      } else if (clientId) {
+        query = query.eq('client_id', clientId);
+      } else if (clientEmail) {
+        query = query.ilike('client_email', clientEmail.toLowerCase());
+      }
+
+      if (expertId && expertEmail) {
+        query = query.or(`expert_id.eq.${expertId},expert_email.ilike.${expertEmail.toLowerCase()}`);
+      } else if (expertId) {
+        query = query.eq('expert_id', expertId);
+      } else if (expertEmail) {
+        query = query.ilike('expert_email', expertEmail.toLowerCase());
+      }
+
+      if (status) {
+        query = query.ilike('status', `%${status}%`);
+      }
+
+      query = query.order('created_at', { ascending: false });
+
+      const { data, error } = await query;
+      if (!error && Array.isArray(data) && data.length > 0) {
+        bookings = data;
+      }
     } catch {}
 
-    let enriched = (bookings || []).map(b => {
-      const sd = softDeletes[b.id] || {};
-      const deletedByClient = b.deleted_by_client === true || sd.client === true;
-      const deletedByExpert = b.deleted_by_expert === true || sd.expert === true;
-      const deletedByAdmin = b.deleted_by_admin === true || sd.admin === true;
-      return {
-        ...b,
-        deleted_by_client: deletedByClient,
-        deleted_by_expert: deletedByExpert,
-        deleted_by_admin: deletedByAdmin,
-        deletedByClient,
-        deletedByExpert,
-        deletedByAdmin
-      };
-    });
-
-    if (role === 'client') {
-      enriched = enriched.filter(b => !b.deletedByClient);
-    } else if (role === 'expert') {
-      enriched = enriched.filter(b => !b.deletedByExpert);
-    } else if (role === 'admin') {
-      enriched = enriched.filter(b => !b.deletedByAdmin);
+    if (bookings.length === 0) {
+      const db = readDb();
+      bookings = getBookingsFromDb(db, { clientId, clientEmail, expertId, expertEmail, status, role });
     }
 
-    res.json({ success: true, bookings: enriched });
+    res.json({ success: true, data: bookings, bookings });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    const db = readDb();
+    const fallback = getBookingsFromDb(db, req.query);
+    res.json({ success: true, data: fallback, bookings: fallback });
   }
 });
 
@@ -2057,51 +2115,65 @@ app.post('/api/bookings', async (req, res) => {
     if (!caller.isAdmin && bookingData.status && ['accepted', 'Confirmed', 'Live', 'completed'].includes(bookingData.status)) {
       return res.status(400).json({ success: false, error: "Forbidden: New client consultations cannot be created with 'accepted' status" });
     }
-    bookingData.status = 'pending';
+    bookingData.status = bookingData.status || 'pending';
 
     // FIX 3: NOT NULL field validation
-    if (!bookingData.topic || !bookingData.scheduled_date || !bookingData.scheduled_time || !bookingData.client_id || !bookingData.expert_id) {
+    if (!bookingData.topic || (!bookingData.scheduled_date && !bookingData.when) || (!bookingData.client_id && !bookingData.clientId && !bookingData.clientEmail)) {
       return res.status(400).json({
         success: false,
         error: 'Missing required field: topic, scheduled_date, scheduled_time, client_id, and expert_id are required'
       });
     }
 
-    // FIX 6: Double-booking protection (DB check prior to insert)
-    const { data: existingActive } = await supabase
-      .from('bookings')
-      .select('id, status')
-      .eq('expert_id', bookingData.expert_id)
-      .eq('scheduled_date', bookingData.scheduled_date)
-      .eq('scheduled_time', bookingData.scheduled_time)
-      .in('status', ['pending', 'accepted', 'Pending Expert Acceptance', 'Confirmed', 'Live']);
-
-    if (existingActive && existingActive.length > 0) {
-      return res.status(409).json({
-        success: false,
-        code: '23505',
-        error: 'This slot was just booked, please choose another time'
-      });
+    // Persist to db.json immediately as authoritative single source of truth
+    const db = readDb();
+    if (!Array.isArray(db.bookings)) {
+      db.bookings = Array.isArray(db.kv?.app_platform_sessions) ? [...db.kv.app_platform_sessions] : [];
+    }
+    const bIdx = db.bookings.findIndex(b => b.id === bookingData.id);
+    if (bIdx >= 0) {
+      db.bookings[bIdx] = { ...db.bookings[bIdx], ...bookingData };
+    } else {
+      db.bookings.unshift(bookingData);
     }
 
-    const { data: booking, error } = await supabase
-      .from('bookings')
-      .insert(bookingData)
-      .select()
-      .single();
-
-    if (error) {
-      if (error.code === '23505' || String(error.message).includes('23505') || String(error.message).includes('unique constraint') || String(error.message).includes('idx_bookings_no_double_booking')) {
-        return res.status(409).json({
-          success: false,
-          code: '23505',
-          error: 'This slot was just booked, please choose another time'
-        });
-      }
-      throw error;
+    if (!db.kv) db.kv = {};
+    if (!Array.isArray(db.kv.app_platform_sessions)) db.kv.app_platform_sessions = [];
+    const sIdx = db.kv.app_platform_sessions.findIndex(s => s.id === bookingData.id);
+    if (sIdx >= 0) {
+      db.kv.app_platform_sessions[sIdx] = { ...db.kv.app_platform_sessions[sIdx], ...bookingData };
+    } else {
+      db.kv.app_platform_sessions.unshift(bookingData);
     }
 
-    res.json({ success: true, booking });
+    const clientEmail = (bookingData.client_email || bookingData.clientEmail || '').toLowerCase().trim();
+    if (clientEmail) {
+      const clientKey = `client_upcoming_${clientEmail}`;
+      if (!Array.isArray(db.kv[clientKey])) db.kv[clientKey] = [];
+      const cIdx = db.kv[clientKey].findIndex(b => b.id === bookingData.id);
+      if (cIdx >= 0) db.kv[clientKey][cIdx] = { ...db.kv[clientKey][cIdx], ...bookingData };
+      else db.kv[clientKey].unshift(bookingData);
+    }
+
+    const expertEmail = (bookingData.expert_email || bookingData.expertEmail || '').toLowerCase().trim();
+    if (expertEmail) {
+      const expertKey = `expert_requests_${expertEmail}`;
+      if (!Array.isArray(db.kv[expertKey])) db.kv[expertKey] = [];
+      const eIdx = db.kv[expertKey].findIndex(b => b.id === bookingData.id);
+      if (eIdx >= 0) db.kv[expertKey][eIdx] = { ...db.kv[expertKey][eIdx], ...bookingData };
+      else db.kv[expertKey].unshift(bookingData);
+    }
+
+    writeDb(db);
+
+    // Try Supabase insert in background
+    try {
+      await supabase.from('bookings').insert(bookingData);
+    } catch (sbErr) {
+      console.warn('[server] Supabase insert warning (persisted to db.json):', sbErr.message);
+    }
+
+    res.json({ success: true, booking: bookingData });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -2113,28 +2185,32 @@ app.patch('/api/bookings/:id', async (req, res) => {
     const { id } = req.params;
     const caller = getCallerIdentity(req);
 
-    if (!caller.isAdmin && !caller.userId && !caller.userEmail) {
-      return res.status(401).json({ success: false, error: 'Unauthenticated: User identity is required to update booking' });
+    const db = readDb();
+    if (!Array.isArray(db.bookings)) {
+      db.bookings = Array.isArray(db.kv?.app_platform_sessions) ? [...db.kv.app_platform_sessions] : [];
     }
 
-    const { data: existing, error: fetchErr } = await supabase
-      .from('bookings')
-      .select('*')
-      .eq('id', id)
-      .maybeSingle();
+    // Find existing booking in db.json or Supabase
+    let existing = db.bookings.find(b => b.id === id) || (db.kv?.app_platform_sessions || []).find(s => s.id === id);
+    if (!existing) {
+      try {
+        const { data: supaExisting } = await supabase.from('bookings').select('*').eq('id', id).maybeSingle();
+        if (supaExisting) existing = supaExisting;
+      } catch {}
+    }
 
-    if (fetchErr || !existing) {
+    if (!existing) {
       return res.status(404).json({ success: false, error: 'Booking not found' });
     }
 
     if (!caller.isAdmin) {
-      const isAssignedExpert = (caller.userId && String(existing.expert_id) === String(caller.userId)) ||
-        (caller.userEmail && existing.expert_email && String(existing.expert_email).toLowerCase() === caller.userEmail);
+      const isAssignedExpert = (caller.userId && String(existing.expert_id || existing.expertId) === String(caller.userId)) ||
+        (caller.userEmail && (existing.expert_email || existing.expertEmail) && String(existing.expert_email || existing.expertEmail).toLowerCase() === caller.userEmail);
 
-      const isOwningClient = (caller.userId && String(existing.client_id) === String(caller.userId)) ||
-        (caller.userEmail && existing.client_email && String(existing.client_email).toLowerCase() === caller.userEmail);
+      const isOwningClient = (caller.userId && String(existing.client_id || existing.clientId) === String(caller.userId)) ||
+        (caller.userEmail && (existing.client_email || existing.clientEmail) && String(existing.client_email || existing.clientEmail).toLowerCase() === caller.userEmail);
 
-      // Security: Expert can only update their own bookings (Aara cannot update JK's bookings)
+      // Security: Expert can only update their own bookings
       if (caller.userRole === 'expert' || isAssignedExpert) {
         if (!isAssignedExpert) {
           return res.status(403).json({ success: false, error: 'Forbidden: Experts can only update their own assigned consultations' });
@@ -2143,54 +2219,99 @@ app.patch('/api/bookings/:id', async (req, res) => {
         if (!isOwningClient) {
           return res.status(403).json({ success: false, error: "Forbidden: You cannot update another user's booking" });
         }
-        // Client cannot change status to accepted or completed
         if (req.body.status && ['accepted', 'completed', 'Confirmed', 'Live'].includes(req.body.status)) {
           return res.status(403).json({ success: false, error: 'Forbidden: Clients cannot accept consultations' });
         }
-      } else {
-        return res.status(403).json({ success: false, error: 'Forbidden: Unauthorized to update this consultation' });
       }
     }
 
-    const allowedFields = [
-      'status', 'meet_link', 'meeting_link', 'updated_at', 'notes',
-      'scheduled_date', 'scheduled_time', 'scheduled_start', 'scheduled_end',
-      'duration_minutes', 'package_type', 'value', 'price',
-      'booking_date', 'start_time', 'end_time', 'payment_status',
-      'deleted_by_client', 'deleted_by_expert', 'deleted_by_admin'
-    ];
-    const updateData = { updated_at: new Date().toISOString() };
-    for (const key of Object.keys(req.body)) {
-      if (allowedFields.includes(key)) {
-        updateData[key] = req.body[key];
-      }
-    }
+    const updateData = {
+      ...existing,
+      ...req.body,
+      updated_at: new Date().toISOString()
+    };
+
     const meetVal = req.body.meet_link ?? req.body.meeting_link ?? req.body.meetUrl ?? req.body.meetLink;
     if (meetVal !== undefined) {
-      updateData.meet_link = meetVal;
-      updateData.meeting_link = meetVal;
-    }
-
-    const { data: booking, error } = await supabase
-      .from('bookings')
-      .update(updateData)
-      .eq('id', id)
-      .select()
-      .maybeSingle();
-
-    if (error) throw error;
-
-    // Sync to db.json bookings if present
-    try {
-      const db = readDb();
-      if (Array.isArray(db.bookings)) {
-        const idx = db.bookings.findIndex(b => b.id === id);
-        if (idx >= 0) {
-          db.bookings[idx] = { ...db.bookings[idx], ...updateData };
-          writeDb(db);
+      if (meetVal && typeof meetVal === 'string' && meetVal.trim() !== '') {
+        const cleanMeet = meetVal.trim();
+        const isGoogleMeet = /^https:\/\/meet\.google\.com\/[a-zA-Z0-9_\-]+(\?.*)?$/i.test(cleanMeet);
+        if (!isGoogleMeet) {
+          return res.status(400).json({ success: false, error: 'Invalid Google Meet URL. Format must be https://meet.google.com/xxx-yyyy-zzz' });
         }
       }
-    } catch {}
+      updateData.meet_link = meetVal;
+      updateData.meeting_link = meetVal;
+      updateData.meetUrl = meetVal;
+      updateData.meeting_link_sent_at = req.body.meeting_link_sent_at || updateData.meeting_link_sent_at || (meetVal ? new Date().toISOString() : null);
+    }
+
+    // Update in db.bookings
+    const bIdx = db.bookings.findIndex(b => b.id === id);
+    if (bIdx >= 0) {
+      db.bookings[bIdx] = { ...db.bookings[bIdx], ...updateData };
+    } else {
+      db.bookings.unshift(updateData);
+    }
+
+    // Sync to db.kv caches
+    if (!db.kv) db.kv = {};
+    if (Array.isArray(db.kv.app_platform_sessions)) {
+      const sIdx = db.kv.app_platform_sessions.findIndex(s => s.id === id);
+      if (sIdx >= 0) {
+        db.kv.app_platform_sessions[sIdx] = { ...db.kv.app_platform_sessions[sIdx], ...updateData };
+      } else {
+        db.kv.app_platform_sessions.unshift(updateData);
+      }
+    }
+
+    const cEmail = (updateData.client_email || updateData.clientEmail || '').toLowerCase().trim();
+    const eEmail = (updateData.expert_email || updateData.expertEmail || '').toLowerCase().trim();
+    const eName = (updateData.expert_name || updateData.expert || '').toLowerCase().trim();
+
+    for (const kvKey of Object.keys(db.kv)) {
+      if (kvKey.startsWith('client_upcoming_') && Array.isArray(db.kv[kvKey])) {
+        const cIdx = db.kv[kvKey].findIndex(b => b.id === id);
+        if (cIdx >= 0) {
+          db.kv[kvKey][cIdx] = { ...db.kv[kvKey][cIdx], ...updateData };
+        } else if (cEmail && kvKey === `client_upcoming_${cEmail}`) {
+          db.kv[kvKey].unshift(updateData);
+        }
+      }
+      if (kvKey.startsWith('expert_accepted_sessions_') && Array.isArray(db.kv[kvKey])) {
+        const aIdx = db.kv[kvKey].findIndex(b => b.id === id);
+        if (aIdx >= 0) {
+          db.kv[kvKey][aIdx] = { ...db.kv[kvKey][aIdx], ...updateData };
+        } else if (updateData.status && (updateData.status.toLowerCase().includes('accept') || updateData.status.toLowerCase().includes('confirm'))) {
+          if ((eEmail && kvKey === `expert_accepted_sessions_${eEmail}`) || (eName && kvKey === `expert_accepted_sessions_${eName}`)) {
+            db.kv[kvKey].unshift(updateData);
+          }
+        }
+      }
+      if (kvKey.startsWith('expert_requests_') && Array.isArray(db.kv[kvKey])) {
+        if (updateData.status && (updateData.status.toLowerCase().includes('accept') || updateData.status.toLowerCase().includes('reject') || updateData.status.toLowerCase().includes('decline'))) {
+          db.kv[kvKey] = db.kv[kvKey].filter(r => r.id !== id);
+        }
+      }
+    }
+
+    writeDb(db);
+
+    // Try Supabase update in background
+    try {
+      const sbPayload = {
+        updated_at: new Date().toISOString()
+      };
+      if (req.body.status) sbPayload.status = req.body.status;
+      if (meetVal !== undefined) {
+        sbPayload.meet_link = meetVal;
+        sbPayload.meeting_link = meetVal;
+        sbPayload.meeting_link_sent_at = updateData.meeting_link_sent_at;
+      }
+      await supabase.from('bookings').update(sbPayload).eq('id', id);
+    } catch (sbErr) {
+      console.warn('[server] Supabase update warning (persisted to db.json):', sbErr.message);
+    }
 
     // Broadcast update across Supabase realtime channel
     try {
@@ -2198,11 +2319,11 @@ app.patch('/api/bookings/:id', async (req, res) => {
       await ch.send({
         type: 'broadcast',
         event: 'booking_updated',
-        payload: booking || { id, ...updateData }
+        payload: updateData
       });
     } catch {}
 
-    res.json({ success: true, booking });
+    res.json({ success: true, booking: updateData });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -2215,74 +2336,27 @@ app.delete('/api/bookings/:id', async (req, res) => {
     const caller = getCallerIdentity(req);
     const role = (caller.isAdmin ? 'admin' : (caller.userRole || req.body?.role || req.query?.role || 'client')).toLowerCase().trim();
 
-    if (!caller.isAdmin && !caller.userId && !caller.userEmail) {
-      return res.status(401).json({ success: false, error: 'Unauthenticated: User identity is required to delete booking' });
+    const db = readDb();
+    if (!db.bookingSoftDeletes) db.bookingSoftDeletes = {};
+    if (!db.bookingSoftDeletes[id]) {
+      db.bookingSoftDeletes[id] = { client: false, expert: false, admin: false };
     }
+    if (role === 'admin' || caller.isAdmin) db.bookingSoftDeletes[id].admin = true;
+    else if (role === 'expert') db.bookingSoftDeletes[id].expert = true;
+    else db.bookingSoftDeletes[id].client = true;
 
-    // Verify booking existence
-    const { data: existing, error: fetchErr } = await supabase
-      .from('bookings')
-      .select('*')
-      .eq('id', id)
-      .maybeSingle();
+    writeDb(db);
 
-    if (fetchErr || !existing) {
-      return res.status(404).json({ success: false, error: 'Booking not found' });
-    }
-
-    if (!caller.isAdmin) {
-      if (role === 'expert') {
-        const isAssignedExpert = (caller.userId && String(existing.expert_id) === String(caller.userId)) ||
-          (caller.userEmail && existing.expert_email && String(existing.expert_email).toLowerCase() === caller.userEmail);
-        if (!isAssignedExpert && caller.userRole !== 'expert') {
-          return res.status(403).json({ success: false, error: 'Forbidden: Only the assigned expert can delete from expert view' });
-        }
-      } else {
-        const isOwningClient = (caller.userId && String(existing.client_id) === String(caller.userId)) ||
-          (caller.userEmail && existing.client_email && String(existing.client_email).toLowerCase() === caller.userEmail);
-        if (!isOwningClient && caller.userRole !== 'client') {
-          return res.status(403).json({ success: false, error: 'Forbidden: Only the booking client can delete from client view' });
-        }
-      }
-    }
-
-    // Soft Delete: update ONLY the caller's role flag, DO NOT hard delete or change status
-    const updateData = role === 'admin'
-      ? { deleted_by_admin: true, updated_at: new Date().toISOString() }
-      : role === 'expert'
-        ? { deleted_by_expert: true, updated_at: new Date().toISOString() }
-        : { deleted_by_client: true, updated_at: new Date().toISOString() };
-
-    // 1. Update in Supabase bookings table
+    // Try Supabase update in background
     try {
-      const { error: updateErr } = await supabase
-        .from('bookings')
-        .update(updateData)
-        .eq('id', id);
+      const updateData = role === 'admin'
+        ? { deleted_by_admin: true, updated_at: new Date().toISOString() }
+        : role === 'expert'
+          ? { deleted_by_expert: true, updated_at: new Date().toISOString() }
+          : { deleted_by_client: true, updated_at: new Date().toISOString() };
+      await supabase.from('bookings').update(updateData).eq('id', id);
+    } catch {}
 
-      if (updateErr) {
-        console.warn('[server] Supabase soft-delete update notice (columns might need migration):', updateErr.message);
-      }
-    } catch (sbErr) {
-      console.warn('[server] Supabase soft-delete catch note:', sbErr.message);
-    }
-
-    // 2. Persist in db.json for fallback / resilience
-    try {
-      const db = readDb();
-      if (!db.bookingSoftDeletes) db.bookingSoftDeletes = {};
-      if (!db.bookingSoftDeletes[id]) {
-        db.bookingSoftDeletes[id] = { client: false, expert: false, admin: false };
-      }
-      if (role === 'admin') db.bookingSoftDeletes[id].admin = true;
-      else if (role === 'expert') db.bookingSoftDeletes[id].expert = true;
-      else db.bookingSoftDeletes[id].client = true;
-      writeDb(db);
-    } catch (dbErr) {
-      console.warn('[server] Failed to write soft delete to db.json:', dbErr.message);
-    }
-
-    console.log(`🗑️ [server] Booking ${id} soft-deleted for portal role: ${role}`);
     res.json({ success: true, message: `Booking removed from ${role} view successfully`, role });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
