@@ -21,6 +21,17 @@ interface ProjectReviewWorkspaceProps {
   theme?: 'dark' | 'light';
 }
 
+const MAX_REVIEW_UPLOAD_SIZE = 3 * 1024 * 1024;
+
+function encodeReviewFile(file: File): Promise<{ name: string; fileData: string }> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve({ name: file.name, fileData: String(reader.result) });
+    reader.onerror = () => reject(new Error(`Could not read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
 export const ProjectReviewWorkspace: React.FC<ProjectReviewWorkspaceProps> = ({
   projectReviewId,
   userRole,
@@ -54,6 +65,8 @@ export const ProjectReviewWorkspace: React.FC<ProjectReviewWorkspaceProps> = ({
 
   // Form states
   const [chatInput, setChatInput] = useState('');
+  const [chatFile, setChatFile] = useState<File | null>(null);
+  const chatFileInput = useRef<HTMLInputElement>(null);
   const [isSendingChat, setIsSendingChat] = useState(false);
 
   // Scheduling states
@@ -73,7 +86,8 @@ export const ProjectReviewWorkspace: React.FC<ProjectReviewWorkspaceProps> = ({
   const [subQuestions, setSubQuestions] = useState('');
   const [subRepoUrl, setSubRepoUrl] = useState('');
   const [subDemoUrl, setSubDemoUrl] = useState('');
-  const [subFiles, setSubFiles] = useState<Array<{ name: string; url: string; size?: string; uploadedAt: string }>>([]);
+  const [subFiles, setSubFiles] = useState<File[]>([]);
+  const subFileInput = useRef<HTMLInputElement>(null);
   const [isSubmittingDocs, setIsSubmittingDocs] = useState(false);
 
   // Final review findings state (Expert only)
@@ -87,28 +101,29 @@ export const ProjectReviewWorkspace: React.FC<ProjectReviewWorkspaceProps> = ({
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
 
   const chatBottomRef = useRef<HTMLDivElement>(null);
+  const hydratedReview = useRef<string | null>(null);
 
   const loadReviewData = async () => {
     try {
       const data = await mongoDB.getProjectReview(projectReviewId);
       if (data) {
         setReview(data);
-        if (data.submission) {
+        if (hydratedReview.current !== projectReviewId && data.submission) {
           setSubDesc(data.submission.description || '');
           setSubQuestions(data.submission.questions || '');
           setSubRepoUrl(data.submission.repositoryUrl || '');
           setSubDemoUrl(data.submission.demoUrl || '');
-          setSubFiles(data.submission.files || []);
         }
-        if (data.reviewFeedback) {
+        if (hydratedReview.current !== projectReviewId && data.reviewFeedback) {
           setFindingsSummary(data.reviewFeedback.summary || '');
           setFindingsRecs((data.reviewFeedback.recommendations || []).join('\n'));
           setFindingsStrengths(data.reviewFeedback.strengths || '');
           setFindingsIssues(data.reviewFeedback.issues || '');
         }
+        hydratedReview.current = projectReviewId;
       }
     } catch (e) {
-      console.error('Failed to load project review:', e);
+      setActionError(e instanceof Error ? e.message : 'Unable to open this Project Review');
     } finally {
       setIsLoading(false);
     }
@@ -140,8 +155,9 @@ export const ProjectReviewWorkspace: React.FC<ProjectReviewWorkspaceProps> = ({
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md">
         <div className="p-6 rounded-2xl border border-white/10 bg-[#0B111A] text-white text-center space-y-3">
-          <RefreshCw size={28} className="animate-spin text-amber-400 mx-auto" />
-          <p className="text-sm font-bold">Opening Dedicated Project Review Workspace...</p>
+          {isLoading ? <RefreshCw size={28} className="animate-spin text-amber-400 mx-auto" /> : null}
+          <p className="text-sm font-bold">{isLoading ? 'Opening Project Review…' : actionError || 'Project Review unavailable'}</p>
+          {!isLoading && <button type="button" className="text-xs underline" onClick={onClose}>Close</button>}
           <p className="text-xs text-slate-400 font-mono">{projectReviewId}</p>
         </div>
       </div>
@@ -156,7 +172,7 @@ export const ProjectReviewWorkspace: React.FC<ProjectReviewWorkspaceProps> = ({
   // Handling Chat Send
   const handleSendChat = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!chatInput.trim()) return;
+    if (isSendingChat || (!chatInput.trim() && !chatFile)) return;
 
     setIsSendingChat(true);
     setActionError(null);
@@ -165,22 +181,28 @@ export const ProjectReviewWorkspace: React.FC<ProjectReviewWorkspaceProps> = ({
     const senderName = currentUserName || (isClient ? review.clientName : (isExpert ? review.expertName : 'Platform Admin'));
     const senderId = currentUserId || (isClient ? review.clientId : review.expertId);
 
-    const result = await mongoDB.sendProjectReviewChat(projectReviewId, {
-      senderId,
-      senderRole,
-      senderName,
-      content: chatInput.trim()
-    });
+    let result;
+    try {
+      if (chatFile && chatFile.size > MAX_REVIEW_UPLOAD_SIZE) throw new Error('Attachments must be 3 MB or less');
+      result = await mongoDB.sendProjectReviewChat(projectReviewId, {
+        senderId, senderRole, senderName, content: chatInput.trim(),
+        attachment: chatFile ? await encodeReviewFile(chatFile) : undefined
+      });
+    } catch (error) {
+      result = { success: false, error: (error as Error).message };
+    }
 
     if (result.success && result.projectReview) {
       setReview(result.projectReview);
       setChatInput('');
+      setChatFile(null);
+      if (chatFileInput.current) chatFileInput.current.value = '';
       notificationService.add({
         target: isClient ? 'expert' : 'client',
         recipientId: isClient ? review.expertEmail : review.clientEmail,
         type: 'message',
         title: `Project Review Message from ${senderName}`,
-        message: chatInput.trim().slice(0, 100),
+        message: chatInput.trim().slice(0, 100) || 'An attachment was added to the workspace.',
         actionLink: isClient ? 'expert' : 'client'
       });
     } else {
@@ -192,19 +214,27 @@ export const ProjectReviewWorkspace: React.FC<ProjectReviewWorkspaceProps> = ({
   // Handling Document Submission
   const handleSubmitDocuments = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmittingDocs) return;
     setIsSubmittingDocs(true);
     setActionError(null);
 
-    const result = await mongoDB.submitProjectMaterials(projectReviewId, {
-      description: subDesc.trim(),
-      questions: subQuestions.trim(),
-      repositoryUrl: subRepoUrl.trim(),
-      demoUrl: subDemoUrl.trim(),
-      files: subFiles
-    });
+    let result;
+    try {
+      if (subFiles.reduce((total, file) => total + file.size, 0) > MAX_REVIEW_UPLOAD_SIZE) {
+        throw new Error('Attachments must total 3 MB or less per submission');
+      }
+      result = await mongoDB.submitProjectMaterials(projectReviewId, {
+        description: subDesc.trim(), questions: subQuestions.trim(), repositoryUrl: subRepoUrl.trim(), demoUrl: subDemoUrl.trim(),
+        files: await Promise.all(subFiles.map(encodeReviewFile))
+      });
+    } catch (error) {
+      result = { success: false, error: (error as Error).message };
+    }
 
     if (result.success && result.projectReview) {
       setReview(result.projectReview);
+      setSubFiles([]);
+      if (subFileInput.current) subFileInput.current.value = '';
       setActionSuccess('Project materials and audit questions submitted successfully!');
       notificationService.add({
         target: 'expert',
@@ -229,7 +259,8 @@ export const ProjectReviewWorkspace: React.FC<ProjectReviewWorkspaceProps> = ({
       return;
     }
 
-    setIsSubmittingProp(false);
+    if (isSubmittingProp) return;
+    setIsSubmittingProp(true);
     setActionError(null);
 
     const proposedBy = isClient ? 'client' : 'expert';
@@ -257,6 +288,7 @@ export const ProjectReviewWorkspace: React.FC<ProjectReviewWorkspaceProps> = ({
     } else {
       setActionError(result.error || 'Failed to propose meeting time');
     }
+    setIsSubmittingProp(false);
   };
 
   // Handling Proposal Response (Accept / Decline)
@@ -657,7 +689,7 @@ export const ProjectReviewWorkspace: React.FC<ProjectReviewWorkspaceProps> = ({
                   </div>
 
                   {/* Action buttons */}
-                  {review.status === 'Completed' && (
+                  {!isAdmin && review.status === 'Completed' && (
                     <div className="pt-2">
                       <button
                         onClick={handleArchive}
@@ -777,7 +809,7 @@ export const ProjectReviewWorkspace: React.FC<ProjectReviewWorkspaceProps> = ({
                               {f.size && <span className="text-[10px] text-slate-500">({f.size})</span>}
                             </div>
                             <a
-                              href={f.url}
+                              href={f.url || undefined}
                               target="_blank"
                               rel="noreferrer"
                               download
@@ -876,6 +908,11 @@ export const ProjectReviewWorkspace: React.FC<ProjectReviewWorkspaceProps> = ({
                       </div>
                     </div>
 
+                    <label className="block font-bold text-slate-400">
+                      Attach project files (up to 3 MB per submission)
+                      <input type="file" multiple ref={subFileInput} onChange={(event) => setSubFiles(Array.from(event.target.files || []))}
+                        className="mt-1 block w-full text-xs" />
+                    </label>
                     <div className="flex justify-end pt-2">
                       <button
                         type="submit"
@@ -1007,9 +1044,14 @@ export const ProjectReviewWorkspace: React.FC<ProjectReviewWorkspaceProps> = ({
                       : 'bg-[#070C15] border-white/10 text-white placeholder:text-slate-500 focus:border-amber-400'
                   }`}
                 />
+                <label className="cursor-pointer" title={chatFile?.name || 'Attach a file'}>
+                  <span className="sr-only">Attach a file (up to 3 MB)</span>
+                  <input type="file" className="sr-only" ref={chatFileInput} onChange={(event) => setChatFile(event.target.files?.[0] || null)} />
+                  <Paperclip size={16} className={chatFile ? 'text-amber-400' : 'text-slate-400'} />
+                </label>
                 <button
                   type="submit"
-                  disabled={isSendingChat || !chatInput.trim()}
+                  disabled={isSendingChat || (!chatInput.trim() && !chatFile)}
                   className="px-5 py-2.5 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-40"
                 >
                   <Send size={14} />

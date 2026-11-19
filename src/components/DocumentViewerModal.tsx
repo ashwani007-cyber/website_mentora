@@ -13,7 +13,7 @@ import {
   Lock
 } from "lucide-react";
 import { createBlobUrlFromDataUrl, generateOfficialDocPdf } from "../utils/pdfGenerator";
-import { getDocFile } from "../mongoDBService";
+import { getDocumentSignedUrl } from "../services/expertDocumentsService";
 
 export interface DocumentViewerItem {
   id?: string;
@@ -21,6 +21,7 @@ export interface DocumentViewerItem {
   fileName: string;
   fileSize?: string;
   fileData?: string;
+  filePath?: string;
   uploadedAt?: string;
   status?: string;
   expertName?: string;
@@ -40,6 +41,7 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
   theme = "dark"
 }) => {
   const [blobUrl, setBlobUrl] = useState<string>("");
+  const [error, setError] = useState("");
   const [isFullscreen, setIsFullscreen] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const isLight = theme === "light";
@@ -48,94 +50,34 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
     let active = true;
     let cleanupRevoke: (() => void) | null = null;
 
-    const isImageDoc = (name?: string, url?: string): boolean => {
-      const fn = (name || "").toLowerCase().trim();
-      if (fn.endsWith(".png") || fn.endsWith(".jpg") || fn.endsWith(".jpeg") || fn.endsWith(".webp") || fn.endsWith(".svg") || fn.endsWith(".gif")) {
-        return true;
-      }
-      const u = (url || "").toLowerCase().trim();
-      return u.startsWith("data:image/") || u.includes(".png") || u.includes(".jpg") || u.includes(".jpeg") || u.includes(".webp");
-    };
-
+    setBlobUrl("");
+    setError("");
     async function loadDocument() {
-      if (!doc) {
-        setBlobUrl("");
-        return;
-      }
-
-      // Check if the exact uploaded file is hosted on server statically first
-      if (doc.fileName) {
+      if (!doc) return;
+      if (doc.filePath) {
         try {
-          const staticUrl = `/uploaded_docs/${encodeURIComponent(doc.fileName)}`;
-          const headRes = await fetch(staticUrl, { method: "HEAD" });
-          if (headRes.ok && active) {
-            setBlobUrl(staticUrl);
-            return;
-          }
-        } catch {}
-      }
-
-      // If document already has a valid fileData URL or blob URL
-      const raw = doc.fileData;
-      if (raw) {
-        if (raw.startsWith("data:") || raw.startsWith("blob:")) {
-          const { url, revoke } = createBlobUrlFromDataUrl(raw, doc.fileName);
-          cleanupRevoke = revoke;
+          const url = await getDocumentSignedUrl(doc.filePath);
           if (active) setBlobUrl(url);
           return;
-        } else if (raw.startsWith("/") || raw.startsWith("http")) {
-          if (active) setBlobUrl(raw);
-          return;
-        }
-      }
-
-      // Query /api/documents endpoint for file
-      if (doc.fileName) {
-        try {
-          const apiRes = await fetch(`/api/documents?key=${encodeURIComponent(doc.fileName)}`);
-          if (apiRes.ok) {
-            const data = await apiRes.json();
-            if (data?.url && active) {
-              setBlobUrl(data.url);
-              return;
-            }
-            if (data?.fileData && active) {
-              const { url, revoke } = createBlobUrlFromDataUrl(data.fileData, doc.fileName);
-              cleanupRevoke = revoke;
-              setBlobUrl(url);
-              return;
-            }
-          }
-        } catch {}
-      }
-
-      // Try getDocFile
-      try {
-        const resolved = await getDocFile(doc.id || doc.fileName, {
-          id: doc.id,
-          fileName: doc.fileName,
-          title: doc.title,
-          expertName: doc.expertName,
-          expertEmail: doc.expertEmail,
-          expertId: doc.id,
-          status: (doc.status as any) || "Pending Audit"
-        });
-
-        if (!active) return;
-
-        if (resolved) {
-          if (resolved.startsWith("data:") || resolved.startsWith("blob:")) {
-            const { url, revoke } = createBlobUrlFromDataUrl(resolved, doc.fileName);
-            cleanupRevoke = revoke;
-            setBlobUrl(url);
-            return;
-          } else if (resolved.startsWith("/") || resolved.startsWith("http")) {
-            setBlobUrl(resolved);
+        } catch (reason) {
+          if ((reason as { status?: number }).status !== 404) {
+            if (active) { setBlobUrl(""); setError((reason as Error).message); }
             return;
           }
         }
-      } catch {}
-
+      }
+      const raw = doc.fileData;
+      if (raw?.startsWith("data:") || raw?.startsWith("blob:")) {
+        const { url, revoke } = createBlobUrlFromDataUrl(raw, doc.fileName);
+        cleanupRevoke?.();
+        cleanupRevoke = revoke;
+        if (active) setBlobUrl(url);
+        return;
+      }
+      if (!doc.filePath && raw?.startsWith("https://")) {
+        if (active) setBlobUrl(raw);
+        return;
+      }
       if (!active) return;
 
       // Absolute last resort fallback only if no original file exists anywhere
@@ -149,14 +91,17 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
         status: doc.status || "Verified in Database"
       });
       const { url, revoke } = createBlobUrlFromDataUrl(fallbackPdf, doc.fileName);
+      cleanupRevoke?.();
       cleanupRevoke = revoke;
       setBlobUrl(url);
     }
 
-    loadDocument();
+    void loadDocument();
+    const refresh = doc?.filePath ? window.setInterval(loadDocument, 12 * 60 * 1000) : undefined;
 
     return () => {
       active = false;
+      if (refresh !== undefined) window.clearInterval(refresh);
       if (cleanupRevoke) cleanupRevoke();
     };
   }, [doc]);
@@ -330,7 +275,7 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
 
         {/* Main Document Viewer Canvas */}
         <div className="flex-1 w-full bg-slate-950 relative overflow-hidden flex flex-col">
-          {blobUrl ? (
+          {error ? (<p role="alert" className="p-6 text-center text-sm">{error}</p>) : blobUrl ? (
             isImage ? (
               <div className="flex-1 w-full flex items-center justify-center p-4 sm:p-6 overflow-auto bg-slate-950/90">
                 <img

@@ -105,14 +105,17 @@ export const ProjectReviewRequestModal: React.FC<ProjectReviewRequestModalProps>
   const [expectedScope, setExpectedScope] = useState('Comprehensive Document Audit + 2 Strategic Consultation Calls');
   const [requestNotes, setRequestNotes] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const requestId = React.useRef<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   if (!isOpen || !expert) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     setErrorMessage(null);
     setIsSubmitting(true);
+    requestId.current ??= crypto.randomUUID();
 
     try {
       const clientId = clientProfile?.id || `cli-${Date.now()}`;
@@ -120,6 +123,8 @@ export const ProjectReviewRequestModal: React.FC<ProjectReviewRequestModalProps>
       const clientEmail = (clientProfile?.email || 'client@example.com').toLowerCase().trim();
 
       const result = await mongoDB.requestProjectReview({
+        requestId: requestId.current,
+        expectedPrice: totalAmount,
         clientId,
         clientName,
         clientEmail,
@@ -133,6 +138,7 @@ export const ProjectReviewRequestModal: React.FC<ProjectReviewRequestModalProps>
       });
 
       if (result.success && result.projectReview) {
+        requestId.current = null;
         if (typeof result.clientWalletBalance === 'number' && onWalletUpdate) {
           onWalletUpdate(result.clientWalletBalance);
         }

@@ -1,3 +1,4 @@
+import { apiSessionHeaders } from '../lib/apiSession';
 // Dynamic Review & Rating Calculation Service
 import { supabase } from '../supabaseClient';
 
@@ -197,4 +198,40 @@ export async function fetchExpertDynamicStats(expert: { id?: string; email?: str
     reviewCount,
     completedConsultations
   };
+}
+
+
+export async function getConsultationReviews(audience: 'featured' | 'expert' | 'admin') {
+  const query = audience === 'featured' ? 'featured=true' : `role=${audience}`;
+  const response = await fetch(`/api/reviews?${query}`, {
+    headers: audience === 'featured' ? {} : apiSessionHeaders(audience)
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || 'Could not load consultation reviews');
+  return result.reviews || [];
+}
+
+export function notifyReviewsUpdated() {
+  localStorage.setItem('consultation_reviews_updated', String(Date.now()));
+  window.dispatchEvent(new Event('app_platform_reviews_updated'));
+}
+
+export async function submitConsultationReview(sessionId: string, rating: number, comment: string) {
+  const response = await fetch('/api/reviews', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...apiSessionHeaders('client') },
+    body: JSON.stringify({ sessionId, rating, comment })
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || 'Could not submit the review');
+  return result;
+}
+
+export async function moderateConsultationReview(id: string, action: 'delete' | 'visibility' | 'feature', value?: boolean) {
+  const response = await fetch(`/api/reviews/${encodeURIComponent(id)}`, {
+    method: action === 'delete' ? 'DELETE' : 'PATCH', headers: { 'Content-Type': 'application/json', ...apiSessionHeaders('admin') },
+    body: action === 'delete' ? undefined : JSON.stringify({ action, value })
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || 'Could not moderate the review');
+  return result.review;
 }

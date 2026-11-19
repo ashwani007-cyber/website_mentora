@@ -1,3 +1,4 @@
+import { apiSessionHeaders } from '../lib/apiSession';
 import { supabase } from '../supabaseClient';
 import { COLUMNS } from '../lib/columns';
 
@@ -126,22 +127,12 @@ export async function uploadSingleExpertDocument(
   }
 
   try {
-    const timestamp = Date.now();
+    const timestamp = crypto.randomUUID();
     const sanitizedName = file.name
       .replace(/[^a-zA-Z0-9._-]/g, '_')
       .replace(/\.pdf$/i, '');
     const cleanFileName = `${sanitizedName}.pdf`;
     const storagePath = `${expertId}/${docType}/${timestamp}_${cleanFileName}`;
-
-    // 1. Delete previous file from storage if replacing
-    if (oldFilePath && oldFilePath !== storagePath) {
-      try {
-        console.log(`[STORAGE] Removing previous document version: ${oldFilePath}`);
-        await supabase.storage.from('expert-documents').remove([oldFilePath]);
-      } catch (removeErr) {
-        console.warn('[STORAGE] Note deleting old file:', removeErr);
-      }
-    }
 
     // 2. Try direct upload to Supabase Storage bucket: expert-documents
     let directUploadSucceeded = false;
@@ -173,6 +164,7 @@ export async function uploadSingleExpertDocument(
         const resp = await fetch('/api/expert-documents/upload', {
           method: 'POST',
           headers: {
+            ...apiSessionHeaders(),
             'x-expert-id': expertId,
             'x-doc-type': docType,
             'x-file-name': encodeURIComponent(file.name),
@@ -252,7 +244,7 @@ export async function uploadSingleExpertDocument(
       try {
         const syncRes = await fetch('/api/expert-documents/sync-record', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...apiSessionHeaders() },
           body: JSON.stringify(payload)
         });
         if (syncRes.ok) {
@@ -339,7 +331,7 @@ export async function fetchExpertDocuments(
     // 2. If client direct query had 0 results or failed, query backend API
     if (!found) {
       try {
-        const resp = await fetch(`/api/expert-documents?expertId=${encodeURIComponent(expertId)}`);
+        const resp = await fetch(`/api/expert-documents?expertId=${encodeURIComponent(expertId)}`, { headers: apiSessionHeaders() });
         if (resp.ok) {
           const resJson = await resp.json();
           if (resJson.success && Array.isArray(resJson.documents)) {
@@ -394,7 +386,7 @@ export async function deleteExpertDocument(
     try {
       await fetch('/api/expert-documents/delete', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...apiSessionHeaders() },
         body: JSON.stringify({ expertId, docType, filePath })
       });
     } catch (e) {
@@ -425,29 +417,13 @@ export async function deleteExpertDocument(
 /**
  * Generate a signed URL from private bucket expert-documents (default 60 min)
  */
-export async function getDocumentSignedUrl(
-  filePath: string,
-  expiresInSeconds: number = 3600
-): Promise<string> {
-  if (!filePath) throw new Error('File path is required');
-
-  console.log(`[STORAGE] Generating signed URL for: ${filePath} (expires in ${expiresInSeconds}s)`);
-  const { data, error } = await supabase.storage
-    .from('expert-documents')
-    .createSignedUrl(filePath, expiresInSeconds);
-
-  if (error || !data?.signedUrl) {
-    console.warn('[STORAGE] Client-side createSignedUrl note:', error?.message);
-    // Fallback: server API endpoint with service role
-    const sRes = await fetch(`/api/documents/signed-url?filePath=${encodeURIComponent(filePath)}`);
-    if (sRes.ok) {
-      const sData = await sRes.json();
-      if (sData.signedUrl) return sData.signedUrl;
-    }
-    throw error || new Error('Could not generate signed URL for document');
+export async function getDocumentSignedUrl(filePath: string, _expiresInSeconds = 900): Promise<string> {
+  const response = await fetch(`/api/documents/signed-url?filePath=${encodeURIComponent(filePath)}`, { headers: apiSessionHeaders() });
+  const result = await response.json();
+  if (!response.ok || !result.signedUrl) {
+    throw Object.assign(new Error(result.error || 'Could not open the credential'), { status: response.status });
   }
-
-  return data.signedUrl;
+  return result.signedUrl;
 }
 
 /**
@@ -489,7 +465,7 @@ export async function updateDocumentAuditStatus(
       try {
         const resp = await fetch('/api/expert-documents/update-status', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...apiSessionHeaders() },
           body: JSON.stringify({ docId, status, adminRemark, expertId, docType })
         });
         if (resp.ok) {

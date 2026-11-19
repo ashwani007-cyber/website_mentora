@@ -91,7 +91,7 @@ export const MentoraBlogsPage: React.FC<MentoraBlogsPageProps> = ({
     try {
       setLoadingDb(true);
       const res = await mongoDB.getPublicBlogs();
-      if (res.success && Array.isArray(res.articles) && res.articles.length > 0) {
+      if (res.success && Array.isArray(res.articles) && (res.articles.length > 0 || !res.seedFallback)) {
         setDbArticles(res.articles);
         if (Array.isArray(res.categories) && res.categories.length > 0) {
           setDbCategories(['All', ...res.categories.map((c: any) => c.name)]);
@@ -142,7 +142,7 @@ export const MentoraBlogsPage: React.FC<MentoraBlogsPageProps> = ({
           setNotFound(false);
         } else {
           // Check local fallback
-          const fallback = getArticleBySlug(selectedSlug);
+          const fallback = res.managed ? undefined : getArticleBySlug(selectedSlug);
           if (fallback) {
             setCurrentArticle(fallback);
             setRelatedArticles(getRelatedArticles(fallback.slug, fallback.category, 3));

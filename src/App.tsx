@@ -1,3 +1,4 @@
+import { apiSessionHeaders } from './lib/apiSession';
 import React, { useState, useRef, useEffect, useMemo } from "react";
 import { ExpertAvailability } from "./types";
 import * as THREE from "three";
@@ -48,7 +49,7 @@ import { MentoraBlogsPage } from "./components/MentoraBlogsPage";
 import { LandingBackgroundVideo } from "./components/LandingBackgroundVideo";
 import { Footer } from "./components/Footer";
 import { PremiumNavigationDock, NavItemConfig } from "./components/PremiumNavigationDock";
-import { fetchExpertDynamicStats } from "./services/reviewService";
+import { fetchExpertDynamicStats, getConsultationReviews, notifyReviewsUpdated, submitConsultationReview } from "./services/reviewService";
 import { FlowWallpaper } from "./components/FlowWallpaper";
 import { ExpertBackgroundVideo } from "./components/ExpertBackgroundVideo";
 import { motion } from "framer-motion";
@@ -72,7 +73,7 @@ import {
 import {
   fetchWalletBalance,
   depositWallet,
-  deductWallet
+  recordWalletTransaction
 } from "./services/walletService";
 
 import mentoraLogoHorizontalLight from "./assets/mentora-logo-horizontal-light.png";
@@ -1248,65 +1249,39 @@ function AIChatbotWidget({
    MONGODB STATUS & ATLAS CONNECTION SETUP MODAL
 ---------------------------------------------------------------- */
 function MongoDBSetupModal({ onClose }: { onClose: () => void }) {
-  const [uri, setUri] = useState(mongoDB.getMongoUri());
-
-  const handleSave = (e: React.FormEvent) => {
-    e.preventDefault();
-    mongoDB.setMongoUri(uri);
-    alert("MongoDB Atlas Connection URI saved successfully! All platform collections synced.");
-    onClose();
+  const [status, setStatus] = useState<'checking' | 'connected' | 'unavailable'>('checking');
+  const testConnection = async () => {
+    setStatus('checking');
+    try {
+      const response = await fetch('/api/health');
+      const result = await response.json();
+      setStatus(response.ok && result.database === 'connected' ? 'connected' : 'unavailable');
+    } catch {
+      setStatus('unavailable');
+    }
   };
+  useEffect(() => { void testConnection(); }, []);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xl">
-      <div className="w-full max-w-xl p-6 rounded-2xl shadow-2xl space-y-5 border border-white/15 backdrop-blur-2xl bg-[#0B111A] text-white" style={{ ...body }}>
+      <div className="w-full max-w-xl p-6 rounded-2xl shadow-2xl space-y-5 border border-white/15 bg-[#0B111A] text-white" style={{ ...body }}>
         <div className="flex justify-between items-center pb-3 border-b border-white/10">
           <div className="flex items-center gap-2">
             <Database size={20} className="text-amber-400" />
-            <span style={{ ...display }} className="text-xl font-bold text-white">MongoDB Atlas Connection & Schema Desk</span>
+            <h2 style={{ ...display }} className="text-xl font-bold">Supabase Connection</h2>
           </div>
-          <button onClick={onClose} className="p-1.5 rounded-full bg-white/10 text-slate-400 hover:text-white cursor-pointer"><X size={16} /></button>
+          <button type="button" onClick={onClose} aria-label="Close" className="p-1.5 rounded-full bg-white/10"><X size={16} /></button>
         </div>
-
-        <div className="p-3.5 rounded-xl text-xs flex items-center justify-between bg-emerald-950/40 border border-emerald-500/30 text-emerald-300">
-          <span className="font-semibold flex items-center gap-1.5"><Check size={16} className="text-emerald-400" /> MongoDB Atlas Status: Active & Connected</span>
-          <span className="font-mono text-[10px] bg-white/10 px-2 py-0.5 rounded border border-white/15 text-slate-200">db: silver_workforce</span>
-        </div>
-
-        <form onSubmit={handleSave} className="space-y-4">
-          <div>
-            <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">MongoDB Connection String (URI)</label>
-            <input
-              type="text"
-              required
-              value={uri}
-              onChange={(e) => setUri(e.target.value)}
-              className="w-full mt-1.5 p-3 text-xs rounded-xl outline-none border border-white/10 bg-[#111A27] text-white font-mono focus:border-amber-500/60"
-            />
-          </div>
-
-          <div className="space-y-2 text-xs text-slate-300 bg-[#070C15] p-3.5 rounded-xl border border-white/10">
-            <p className="font-bold text-white">How to connect your own MongoDB Atlas Database:</p>
-            <ol className="list-decimal pl-4 space-y-1 text-[11px] text-slate-400">
-              <li>Sign in to <a href="https://www.mongodb.com/cloud/atlas" target="_blank" rel="noreferrer" className="text-amber-400 underline font-bold">MongoDB Atlas Cloud</a>.</li>
-              <li>Create a database cluster named <code className="bg-white/10 px-1 py-0.5 rounded text-amber-300 font-mono">silver_workforce</code>.</li>
-              <li>Copy your Connection String: <code className="bg-white/10 px-1 py-0.5 rounded text-cyan-300 font-mono">mongodb+srv://&lt;username&gt;:&lt;password&gt;@cluster0.mongodb.net/silver_workforce</code>.</li>
-              <li>Paste your URI above and click <strong>"Save Connection URI"</strong>.</li>
-            </ol>
-          </div>
-
-          <Button3D full type="submit" variant="brass">
-            <Save size={14} /> Save Connection URI
-          </Button3D>
-        </form>
+        <p role="status" className="p-3.5 rounded-xl text-xs border border-white/10">
+          {status === 'checking' ? 'Checking the server connection…' : status === 'connected' ? 'Connected to Supabase.' : 'Supabase is unavailable.'}
+        </p>
+        <p className="text-xs text-slate-400">The deployment environment supplies the connection settings.</p>
+        <Button3D full type="button" variant="brass" onClick={testConnection}>Test connection</Button3D>
       </div>
     </div>
   );
 }
 
-/* ---------------------------------------------------------------
-   ADMIN DOCUMENT INSPECTION MODAL (Document Audit Desk)
----------------------------------------------------------------- */
 function AdminDocInspectionModal({ item, onClose, onApprove }: { item: any; onClose: () => void; onApprove: (id: string) => void }) {
   const [viewerDoc, setViewerDoc] = useState<DocumentViewerItem | null>(null);
 
@@ -1491,16 +1466,17 @@ function AdminDocInspectionModal({ item, onClose, onApprove }: { item: any; onCl
    EDIT PROFILE MODALS
 ---------------------------------------------------------------- */
 
-function EditClientProfileModal({ profile, onClose, onSave, theme = "dark" }: { profile: any; onClose: () => void; onSave: (p: any) => void; theme?: "dark" | "light" }) {
+function EditClientProfileModal({ profile, onClose, onSave, theme = "dark" }: { profile: any; onClose: () => void; onSave: (p: any) => void | Promise<void>; theme?: "dark" | "light" }) {
   const isLight = theme === "light";
   const [name, setName] = useState(profile?.name || "Vikramaditya Singh");
   const [company, setCompany] = useState(profile?.company || "Northwind Retail Pvt Ltd");
-  const [email, setEmail] = useState(profile?.email || "vikram@northwindretail.com");
+  const email = profile?.email || "";
+  const [saving, setSaving] = useState(false);
   const [phone, setPhone] = useState(profile?.phone || "+91 98123 45678");
   const [field, setField] = useState(profile?.field || "Retail & E-commerce");
   const [bio, setBio] = useState(profile?.bio || "Managing Director seeking advisory for GST compliance, supply chain optimization, and POSH audits.");
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const updated = {
       ...profile,
@@ -1512,9 +1488,17 @@ function EditClientProfileModal({ profile, onClose, onSave, theme = "dark" }: { 
       bio,
       initials: name.split(" ").map((n: string) => n[0]).join("").toUpperCase().slice(0, 2)
     };
-    onSave(updated);
-    confetti({ particleCount: 50, spread: 50, origin: { y: 0.5 } });
-    onClose();
+    if (saving) return;
+    setSaving(true);
+    try {
+      await onSave(updated);
+      confetti({ particleCount: 50, spread: 50, origin: { y: 0.5 } });
+      onClose();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Could not save your profile.');
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -1578,7 +1562,7 @@ function EditClientProfileModal({ profile, onClose, onSave, theme = "dark" }: { 
                 type="email"
                 required
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                readOnly
                 className={`w-full mt-1 px-3 py-2 text-xs rounded-xl outline-none border transition-colors ${
                   isLight 
                     ? "bg-slate-50 border-slate-200 text-slate-900 focus:bg-white focus:border-amber-500" 
@@ -2433,6 +2417,8 @@ function BookingModal({ expert, onClose, onBookSuccess, walletBalance, theme = "
 
   const chosenSlot = slotsOnDate.find(s => s.id === selectedSlotId);
 
+  const bookingAttempt = useRef<{ slotId: string; id: string } | null>(null);
+
   const handleConfirm = async () => {
     if (isSubmitting) return;
     setConflictError(null);
@@ -2463,72 +2449,38 @@ function BookingModal({ expert, onClose, onBookSuccess, walletBalance, theme = "
     }
 
     setIsSubmitting(true);
-    const bookingId = `book-${Date.now()}`;
-    const clientId = clientProfile?.id || clientProfile?.email || "client-1";
-    const clientName = clientProfile?.name || "Client ABC";
+    if (bookingAttempt.current?.slotId !== chosenSlot.id) {
+      bookingAttempt.current = { slotId: chosenSlot.id, id: `book-${crypto.randomUUID()}` };
+    }
+    const newBooking = {
+      id: bookingAttempt.current.id,
+      client: clientProfile?.name || "Client",
+      clientEmail: clientProfile?.email,
+      expert: expert.name,
+      expertEmail: expert.email,
+      expertId: expert.id,
+      topic: topic || `${expert.field || 'Expert'} Consultation`,
+      date: selectedDate,
+      when: `${selectedDate}, ${chosenSlot.startTime}`,
+      timeSlot: `${chosenSlot.startTime} - ${chosenSlot.endTime}`,
+      type: serviceType === "hourly" ? "Hourly" : "Project",
+      availabilitySlotId: chosenSlot.id
+    };
 
     try {
-      // Concurrency lock call to backend atomic /api/availability/book
-      const bookRes = await mongoDB.bookAvailability(chosenSlot.id, {
-        bookingId,
-        clientId,
-        clientName,
-        expertId: expert.id
-      });
-
-      if (!bookRes.success) {
-        setIsSubmitting(false);
-        setConflictError(bookRes.error || "Time slot clash: This slot was just booked by another client. Please select another slot.");
+      const result = await onBookSuccess(newBooking, price);
+      if (!result?.success) {
+        setConflictError(result?.error || "Could not book the consultation. Please try again.");
         await loadAvailabilities();
         return;
       }
-
-      const slotStr = `${chosenSlot.startTime} - ${chosenSlot.endTime}`;
-      const newBooking = {
-        id: bookingId,
-        client: clientName,
-        clientEmail: clientProfile?.email || "client@company.com",
-        expert: expert.name,
-        expertEmail: expert.email,
-        expertId: expert.id,
-        topic: topic || `${expert.field || 'Expert'} Consultation`,
-        when: `${selectedDate}, ${chosenSlot.startTime}`,
-        timeSlot: slotStr,
-        date: selectedDate,
-        type: serviceType === "hourly" ? "Hourly" : "Project",
-        status: "Pending Expert Acceptance",
-        rate: price,
-        meetUrl: "",
-        completed: false,
-        availabilitySlotId: chosenSlot.id
-      };
-
-      // FIX 2: Await persistence in onBookSuccess before closing modal or triggering confetti!
-      const bookSuccessResult = await onBookSuccess(newBooking, price);
-      if (bookSuccessResult && bookSuccessResult.success === false) {
-        setIsSubmitting(false);
-        setConflictError(bookSuccessResult.error || "Booking failed to save. Please choose another time.");
-        if (chosenSlot?.id) {
-          try {
-            await mongoDB.releaseAvailability(chosenSlot.id, bookingId);
-          } catch {}
-        }
-        await loadAvailabilities();
-        return;
-      }
-
-      setIsSubmitting(false);
       confetti({ particleCount: 70, spread: 60, origin: { y: 0.6 } });
       onClose();
-    } catch (err: any) {
-      setIsSubmitting(false);
-      setConflictError(err.message || "Failed to confirm booking due to concurrency conflict.");
-      if (chosenSlot?.id) {
-        try {
-          await mongoDB.releaseAvailability(chosenSlot.id, bookingId);
-        } catch {}
-      }
+    } catch (error: any) {
+      setConflictError(error.message || "Could not confirm the consultation.");
       await loadAvailabilities();
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -3096,6 +3048,19 @@ function Landing({ setPage, onOpenAuth, experts, theme = "dark", onToggleTheme, 
   const isLight = theme === "light";
   const categoryScrollRef = useRef<HTMLDivElement>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  const [publishedStories, setPublishedStories] = useState<any[]>([]);
+  useEffect(() => {
+    const refresh = () => { getConsultationReviews('featured').then(setPublishedStories).catch(() => {}); };
+    refresh();
+    window.addEventListener('app_platform_reviews_updated', refresh);
+    const onStorage = (event: StorageEvent) => { if (event.key === 'consultation_reviews_updated') refresh(); };
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener('app_platform_reviews_updated', refresh);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, []);
 
   const scrollCategories = (direction: 'left' | 'right') => {
     if (categoryScrollRef.current) {
@@ -4211,17 +4176,7 @@ function Landing({ setPage, onOpenAuth, experts, theme = "dark", onToggleTheme, 
         </div>
 
         {(() => {
-          let featuredReviews: any[] = [];
-          try {
-            const raw = localStorage.getItem('app_platform_reviews');
-            if (raw) {
-              const parsed = JSON.parse(raw);
-              if (Array.isArray(parsed)) {
-                featuredReviews = parsed.filter((r: any) => r.featuredOnLanding === true);
-              }
-            }
-          } catch {}
-
+          let featuredReviews = publishedStories;
           if (featuredReviews.length === 0) {
             featuredReviews = [
               {
@@ -4439,194 +4394,34 @@ function AuthPage({
           return;
         }
 
-        // Establish Supabase session in browser if available
-        try {
-          await supabase.auth.signInWithPassword({
-            email: email.trim().toLowerCase(),
-            password
-          });
-        } catch (supaErr) {
-          console.warn("Supabase session note after signup:", supaErr);
+        const assignedRole = normalizeRole(res.user?.role);
+        if (assignedRole !== "admin") {
+          await supabase.auth.signInWithPassword({ email: email.trim().toLowerCase(), password }).catch(() => {});
         }
-
         alert(`✅ ${res.message || 'Account registered successfully.'}`);
         confetti({ particleCount: 60, spread: 60, origin: { y: 0.5 } });
-        
-        const assignedRole = normalizeRole(res.user?.role || cleanRole);
-        if (assignedRole === "admin") {
-          const token = res.token || (res.user as any)?.token;
-          if (token) {
-            try {
-              localStorage.setItem("admin_token", token);
-              sessionStorage.setItem("admin_token", token);
-            } catch {}
-          }
-        }
-        onSuccessLogin(assignedRole, res.user || { email: email.trim().toLowerCase(), role: assignedRole, name });
+        onSuccessLogin(assignedRole, res.user);
       } else {
-        // 2. SIGN IN FLOW VIA SUPABASE AUTH (WITH BACKEND ADMIN FALLBACK)
         const cleanEmail = email.trim().toLowerCase();
-        const ADMIN_EMAILS = [
-          'kushwahaashwani12@gmail.com',
-          'kushwaahaashwani12@gmail.com',
-          'kushwaashwani12@gmail.com'
-        ];
-        const isAdminTarget = ADMIN_EMAILS.includes(cleanEmail);
-
-        let data: any = null;
-        let error: any = null;
-        let userProfile: any = null;
-
-        // First attempt Supabase Auth
-        try {
-          const supaRes = await supabase.auth.signInWithPassword({
-            email: cleanEmail,
-            password
-          });
-          data = supaRes.data;
-          error = supaRes.error;
-        } catch (err: any) {
-          error = err;
-        }
-
-        // If Supabase Auth fails, attempt backend / MongoDB authentication (crucial for Admin credentials)
-        if (error) {
-          try {
-            const authRes = await mongoDB.authenticateUser(cleanEmail, password);
-            if (authRes && authRes.success) {
-              error = null;
-              userProfile = authRes.user;
-            }
-          } catch (mErr) {
-            console.warn("MongoDB fallback auth error:", mErr);
+        let auth = await mongoDB.authenticateUser(cleanEmail, password);
+        if (auth.user?.role !== "admin") {
+          const supabaseLogin = await supabase.auth.signInWithPassword({ email: cleanEmail, password }).catch(() => null);
+          const session = supabaseLogin?.data.session;
+          if (!auth.success && session) {
+            const response = await fetch('/api/auth/session', {
+              method: 'POST', headers: { Authorization: `Bearer ${session.access_token}` }
+            });
+            const exchanged = await response.json();
+            if (exchanged.success) auth = exchanged;
           }
         }
-
-        if (error) {
-          const errMsg = error.message || 'Invalid login credentials';
-          console.error("Sign-In failed:", error);
-          alert(`⚠️ Sign-In Failed: ${errMsg}`);
+        if (!auth.success || !auth.user?.token) {
+          alert(`⚠️ Sign-In Failed: ${auth.message || auth.error || 'Invalid credentials'}`);
           return;
         }
-
-        // Fetch user profile from MongoDB / local storage using Supabase user ID or email
-        if (!userProfile) {
-          try {
-            const dbRes = await fetch('/api/db');
-            if (dbRes.ok) {
-              const dbData = await dbRes.json();
-              userProfile = (dbData.users || []).find((u: any) =>
-                String(u.email || '').toLowerCase() === cleanEmail || (data?.user?.id && u.id === data.user.id)
-              );
-              if (!userProfile && Array.isArray(dbData.experts)) {
-                const foundExp = dbData.experts.find((e: any) =>
-                  String(e.email || '').toLowerCase() === cleanEmail || (data?.user?.id && e.id === data.user.id)
-                );
-                if (foundExp) {
-                  userProfile = { ...foundExp, role: 'expert' };
-                }
-              }
-            }
-          } catch (dbErr) {
-            console.warn("Local DB fetch error:", dbErr);
-          }
-        }
-
-        if (!userProfile) {
-          try {
-            const { data: supaUser } = await supabase
-              .from('users')
-              // Never download password_hash to the browser — only the profile fields we use.
-              .select('id, email, full_name, role, phone, bio, avatar_url, is_verified')
-              .eq('email', cleanEmail)
-              .maybeSingle();
-            if (supaUser) userProfile = supaUser;
-          } catch (supaErr) {
-            console.warn("Supabase users table query error:", supaErr);
-          }
-        }
-
-        // (Removed: a lookup in the 'expert_profiles' table. That table does not exist in the
-        //  database, so the request failed with 404 on every login and never found anything.)
-
-        if (!userProfile) {
-          try {
-            // Slim lookup (no base64 documents), cached 15 s — see supabaseExpertiseService.
-            const supaExp: any = await getExpertSlimByKey(cleanEmail);
-            if (supaExp) userProfile = { ...supaExp, role: 'expert' };
-          } catch {}
-        }
-
-        // Determine saved role from user profile or Supabase user_metadata first (Point 5)
-        const savedUserRole = userProfile?.role || data?.user?.user_metadata?.role || (data?.user?.app_metadata as any)?.role;
-        const normalizedSavedRole = savedUserRole ? normalizeRole(savedUserRole) : null;
-        const fallbackRole = normalizeRole(role || "client");
-        const isUserAdmin = isAdminTarget || normalizedSavedRole === "admin" || data?.user?.user_metadata?.role === "admin";
-
-        const assignedRole = isUserAdmin
-          ? "admin"
-          : (normalizedSavedRole || fallbackRole);
-
-        // Create profile object if it doesn't exist
-        if (!userProfile) {
-          userProfile = {
-            id: data?.user?.id || `usr-${Date.now()}`,
-            email: cleanEmail,
-            name: data?.user?.user_metadata?.full_name || data?.user?.user_metadata?.name || (isUserAdmin ? "Ashwani Kushwaha" : assignedRole === "client" ? "Northwind Client" : "Sunita Rao"),
-            full_name: data?.user?.user_metadata?.full_name || data?.user?.user_metadata?.name || (isUserAdmin ? "Ashwani Kushwaha" : assignedRole === "client" ? "Northwind Client" : "Sunita Rao"),
-            role: assignedRole,
-            phone: data?.user?.user_metadata?.phone || "",
-            company: data?.user?.user_metadata?.company || (assignedRole === "client" ? "Northwind Retail Pvt Ltd" : ""),
-            title: data?.user?.user_metadata?.title || (assignedRole === "expert" ? "Senior Executive Advisor" : ""),
-            field: data?.user?.user_metadata?.field || (assignedRole === "expert" ? field : "Finance & Taxation"),
-            bio: data?.user?.user_metadata?.bio || (assignedRole === "client" ? "Seeking corporate advisory." : "Decades of executive expertise.")
-          };
-
-          try {
-            await supabase.from('users').insert({
-              id: data?.user?.id,
-              email: cleanEmail,
-              full_name: userProfile.name,
-              role: userProfile.role,
-              phone: userProfile.phone || null
-            });
-          } catch {}
-        }
-
-        alert(`✅ Welcome Back! Signed in successfully.`);
+        alert('✅ Welcome Back! Signed in successfully.');
         confetti({ particleCount: 50, spread: 50, origin: { y: 0.5 } });
-
-        if (assignedRole === "admin") {
-          const token = userProfile?.token || (data?.session as any)?.access_token || (data?.user as any)?.token || "admin-session-token";
-          if (token) {
-            try {
-              localStorage.setItem("admin_token", token);
-              sessionStorage.setItem("admin_token", token);
-              localStorage.setItem("admin_user_role", "admin");
-              localStorage.setItem("current_user_role", "admin");
-              localStorage.setItem("current_admin_page", "owner");
-            } catch {}
-          }
-        }
-        if (assignedRole === "expert" || userProfile?.role === "expert") {
-          try {
-            // Slim lookup (no base64 documents), cached 15 s — see supabaseExpertiseService.
-            const supaExp: any = await getExpertSlimByKey(cleanEmail);
-            if (supaExp) {
-              const isVerified = Boolean(supaExp.verified === true);
-              const status = isVerified ? 'approved' : (supaExp.verificationStatus || supaExp.documents?.verificationStatus || 'pending');
-              userProfile = {
-                ...userProfile,
-                ...supaExp,
-                role: 'expert',
-                verified: isVerified,
-                is_verified: isVerified,
-                verificationStatus: status
-              };
-            }
-          } catch {}
-        }
-        onSuccessLogin(assignedRole, { ...userProfile, role: assignedRole });
+        onSuccessLogin(normalizeRole(auth.user.role), auth.user);
       }
     } catch (err: any) {
       console.error("Auth submit error:", err);
@@ -4885,12 +4680,12 @@ function ClientPage({
   theme = "dark",
   onToggleTheme,
   onLogout,
-  initialExpertForProjectReview,
-  onProjectReviewExpertConsumed
+  initialExpertForBooking,
+  onBookingExpertConsumed
 }: { 
   setPage: (p: string) => void; 
   clientProfile: any;
-  onUpdateClientProfile: (p: any) => void;
+  onUpdateClientProfile: (p: any) => Promise<void>;
   experts: ExpertDoc[];
   pendingVerifications?: any[];
   userRole: string | null;
@@ -4898,8 +4693,8 @@ function ClientPage({
   theme?: "dark" | "light";
   onToggleTheme?: () => void;
   onLogout?: () => void;
-  initialExpertForProjectReview?: any;
-  onProjectReviewExpertConsumed?: () => void;
+  initialExpertForBooking?: ExpertDoc | null;
+  onBookingExpertConsumed?: () => void;
 }) {
   const { domains, selectedDomain: activeCategory, setSelectedDomain: setActiveCategory, getDomainName, refreshDomains } = useDomains();
   const expertiseFields = useMemo(() => domains.filter(d => d.is_active !== false).map(d => d.name), [domains]);
@@ -5314,28 +5109,27 @@ function ClientPage({
   }, [clientProfile?.email, storageKey, walletStorageKey]);
 
   const [selectedExpertForBooking, setSelectedExpertForBooking] = useState<any | null>(null);
+  useEffect(() => {
+    if (initialExpertForBooking && userRole === "client" && localStorage.getItem("mentora_user_token")) {
+      setSelectedExpertForBooking(initialExpertForBooking);
+      onBookingExpertConsumed?.();
+    }
+  }, [initialExpertForBooking, userRole]);
   const [selectedExpertForProfile, setSelectedExpertForProfile] = useState<any | null>(null);
   const [activeCallSession, setActiveCallSession] = useState<any | null>(null);
   const [showWalletModal, setShowWalletModal] = useState(false);
   const [showEditProfileModal, setShowEditProfileModal] = useState(false);
   const [topupAmt, setTopupAmt] = useState(2000);
   const [selectedUpiApp, setSelectedUpiApp] = useState<"phonepe" | "gpay" | "paytm" | "amazonpay" | "bhim">("gpay");
-  const [activeUpiGatewayModal, setActiveUpiGatewayModal] = useState<{ amount: number; app: any; upiId?: string } | null>(null);
+  const [activeUpiGatewayModal, setActiveUpiGatewayModal] = useState<{ amount: number; app: any; upiId?: string; requestId: string } | null>(null);
   const [customUpiId, setCustomUpiId] = useState("");
+  const pendingTopup = useRef<{ amount: number; id: string } | null>(null);
 
   // Dedicated Project Review Workflow State (WORKFLOW B)
   const [selectedExpertForProjectReview, setSelectedExpertForProjectReview] = useState<any | null>(null);
   const [activeProjectReviewWorkspaceId, setActiveProjectReviewWorkspaceId] = useState<string | null>(null);
   const [myProjectReviews, setMyProjectReviews] = useState<ProjectReviewRecord[]>([]);
   const [clientActiveView, setClientActiveView] = useState<'directory' | 'project_reviews'>('directory');
-
-  // Consume initialExpertForProjectReview from parent (e.g. redirected from global BookingModal)
-  useEffect(() => {
-    if (initialExpertForProjectReview) {
-      setSelectedExpertForProjectReview(initialExpertForProjectReview);
-      if (onProjectReviewExpertConsumed) onProjectReviewExpertConsumed();
-    }
-  }, [initialExpertForProjectReview]);
 
   const loadClientProjectReviews = async () => {
     if (!clientProfile?.email && !clientProfile?.id && !clientProfile?.name) return;
@@ -5378,171 +5172,29 @@ function ClientPage({
 
   const handleSubmittingClientReview = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!reviewComment.trim()) {
-      alert("Please enter review comments before submitting.");
-      return;
-    }
-
+    if (!reviewComment.trim()) { alert("Please enter review comments before submitting."); return; }
+    if (!reviewSessionId) { alert("Choose a completed consultation to review."); return; }
     try {
-      const raw = localStorage.getItem("app_platform_reviews");
-      let current: any[] = [];
-      if (raw) {
-        try { current = JSON.parse(raw); } catch {}
-      }
-
-      const targetExp = experts.find((e: any) => 
-        e.name?.toLowerCase() === reviewExpertName.toLowerCase() ||
-        e.id === reviewExpertName ||
-        e.email?.toLowerCase() === reviewExpertName.toLowerCase()
-      );
-
-      // Find completed sessions for this client & expert to link review
-      const completedSessionsForExp = upcoming.filter((b: any) => 
-        (b.status === "Completed" || b.completed === true) &&
-        (
-          !reviewExpertName || 
-          b.expert?.toLowerCase() === reviewExpertName.toLowerCase() ||
-          b.expertEmail?.toLowerCase() === targetExp?.email?.toLowerCase()
-        )
-      );
-
-      const effectiveSessionId = reviewSessionId || completedSessionsForExp[0]?.id || `session-completed-${Date.now()}`;
-
-      // Check if this completed session has already been reviewed
-      const alreadyReviewed = current.some((r: any) => 
-        (r.sessionId && r.sessionId === effectiveSessionId) ||
-        (r.session_id && r.session_id === effectiveSessionId)
-      );
-
-      if (alreadyReviewed) {
-        alert("A rating has already been submitted for this consultation session.");
-        return;
-      }
-
-      const newRev = {
-        id: `rev-${Date.now()}`,
-        clientName: clientProfile?.name || "Corporate Client",
-        clientAvatar: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80",
-        clientId: clientProfile?.id || clientProfile?.email || "client-1",
-        clientEmail: clientProfile?.email || "",
-        expertName: targetExp?.name || reviewExpertName,
-        expertEmail: targetExp?.email || "",
-        expertId: targetExp?.id || "",
-        sessionId: effectiveSessionId,
-        rating: reviewRating,
-        comment: reviewComment.trim(),
-        date: new Date().toISOString().split("T")[0],
-        status: "approved",
-        visibleToExpert: true,
-        featuredOnLanding: true
-      };
-
-      // 1. Submit to server API
-      try {
-        await fetch("/api/reviews", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            expertId: targetExp?.id || "",
-            expertEmail: targetExp?.email || "",
-            expertName: targetExp?.name || reviewExpertName,
-            clientId: clientProfile?.id || clientProfile?.email || "client-1",
-            clientEmail: clientProfile?.email || "",
-            clientName: clientProfile?.name || "Corporate Client",
-            sessionId: effectiveSessionId,
-            rating: reviewRating,
-            comment: reviewComment.trim()
-          })
-        });
-      } catch (apiErr) {
-        console.warn("Server reviews API sync note:", apiErr);
-      }
-
-      // 2. Update local stores
-      const updated = [newRev, ...current];
-      localStorage.setItem("app_platform_reviews", JSON.stringify(updated));
-      mongoDB.syncKv("app_platform_reviews", updated);
-
-      // 3. Calculate new dynamic average rating
-      const expReviews = updated.filter((r: any) => 
-        (targetExp?.id && (r.expertId === targetExp.id || r.expert_id === targetExp.id)) ||
-        (targetExp?.email && r.expertEmail?.toLowerCase() === targetExp.email.toLowerCase()) ||
-        (r.expertName?.toLowerCase() === reviewExpertName.toLowerCase())
-      );
-      const validRatings = expReviews.map((r: any) => Number(r.rating)).filter((n: number) => !isNaN(n) && n >= 1 && n <= 5);
-      const newAvgRating = validRatings.length > 0 
-        ? Math.round((validRatings.reduce((a, b) => a + b, 0) / validRatings.length) * 10) / 10 
-        : 0.0;
-      const newReviewCount = validRatings.length;
-
-      // 4. Update in-place on targetExp object if present
-      if (targetExp) {
-        targetExp.rating = newAvgRating;
-        targetExp.sessions = Math.max(1, (targetExp.sessions || 0) + (reviewSessionId ? 0 : 1));
-        targetExp.reviewCount = newReviewCount;
-      }
-
-      // 5. Update local expert profiles in storage
-      try {
-        const storedExpert = localStorage.getItem("current_logged_in_expert");
-        if (storedExpert) {
-          const parsed = JSON.parse(storedExpert);
-          const matches = (targetExp?.id && parsed.id === targetExp.id) ||
-                          (targetExp?.email && parsed.email?.toLowerCase().trim() === targetExp.email.toLowerCase().trim()) ||
-                          (parsed.name?.toLowerCase().trim() === reviewExpertName.toLowerCase().trim());
-          if (matches) {
-            parsed.rating = newAvgRating;
-            parsed.sessions = Math.max(1, (parsed.sessions || 0) + (reviewSessionId ? 0 : 1));
-            parsed.reviewCount = newReviewCount;
-            localStorage.setItem("current_logged_in_expert", JSON.stringify(parsed));
-          }
-        }
-      } catch {}
-
-      // 6. Dispatch cross-component real-time events
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(new CustomEvent("app_platform_reviews_updated", { detail: updated }));
-        window.dispatchEvent(new Event("storage"));
-        window.dispatchEvent(new CustomEvent("mongo_kv_updated", { detail: { key: "app_platform_reviews" } }));
-      }
-
-      // Mark the completed session as reviewed in client portal upcoming list
+      const result = await submitConsultationReview(reviewSessionId, reviewRating, reviewComment.trim());
       setUpcoming(prev => {
-        const next = prev.map(b => {
-          if ((effectiveSessionId && b.id === effectiveSessionId) || (!effectiveSessionId && b.expert?.toLowerCase() === reviewExpertName.toLowerCase())) {
-            return { ...b, reviewed: true };
-          }
-          return b;
-        });
+        const next = prev.map(booking => booking.id === reviewSessionId ? { ...booking, reviewed: true } : booking);
         localStorage.setItem(storageKey, JSON.stringify(next));
-        mongoDB.syncKv(storageKey, next);
         return next;
       });
-
-      // Real-time notifications for review submission
-      notificationService.add({
-        target: "admin",
-        type: "review",
-        title: "New Client Review Received",
-        message: `${clientProfile?.name || "Client"} submitted a ${reviewRating}★ review for "${reviewExpertName}". Dynamic rating updated to ${newAvgRating.toFixed(1)}★.`,
-        actionLink: "owner"
-      });
-      notificationService.add({
-        target: "client",
-        recipientId: clientProfile?.email,
-        type: "review",
-        title: "Review Published Successfully",
-        message: `Your ${reviewRating}★ review for "${reviewExpertName}" is verified and active!`,
-        actionLink: "client"
-      });
-
+      notifyReviewsUpdated();
+      if (!result.duplicate) {
+        notificationService.add({ target: "admin", type: "review", title: "Client review awaiting moderation",
+          message: `${clientProfile?.name || 'A client'} submitted a review for ${reviewExpertName}.`, actionLink: "owner" });
+        notificationService.add({ target: "client", recipientId: clientProfile?.email, type: "review", title: "Review submitted",
+          message: `Your review for ${reviewExpertName} is awaiting approval.`, actionLink: "client" });
+      }
       setShowReviewModal(false);
       setReviewComment("");
       setReviewSessionId(null);
       confetti({ particleCount: 50, spread: 50, origin: { y: 0.5 } });
-      alert(`⭐ Review Submitted Successfully!\nYour ${reviewRating}★ rating for "${reviewExpertName}" is recorded. Expert rating updated dynamically to ${newAvgRating.toFixed(1)} / 5.0!`);
-    } catch (err) {
-      console.error(err);
+      alert("Your review has been submitted for moderation.");
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Could not submit the review.");
     }
   };
 
@@ -5570,7 +5222,7 @@ function ClientPage({
   });
 
   const handleBookingClick = (expert: ExpertDoc) => {
-    if (!userRole) {
+    if (userRole !== "client" || !localStorage.getItem("mentora_user_token")) {
       alert("Registration Required: Please sign in or register your account first before booking an expert.");
       onRequireAuth();
     } else {
@@ -5579,7 +5231,7 @@ function ClientPage({
   };
 
   const handleProjectReviewClick = (expert: ExpertDoc) => {
-    if (!userRole) {
+    if (userRole !== "client" || !localStorage.getItem("mentora_user_token")) {
       alert("Registration Required: Please sign in or register your account first before requesting a Project Review.");
       onRequireAuth();
     } else {
@@ -5595,27 +5247,14 @@ function ClientPage({
       clientEmail: newBooking.clientEmail || clientProfile?.email || "client@company.com"
     };
 
-    const scheduledDate = bookingWithClient.date || (bookingWithClient.when ? bookingWithClient.when.split(',')[0].trim() : '');
-    const scheduledTime = bookingWithClient.timeSlot || (bookingWithClient.when ? bookingWithClient.when.split(',')[1]?.trim() : '');
-
-    // FIX 2: Await createConsultationBooking FIRST before updating state or deducting wallet!
     const res = await createConsultationBooking({
       id: bookingWithClient.id,
-      clientId: clientProfile?.id || bookingWithClient.clientId || clientProfile?.email || 'client-1',
-      clientName: bookingWithClient.client,
-      clientEmail: bookingWithClient.clientEmail,
-      expertId: selectedExpertForBooking?.id || bookingWithClient.expertId || '',
-      expertName: selectedExpertForBooking?.name || bookingWithClient.expert || '',
-      expertEmail: selectedExpertForBooking?.email || bookingWithClient.expertEmail || '',
-      topic: bookingWithClient.topic || 'Consultation',
-      scheduledDate,
-      scheduledTime,
-      when: bookingWithClient.when,
-      durationMinutes: 60,
-      packageType: bookingWithClient.type === "hourly" || bookingWithClient.type === "Hourly" ? "Hourly Consultation" : "Project Advisory",
-      value: cost,
-      price: cost,
-      status: 'pending'
+      expertId: bookingWithClient.expertId,
+      availabilitySlotId: bookingWithClient.availabilitySlotId,
+      scheduledDate: bookingWithClient.date,
+      topic: bookingWithClient.topic,
+      packageType: bookingWithClient.type === "Hourly" ? "Hourly Consultation" : "Project Advisory",
+      price: cost
     });
 
     if (!res.success) {
@@ -5627,38 +5266,18 @@ function ClientPage({
       return { success: false, error: userMessage, code: res.code };
     }
 
-    // ONLY ON SUCCESS: update state, deduct wallet, save to localStorage
-    const confirmedBooking = res.booking || bookingWithClient;
-
+    const confirmedBooking = res.booking!;
     setUpcoming(prev => {
-      const next = [confirmedBooking, ...prev];
+      const next = [confirmedBooking, ...prev.filter(item => item.id !== confirmedBooking.id)];
       localStorage.setItem(storageKey, JSON.stringify(next));
       mongoDB.syncKv(storageKey, next);
       return next;
     });
-    setWalletBalance(prev => {
-      const nextBal = Math.max(0, prev - cost);
-      localStorage.setItem(walletStorageKey, String(nextBal));
-      mongoDB.syncKv(walletStorageKey, String(nextBal));
-      return nextBal;
-    });
-
-    deductWallet({
-      userId: clientProfile?.id || bookingWithClient.clientId || clientProfile?.email,
-      userEmail: bookingWithClient.clientEmail,
-      amount: cost,
-      description: `Consultation Booking: ${confirmedBooking.topic} with ${confirmedBooking.expert}`,
-      relatedBookingId: confirmedBooking.id // same booking can never be charged twice
-    }).then(async res => {
-      if (res?.success) {
-        setWalletBalance(res.newBalance);
-      } else {
-        // Don't hide a failed payment: tell the user and show the real balance from the server.
-        alert(`⚠️ Your booking is confirmed, but the wallet payment could not be recorded: ${res?.error || "unknown error"}. Please contact support.`);
-        const fresh = await fetchWalletBalance(clientProfile?.id, clientProfile?.email);
-        setWalletBalance(fresh.balance);
-      }
-    }).catch(() => {});
+    if (typeof res.balance === 'number' && Number.isFinite(res.balance)) {
+      setWalletBalance(res.balance);
+      localStorage.setItem(walletStorageKey, String(res.balance));
+    }
+    if (res.duplicate) return { success: true, booking: confirmedBooking };
 
     // Sync to Admin Meeting & Session OPS Desk immediately
     syncSessionToAdminOps({
@@ -5685,7 +5304,7 @@ function ClientPage({
       recipientId: selectedExpertForBooking?.email || bookingWithClient.expertEmail || bookingWithClient.expert,
       type: "booking",
       title: "New Advisory Session Booked!",
-      message: `${bookingWithClient.client} booked "${bookingWithClient.topic}" for ${bookingWithClient.when}.`,
+      message: `${bookingWithClient.client} booked "${confirmedBooking.topic}" for ${confirmedBooking.when}.`,
       actionLink: "expert"
     });
     notificationService.add({
@@ -5693,7 +5312,7 @@ function ClientPage({
       recipientId: bookingWithClient.clientEmail,
       type: "booking",
       title: "Consultation Scheduled!",
-      message: `Your session with ${bookingWithClient.expert} on ${bookingWithClient.when} is confirmed.`,
+      message: `Your session with ${bookingWithClient.expert} on ${confirmedBooking.when} is confirmed.`,
       actionLink: "client"
     });
     notificationService.add({
@@ -5711,9 +5330,9 @@ function ClientPage({
       recipientType: "expert",
       clientName: bookingWithClient.client,
       expertName: selectedExpertForBooking?.name || bookingWithClient.expert,
-      meetingDate: bookingWithClient.when?.split(" ")[0] || "Upcoming Date",
-      meetingTime: bookingWithClient.when?.split(" ")[1] || "Scheduled Time",
-      topic: bookingWithClient.topic || "Executive Advisory Consultation",
+      meetingDate: confirmedBooking.when?.split(" ")[0] || "Upcoming Date",
+      meetingTime: confirmedBooking.when?.split(" ")[1] || "Scheduled Time",
+      topic: confirmedBooking.topic || "Executive Advisory Consultation",
       amount: `₹${cost}`,
       bookingId: bookingWithClient.id,
       actionLink: "expert"
@@ -5729,8 +5348,8 @@ function ClientPage({
         id: bookingWithClient.id,
         client: bookingWithClient.client,
         clientEmail: bookingWithClient.clientEmail,
-        topic: bookingWithClient.topic,
-        when: bookingWithClient.when,
+        topic: confirmedBooking.topic,
+        when: confirmedBooking.when,
         type: bookingWithClient.type || "Hourly",
         status: "Pending Expert Acceptance",
         rate: cost,
@@ -5766,60 +5385,36 @@ function ClientPage({
     setShowWalletModal(false);
     const chosenApp = UPI_APPS.find(a => a.id === selectedUpiApp) || UPI_APPS[0];
 
-    // Launch Fast-Track NPCI UPI Gateway Modal for instant payment
+    if (pendingTopup.current?.amount !== amt) pendingTopup.current = { amount: amt, id: crypto.randomUUID() };
     setActiveUpiGatewayModal({
+      requestId: pendingTopup.current.id,
       amount: amt,
       app: chosenApp,
       upiId: customUpiId.trim() || undefined
     });
   };
 
-  const handleUpiSuccess = (addedAmt: number) => {
-    const amt = Number(addedAmt) || 0;
-    if (amt <= 0) return;
-
-    setWalletBalance(prev => {
-      const nextBal = prev + amt;
-      localStorage.setItem(walletStorageKey, String(nextBal));
-      mongoDB.syncKv(walletStorageKey, String(nextBal));
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(new CustomEvent("mongo_kv_updated", {
-          detail: { key: walletStorageKey, value: String(nextBal) }
-        }));
-      }
-      return nextBal;
-    });
-
-    depositWallet({
-      userId: clientProfile?.id || clientProfile?.email,
-      userEmail: clientProfile?.email || 'client@company.com',
-      amount: amt,
-      description: `Wallet Funded via UPI (₹${amt})`
-    }).then(async res => {
-      if (res?.success) {
-        setWalletBalance(res.newBalance);
-      } else {
-        // Undo the optimistic balance and tell the user the top-up was not saved.
-        alert(`⚠️ Your top-up could not be saved: ${res?.error || "unknown error"}. Please try again or contact support.`);
-        const fresh = await fetchWalletBalance(clientProfile?.id, clientProfile?.email);
-        setWalletBalance(fresh.balance);
-      }
-    }).catch(() => {});
-
+  const handleUpiSuccess = async (amount: number, requestId: string) => {
+    const result = await depositWallet({ userEmail: clientProfile?.email || "", amount, requestId });
+    if (!result.success) {
+      alert(result.error || "Could not save the wallet top-up.");
+      return;
+    }
+    pendingTopup.current = null;
+    setWalletBalance(result.newBalance);
+    if (result.duplicate) return;
     notificationService.add({
-      target: "client",
-      recipientId: clientProfile?.email,
-      type: "wallet",
-      title: "Wallet Funded Successfully!",
-      message: `₹${amt.toLocaleString("en-IN")} deposited dynamically into your client wallet.`,
-      actionLink: "client"
+      target: "client", recipientId: clientProfile?.email, type: "wallet", title: "Wallet Funded",
+      message: `₹${amount.toLocaleString("en-IN")} was added to your client wallet.`, actionLink: "client"
     });
   };
 
-  const handleRemoveBooking = (bookingId?: string, sessionItem?: any) => {
+  const handleRemoveBooking = async (bookingId?: string, sessionItem?: any) => {
     const sessId = bookingId || sessionItem?.id;
 
     if (sessId) {
+      const result = await deleteBooking(sessId, { userRole: 'client', userEmail: clientProfile?.email });
+      if (!result.success) { alert(result.error); return; }
       recordRoleDeleted(sessId, 'client', clientProfile?.email);
       try {
         const delKey = `client_deleted_sessions_${clientEmailClean || 'default'}`;
@@ -5829,11 +5424,7 @@ function ClientPage({
         localStorage.setItem(delKey, JSON.stringify(nextArr));
         mongoDB.syncKv(delKey, nextArr);
       } catch {}
-      deleteBooking(sessId, {
-        userId: clientProfile?.id,
-        userEmail: clientProfile?.email,
-        userRole: 'client'
-      }).catch(() => {});
+
     }
 
     setUpcoming(prev => {
@@ -6859,7 +6450,7 @@ function ClientPage({
           app={activeUpiGatewayModal.app}
           upiId={activeUpiGatewayModal.upiId}
           onClose={() => setActiveUpiGatewayModal(null)}
-          onSuccess={() => handleUpiSuccess(activeUpiGatewayModal.amount)}
+          onSuccess={() => handleUpiSuccess(activeUpiGatewayModal.amount, activeUpiGatewayModal.requestId)}
         />
       )}
 
@@ -7271,6 +6862,33 @@ function ExpertPage({
     ];
   });
 
+  const refreshExpertWallet = async () => {
+    if (!expertProfile?.email) return;
+    const result = await fetchWalletBalance(expertProfile.id, expertProfile.email, 0, 'expert');
+    setWalletBalance(result.balance);
+    if (typeof result.earnings === 'number') {
+      setEarnings(result.earnings);
+      localStorage.setItem(earningsKey, String(result.earnings));
+    }
+    if (result.trend) {
+      setTrendData(result.trend);
+      localStorage.setItem(trendKey, JSON.stringify(result.trend));
+    }
+  };
+
+  useEffect(() => {
+    void refreshExpertWallet();
+    const stop = startVisibleInterval(refreshExpertWallet, 60_000);
+    window.addEventListener('project_review_updated', refreshExpertWallet);
+    window.addEventListener('focus', refreshExpertWallet);
+    return () => {
+      stop();
+      window.removeEventListener('project_review_updated', refreshExpertWallet);
+      window.removeEventListener('focus', refreshExpertWallet);
+    };
+  }, [expertProfile?.email]);
+
+
   const acceptedKey = `expert_accepted_sessions_${expertEmailKey}`;
 
   const getExpertAcceptedSessions = () => {
@@ -7435,146 +7053,27 @@ function ExpertPage({
 
   const [requests, setRequests] = useState<any[]>(getExpertSessionRequests);
 
-  const getApprovedPlatformReviews = () => {
-    const reviewsMap = new Map<string, any>();
-
-    const expName = (expertProfile?.name || '').toLowerCase().trim();
-    const expEmail = (expertProfile?.email || '').toLowerCase().trim();
-    const expInitials = (expertProfile?.initials || '').toLowerCase().trim();
-    const expId = (expertProfile?.id || '').toLowerCase().trim();
-    const expClean = expName.replace(/[^a-z0-9]/g, '');
-
-    const isReviewMatch = (r: any) => {
-      if (!r) return false;
-      // Must be explicitly approved by Admin Governance Desk to appear on Expert Portal
-      if (r.visibleToExpert !== true) return false;
-      if (r.id === "rev-2") return false;
-
-      const rExpName = (r.expertName || '').toLowerCase().trim();
-      const rExpEmail = (r.expertEmail || '').toLowerCase().trim();
-      const rExpId = (r.expertId || '').toLowerCase().trim();
-      const rClean = rExpName.replace(/[^a-z0-9]/g, '');
-
-      // 1. Email match
-      if (expEmail && rExpEmail && expEmail === rExpEmail) return true;
-
-      // 2. ID match
-      if (expId && rExpId && expId === rExpId) return true;
-
-      // 3. Name match (exact or substring)
-      if (expName && rExpName && (expName === rExpName || expName.includes(rExpName) || rExpName.includes(expName))) return true;
-
-      // 4. Normalized clean name match (ignoring spaces & punctuation)
-      if (expClean && rClean && (expClean === rClean || expClean.includes(rClean) || rClean.includes(expClean))) return true;
-
-      // 5. Initials match (e.g. target "JK" matches initials "JK")
-      if (expInitials && (rExpName === expInitials || rClean === expInitials.replace(/[^a-z0-9]/g, ''))) return true;
-      if (rClean && rClean.length <= 4 && expClean.startsWith(rClean)) return true;
-
-      // 6. Special JK match (reviews targeting JK should match any profile with JK in name, initials, email, or fallback profile)
-      if (rClean === "jk" && (expClean.includes("jk") || expInitials.includes("jk") || expEmail.includes("jk") || expName.includes("jk") || !expName || expName === "senior expert" || expName === "expert")) {
-        return true;
-      }
-
-      // 7. Word parts match
-      if (expName) {
-        const parts = expName.split(/\s+/).filter(Boolean);
-        for (const p of parts) {
-          if (p.length >= 2 && (rExpName === p || rClean === p)) return true;
-        }
-      }
-
-      return false;
-    };
-
-    // 1. Scan app_platform_reviews in localStorage
-    let platformReviewsList: any[] | null = null;
-    try {
-      const raw = localStorage.getItem('app_platform_reviews');
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          platformReviewsList = parsed;
-          parsed.forEach((r: any) => {
-            if (r && isReviewMatch(r)) {
-              const reviewId = r.id || `${r.clientName || r.from}_${r.date}_${r.comment || r.note}`;
-              reviewsMap.set(reviewId, {
-                id: reviewId,
-                from: r.clientName || r.from || "Corporate Client",
-                note: r.comment || r.note || "",
-                stars: r.rating || r.stars || 5,
-                date: r.date || ""
-              });
-            }
-          });
-        }
-      }
-    } catch {}
-
-    // 2. Also check dedicated expert reviews storage keys, but strictly respect platform deletions
-    const checkKeys = [
-      reviewsKey,
-      `expert_reviews_${expertEmailKey}`,
-      expEmail ? `expert_reviews_${expEmail}` : null,
-      expClean ? `expert_reviews_${expClean}` : null,
-      expInitials ? `expert_reviews_${expInitials}` : null,
-      (expClean.includes("jk") || expInitials.includes("jk") || expEmail.includes("jk") || !expName || expName === "senior expert") ? "expert_reviews_jk" : null,
-      (expClean.includes("jk") || expInitials.includes("jk") || expEmail.includes("jk") || !expName || expName === "senior expert") ? "expert_reviews_jk@registry.com" : null,
-    ].filter(Boolean) as string[];
-
-    checkKeys.forEach(k => {
+  const [reviews, setReviews] = useState<any[]>([]);
+  useEffect(() => {
+    let active = true;
+    const refresh = async () => {
       try {
-        const raw = localStorage.getItem(k);
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed)) {
-            let needsPrune = false;
-            const kept: any[] = [];
-
-            parsed.forEach((r: any) => {
-              if (!r || r.id === "rev-2") return;
-              const reviewId = r.id || `${r.from || r.clientName}_${r.date}_${r.note || r.comment}`;
-
-              // If master platformReviewsList exists, verify this review was not deleted and is visibleToExpert
-              if (platformReviewsList !== null) {
-                const masterReview = platformReviewsList.find(p => 
-                  (p.id && p.id === r.id) || 
-                  (reviewId && reviewId === (p.id || `${p.clientName}_${p.date}_${p.comment}`))
-                );
-                if (!masterReview || masterReview.visibleToExpert !== true) {
-                  // Review was deleted or revoked by Admin! Prune it from dedicated storage
-                  needsPrune = true;
-                  return;
-                }
-              }
-
-              if (r.visibleToExpert !== false) {
-                if (!reviewsMap.has(reviewId)) {
-                  reviewsMap.set(reviewId, {
-                    id: reviewId,
-                    from: r.from || r.clientName || "Corporate Client",
-                    note: r.note || r.comment || "",
-                    stars: r.stars || r.rating || 5,
-                    date: r.date || ""
-                  });
-                }
-                kept.push(r);
-              }
-            });
-
-            if (needsPrune) {
-              localStorage.setItem(k, JSON.stringify(kept));
-              mongoDB.syncKv(k, kept);
-            }
-          }
-        }
+        const data = await getConsultationReviews('expert');
+        if (active) setReviews(data.map((review: any) => ({ ...review, from: review.clientName, note: review.comment, stars: review.rating })));
       } catch {}
-    });
-
-    return Array.from(reviewsMap.values());
-  };
-
-  const [reviews, setReviews] = useState<any[]>(getApprovedPlatformReviews);
+    };
+    void refresh();
+    const stop = startVisibleInterval(refresh, 60_000);
+    const onStorage = (event: StorageEvent) => { if (event.key === 'consultation_reviews_updated') void refresh(); };
+    window.addEventListener('app_platform_reviews_updated', refresh);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      active = false;
+      stop();
+      window.removeEventListener('app_platform_reviews_updated', refresh);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, [expertProfile?.email]);
 
   useEffect(() => {
     // Clear any stale legacy hardcoded reviews stored under old keys
@@ -7606,12 +7105,10 @@ function ExpertPage({
     const currentReqs = getExpertSessionRequests();
     setRequests(currentReqs);
 
-    setReviews(getApprovedPlatformReviews());
 
     // Real-time listener: when client submits or Admin approves/toggles reviews or documents, update Expert Portal immediately
     const handleExpertUpdates = async () => {
-      setReviews(getApprovedPlatformReviews());
-      const localReqs = getExpertSessionRequests();
+        const localReqs = getExpertSessionRequests();
       setRequests(prev => {
         const map = new Map<string, any>();
         // Preserve all existing requests (including Supabase requests)
@@ -8139,7 +7636,8 @@ function ExpertPage({
         userEmail: expertProfile?.email || '',
         userRole: 'expert'
       };
-      await updateBookingStatus(bookingId, 'accepted', {}, callerInfo);
+      const result = await updateBookingStatus(bookingId, 'accepted', {}, callerInfo);
+      if (!result.success) { alert(result.error); return; }
       if (targetReq) {
         handleAcceptRequest(targetReq);
       } else {
@@ -8168,7 +7666,10 @@ function ExpertPage({
         userEmail: expertProfile?.email || '',
         userRole: 'expert'
       };
-      await updateBookingStatus(bookingId, 'rejected', {}, callerInfo);
+      const result = await updateBookingStatus(bookingId, 'rejected', {
+        decline_reason: 'The expert is unavailable and declined this consultation.'
+      }, callerInfo);
+      if (!result.success) { alert(result.error); return; }
       if (targetReq) {
         handleDeclineRequest(targetReq);
       } else {
@@ -8190,14 +7691,7 @@ function ExpertPage({
 
   const handleAcceptRequest = (req: any) => {
     if (!req) return;
-    const callerInfo = {
-      userId: expertProfile?.id || expertProfile?.user_id || '',
-      userEmail: expertProfile?.email || '',
-      userRole: 'expert'
-    };
-    updateBookingStatus(req.id, 'accepted', {}, callerInfo).catch(() => {});
-    const basePay = expertProfile?.baseRate || 600;
-    const payout = req.type === "Project" ? basePay * 3 : basePay;
+    const payout = req.payout ?? Math.round(Number(req.rate || 0) * 0.85);
 
     // 1. Remove from active requests state and requestsKey
     const updatedRequests = requests.filter(r => r.id !== req.id);
@@ -8438,8 +7932,7 @@ function ExpertPage({
     const codeMatch = cleanUrl.match(/meet\.google\.com\/([a-z0-9-]+)/i);
     const meetCode = codeMatch ? codeMatch[1] : cleanUrl.split("/").pop() || "meet-session";
 
-    const basePay = expertProfile?.baseRate || 600;
-    const payout = session.payout || (session.type === "Project" ? basePay * 3 : basePay);
+    const payout = updateRes.booking?.payout ?? session.payout ?? Math.round(Number(session.rate || 0) * 0.85);
 
     // 1. Update session in acceptedSessions
     const updatedAccepted = acceptedSessions.map((s: any) => {
@@ -8539,22 +8032,6 @@ function ExpertPage({
       }
     } catch {}
 
-    // 3. Update earnings & wallet balance once link is sent (if not already counted)
-    if (!session.meetUrl) {
-      const newEarnings = earnings + payout;
-      const newWallet = walletBalance + payout;
-      setEarnings(newEarnings);
-      setWalletBalance(newWallet);
-      localStorage.setItem(earningsKey, String(newEarnings));
-      localStorage.setItem(walletKey, String(newWallet));
-
-      const updatedTrend = trendData.map((t, idx) => 
-        idx === 3 ? { ...t, amount: t.amount + payout } : t
-      );
-      setTrendData(updatedTrend);
-      localStorage.setItem(trendKey, JSON.stringify(updatedTrend));
-    }
-
     // 4. Sync exact Google Meet link to Admin Meeting & Session OPS Desk
     syncSessionToAdminOps({
       id: sessId,
@@ -8607,7 +8084,7 @@ function ExpertPage({
       recipientId: expertProfile?.email || expertProfile?.name,
       type: "session",
       title: "Meet Link Sent & Session Confirmed",
-      message: `Google Meet link sent to ${session.client} for "${session.topic}". Payout of ₹${payout.toLocaleString("en-IN")} credited.`,
+      message: `Google Meet link sent to ${session.client} for "${session.topic}".`,
       actionLink: "expert"
     });
 
@@ -8638,7 +8115,7 @@ function ExpertPage({
     alert(`🎉 Google Meet Link Sent to Client!\n\nSession with ${session.client} is confirmed.\nGoogle Meet Link: ${cleanUrl}\n\nBoth you and the client can now join directly via Google Meet.`);
   };
 
-  const handleMarkSessionCompleted = (s: any) => {
+  const handleMarkSessionCompleted = async (s: any) => {
     if (!confirm(`Mark session "${s.topic}" with ${s.client} as completed? This will prompt the client to submit their Rating and Review.`)) {
       return;
     }
@@ -8646,22 +8123,11 @@ function ExpertPage({
     // Single source of truth: write completed status to Supabase / DB and broadcast to Client & Admin
     const expId = expertProfile?.id || expertProfile?.user_id || "";
     const expEmail = expertProfile?.email || "";
-    updateBookingStatus(
-      s.id,
-      "completed",
-      {
-        completed: true,
-        completed_at: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      },
-      {
-        userId: expId,
-        userEmail: expEmail,
-        userRole: "expert"
-      }
-    ).catch(err => {
-      console.error("[EXPERT] Failed to mark booking completed in DB:", err);
-    });
+    const result = await updateBookingStatus(s.id, "completed", {}, { userId: expId, userEmail: expEmail, userRole: "expert" });
+    if (!result.success) {
+      alert(result.error || "Could not complete the consultation.");
+      return;
+    }
 
     const updatedAccepted = acceptedSessions.map(item => {
       if (item.id === s.id) {
@@ -8916,9 +8382,6 @@ function ExpertPage({
 
   const handleDeclineRequest = (reqItem: any) => {
     const reqId = typeof reqItem === "object" ? reqItem.id : reqItem;
-    if (reqId) {
-      updateBookingStatus(reqId, 'rejected').catch(() => {});
-    }
     const reqTopic = typeof reqItem === "object" ? reqItem.topic : "";
     const reqClient = typeof reqItem === "object" ? reqItem.client : "";
     const reqClientEmail = typeof reqItem === "object" ? (reqItem.clientEmail || "") : "";
@@ -8984,7 +8447,7 @@ function ExpertPage({
               b.expert.toLowerCase().trim() === expertProfile.name.toLowerCase().trim() ||
               (b.expertEmail && expertProfile?.email && b.expertEmail.toLowerCase().trim() === expertProfile.email.toLowerCase().trim())
             );
-            if (matchesId || matchesTopic) {
+            if (matchesId || (!b.id && matchesTopic)) {
               srvChanged = true;
               return {
                 ...b,
@@ -9015,7 +8478,7 @@ function ExpertPage({
                   b.expert.toLowerCase().trim() === expertProfile.name.toLowerCase().trim() ||
                   (b.expertEmail && expertProfile?.email && b.expertEmail.toLowerCase().trim() === expertProfile.email.toLowerCase().trim())
                 );
-                if (matchesId || matchesTopic) {
+                if (matchesId || (!b.id && matchesTopic)) {
                   changed = true;
                   return { 
                     ...b, 
@@ -9086,27 +8549,31 @@ function ExpertPage({
 
   const handleDecline = handleDeclineRequest;
 
-  const handleWithdraw = () => {
-    if (walletBalance <= 0) {
-      alert("⚠️ No earnings available for withdrawal yet. Complete client consultation sessions to earn payouts!");
-      return;
+  const withdrawalId = useRef<{ amount: number; id: string } | null>(null);
+  const [withdrawing, setWithdrawing] = useState(false);
+  const handleWithdraw = async () => {
+    if (withdrawing) return;
+    if (walletBalance <= 0) { alert("No earnings available for withdrawal yet."); return; }
+    const amount = walletBalance;
+    if (withdrawalId.current?.amount !== amount) withdrawalId.current = { amount, id: crypto.randomUUID() };
+    setWithdrawing(true);
+    try {
+      const result = await recordWalletTransaction({
+        userRole: 'expert', userEmail: expertProfile?.email || '', amount, type: 'DEBIT', requestId: withdrawalId.current.id
+      });
+      if (!result.success) { alert(result.error); return; }
+      withdrawalId.current = null;
+      setWalletBalance(result.newBalance);
+      if (result.duplicate) return;
+      notificationService.add({
+        target: "expert", recipientId: expertProfile?.email, type: "wallet", title: "Simulated Withdrawal Recorded",
+        message: `₹${amount.toLocaleString("en-IN")} was deducted from your Mentora wallet.`, actionLink: "expert"
+      });
+      confetti({ particleCount: 55, spread: 55, origin: { y: 0.5 } });
+      alert(`Simulated withdrawal of ₹${amount.toLocaleString("en-IN")} recorded.`);
+    } finally {
+      setWithdrawing(false);
     }
-
-    const withdrawAmt = walletBalance;
-    setWalletBalance(0);
-    localStorage.setItem(walletKey, "0");
-
-    notificationService.add({
-      target: "expert",
-      recipientId: expertProfile?.email || expertProfile?.name,
-      type: "wallet",
-      title: "Bank Payout Dispatched",
-      message: `₹${withdrawAmt.toLocaleString("en-IN")} has been dispatched to your registered bank account.`,
-      actionLink: "expert"
-    });
-
-    confetti({ particleCount: 70, spread: 60, origin: { y: 0.5 } });
-    alert(`✅ Bank Payout Initiated!\n₹${withdrawAmt.toLocaleString("en-IN")} has been transferred to your registered bank account via NEFT/UPI.`);
   };
 
   const handleSelectDocFile = (docType: ExpertDocType, file: File | null) => {
@@ -9318,21 +8785,8 @@ function ExpertPage({
     const docId = docSlot.id || `doc-${expertProfile?.id || "exp"}-${docSlot.type}`;
     let fileData = docSlot.fileData;
 
-    // 1. Try Supabase Storage signed URL if filePath exists
     const filePath = docSlot.filePath || docSlot.file_path;
-    if (filePath && (!fileData || (!fileData.startsWith("data:") && !fileData.startsWith("blob:") && !fileData.includes("supabase.co")))) {
-      try {
-        const sRes = await fetch(`/api/documents/signed-url?filePath=${encodeURIComponent(filePath)}`);
-        if (sRes.ok) {
-          const sData = await sRes.json();
-          if (sData.signedUrl) {
-            fileData = sData.signedUrl;
-          }
-        }
-      } catch (e) {
-        console.warn("Signed URL fetch failed:", e);
-      }
-    }
+
 
     // Direct static server check
     if (docSlot.fileName && (!fileData || !fileData.startsWith("data:"))) {
@@ -9358,6 +8812,7 @@ function ExpertPage({
       })) || undefined;
     }
     setViewerDoc({
+      filePath,
       id: docId,
       title: docSlot.title || defaultTitle,
       fileName: docSlot.fileName,
@@ -11725,7 +11180,7 @@ function parseRouteFromLocation(): { page: string; isAdmin: boolean; blogSlug?: 
       // Check for authenticated Admin session
       const adminToken = localStorage.getItem("admin_token") || sessionStorage.getItem("admin_token") || localStorage.getItem("admin_session_token");
       const adminRole = localStorage.getItem("admin_user_role");
-      if (adminToken && (adminRole === "admin" || !adminRole)) {
+      if (adminToken && adminRole === "admin") {
         return { page: "owner", isAdmin: true };
       }
 
@@ -11815,6 +11270,7 @@ export default function App() {
     return parseRouteFromLocation().blogSlug;
   });
 
+  const [adminVerified, setAdminVerified] = useState(false);
   const prevPageRef = useRef<string>("landing");
   useEffect(() => {
     if (page !== "login") {
@@ -11829,7 +11285,7 @@ export default function App() {
 
       // Authorization guard for Admin Portal (owner)
       if (newPage === "owner") {
-        const isAdminSession = Boolean(adminToken && (adminRole === "admin" || userRole === "admin" || !adminRole));
+        const isAdminSession = Boolean(adminToken && adminRole === "admin");
         if (!isAdminSession) {
           newPage = "login";
         }
@@ -11852,7 +11308,6 @@ export default function App() {
 
       if (isAdminRoute) {
         localStorage.setItem("current_admin_page", "owner");
-        localStorage.removeItem("current_user_role");
         setUserRole("admin");
         try { localStorage.setItem("admin_user_role", "admin"); } catch {}
       } else {
@@ -11938,38 +11393,34 @@ export default function App() {
     } catch {}
   }, [page, isAdminPortal]);
 
-  // Authoritative Backend Admin Session Verification
   useEffect(() => {
-    if (page === "owner" || isAdminPortal) {
-      const token = localStorage.getItem("admin_token") || sessionStorage.getItem("admin_token") || localStorage.getItem("admin_session_token");
-      if (!token) {
-        setIsAdminPortal(false);
-        setUserRole(null);
-        navigateTo("login", true);
-        return;
-      }
-
-      mongoDB.verifyAdminSession(token).then((res) => {
-        const isAuth = res?.authenticated ?? res?.success ?? false;
-        if (!isAuth) {
-          try {
-            localStorage.removeItem("admin_token");
-            sessionStorage.removeItem("admin_token");
-            localStorage.removeItem("admin_session_token");
-            localStorage.removeItem("admin_user_role");
-          } catch {}
-          setIsAdminPortal(false);
-          setUserRole(null);
-          navigateTo("login", true);
-        } else {
-          setUserRole("admin");
-          setIsAdminPortal(true);
-        }
-      }).catch(() => {
-        // If network error during active session, retain admin if token exists
-      });
+    if (page !== "owner") {
+      setAdminVerified(false);
+      return;
     }
-  }, [page, isAdminPortal]);
+    const token = sessionStorage.getItem("admin_token") || localStorage.getItem("admin_token");
+    let active = true;
+    setAdminVerified(false);
+    const reject = () => {
+      if (!active) return;
+      localStorage.removeItem("admin_token");
+      sessionStorage.removeItem("admin_token");
+      localStorage.removeItem("admin_session_token");
+      localStorage.removeItem("admin_user_role");
+      setUserRole(null);
+      navigateTo("login", true);
+    };
+    if (!token) reject();
+    else mongoDB.verifyAdminSession(token).then(({ authenticated }) => {
+      if (!active) return;
+      if (!authenticated) reject();
+      else {
+        setAdminVerified(true);
+        setUserRole("admin");
+      }
+    }).catch(reject);
+    return () => { active = false; };
+  }, [page]);
 
   // Protected Route Guard for Expert Portal
   useEffect(() => {
@@ -12202,9 +11653,7 @@ export default function App() {
   const [authInitialRole, setAuthInitialRole] = useState<string>("client");
   const [showMongoModal, setShowMongoModal] = useState(false);
   const [selectedExpertForProfile, setSelectedExpertForProfile] = useState<ExpertDoc | null>(null);
-  const [selectedExpertForBooking, setSelectedExpertForBooking] = useState<ExpertDoc | null>(null);
-  // Global state to trigger ProjectReviewRequestModal inside ClientPage from landing/App level
-  const [pendingProjectReviewExpert, setPendingProjectReviewExpert] = useState<any | null>(null);
+  const [pendingHourlyBookingExpert, setPendingHourlyBookingExpert] = useState<ExpertDoc | null>(null);
 
   const handleOpenAuth = (mode: "signup" | "login" = "signup", role: string = "client") => {
     setAuthInitialMode(mode);
@@ -12214,10 +11663,12 @@ export default function App() {
 
   const handleLogout = () => {
     setUserRole(null);
+    setPendingHourlyBookingExpert(null);
 
     try {
       if (isAdminPortal || userRole === "admin") {
-        mongoDB.adminLogout();
+        setAdminVerified(false);
+        mongoDB.adminLogout().catch((error) => alert(error.message));
         localStorage.removeItem("admin_token");
         sessionStorage.removeItem("admin_token");
         localStorage.removeItem("admin_user_role");
@@ -12231,6 +11682,8 @@ export default function App() {
         localStorage.removeItem("current_user_role");
         localStorage.removeItem("current_logged_in_client");
         localStorage.removeItem("current_logged_in_expert");
+        localStorage.removeItem("mentora_user_token");
+        void supabase.auth.signOut();
         localStorage.setItem("current_page", "landing");
         navigateTo("landing");
       }
@@ -12239,15 +11692,14 @@ export default function App() {
 
   const handleSuccessLogin = async (role: string, userData: any) => {
     const normalizedRole = normalizeRole(role);
+    if (!userData?.token) return;
+    if (normalizedRole !== "admin") localStorage.setItem("mentora_user_token", userData.token);
     setUserRole(normalizedRole);
     setShowAuthModal(false);
 
     if (normalizedRole === "client") {
       setIsAdminPortal(false);
       try {
-        localStorage.removeItem("admin_token");
-        sessionStorage.removeItem("admin_token");
-        localStorage.removeItem("admin_user_role");
         localStorage.setItem("current_user_role", "client");
       } catch {}
 
@@ -12306,9 +11758,6 @@ export default function App() {
     } else if (normalizedRole === "expert") {
       setIsAdminPortal(false);
       try {
-        localStorage.removeItem("admin_token");
-        sessionStorage.removeItem("admin_token");
-        localStorage.removeItem("admin_user_role");
         localStorage.setItem("current_user_role", "expert");
       } catch {}
 
@@ -12328,6 +11777,7 @@ export default function App() {
         ...(expertProfile || {}), 
         ...(match || {}),
         ...userData, 
+        token: undefined,
         role: "expert",
         name: userData?.name || userData?.full_name || match?.name || expertProfile?.name || "Senior Expert",
         email: userData?.email || match?.email || expertProfile?.email || "",
@@ -12394,11 +11844,10 @@ export default function App() {
     } else if (normalizedRole === "admin") {
       setIsAdminPortal(true);
       setUserRole("admin");
-      const token = userData?.token || localStorage.getItem("admin_token") || localStorage.getItem("admin_session_token") || "admin-session-token";
+      const token = userData.token;
       try {
         localStorage.setItem("admin_user_role", "admin");
         localStorage.setItem("current_admin_page", "owner");
-        localStorage.removeItem("current_user_role");
         localStorage.setItem("admin_token", token);
         sessionStorage.setItem("admin_token", token);
         localStorage.setItem("admin_session_token", token);
@@ -12433,6 +11882,7 @@ export default function App() {
   const handleUpdateExpertMarkup = async (expId: string, base: number, markup: number) => {
     const updated = await mongoDB.saveExpertMarkup(expId, base, markup);
     await reloadExpertsAfterSave(updated);
+    return updated.success === true;
   };
 
   const handleToggleFeatured = async (expId: string, featured: boolean) => {
@@ -12851,16 +12301,25 @@ export default function App() {
         <ClientPage
           setPage={navigateTo}
           clientProfile={clientProfile || DEFAULT_CLIENT_FALLBACK}
-          onUpdateClientProfile={(updated) => setClientProfile(updated)}
+          onUpdateClientProfile={async (updated) => {
+            const response = await fetch('/api/auth/profile', {
+              method: 'PATCH', headers: { 'Content-Type': 'application/json', ...apiSessionHeaders('client') }, body: JSON.stringify(updated)
+            });
+            const result = await response.json();
+            if (!response.ok || !result.user) throw new Error(result.error || 'Could not save your profile');
+            const { token, ...profile } = result.user;
+            if (token) localStorage.setItem('mentora_user_token', token);
+            setClientProfile({ ...updated, ...profile });
+          }}
           experts={experts}
           pendingVerifications={pendingVerifications}
-          userRole={userRole || "client"}
+          userRole={userRole}
           onRequireAuth={() => handleOpenAuth("signup", "client")}
           theme={theme}
           onToggleTheme={handleToggleTheme}
           onLogout={handleLogout}
-          initialExpertForProjectReview={pendingProjectReviewExpert}
-          onProjectReviewExpertConsumed={() => setPendingProjectReviewExpert(null)}
+          initialExpertForBooking={pendingHourlyBookingExpert}
+          onBookingExpertConsumed={() => setPendingHourlyBookingExpert(null)}
         />
       )}
 
@@ -12876,7 +12335,7 @@ export default function App() {
         />
       )}
 
-      {page === "owner" && (userRole === "admin" || (typeof window !== "undefined" && localStorage.getItem("admin_user_role") === "admin")) && (
+      {page === "owner" && adminVerified && (
         <AdminGovernancePortal
           setPage={navigateTo}
           experts={experts || []}
@@ -12897,7 +12356,7 @@ export default function App() {
         />
       )}
 
-      {page === "owner" && userRole !== "admin" && (typeof window !== "undefined" && localStorage.getItem("admin_user_role") !== "admin") && (
+      {page === "owner" && !adminVerified && (
         <AuthPage
           onClose={() => navigateTo(userRole === "client" ? "client" : userRole === "expert" ? "expert" : "landing")}
           onSuccessLogin={handleSuccessLogin}
@@ -12912,8 +12371,9 @@ export default function App() {
         <AIChatbotWidget
           userRole={userRole}
           onBookExpert={(exp) => {
-            navigateTo("client");
-            setSelectedExpertForBooking(exp);
+            setPendingHourlyBookingExpert(exp);
+            if (userRole === "client" && localStorage.getItem("mentora_user_token")) navigateTo("client");
+            else handleOpenAuth("signup", "client");
           }}
           onViewDossier={(exp) => setSelectedExpertForProfile(exp)}
           onRequireAuth={() => handleOpenAuth("signup", "client")}
@@ -12944,172 +12404,14 @@ export default function App() {
           onClose={() => setSelectedExpertForProfile(null)}
           onBook={(exp) => {
             setSelectedExpertForProfile(null);
-            if (!userRole) {
-              handleOpenAuth("signup", "client");
-            } else {
-              setSelectedExpertForBooking(exp);
-            }
+            setPendingHourlyBookingExpert(exp);
+            if (userRole === "client" && localStorage.getItem("mentora_user_token")) navigateTo("client");
+            else handleOpenAuth("signup", "client");
           }}
           theme={theme}
         />
       )}
 
-      {/* Booking Modal */}
-      {selectedExpertForBooking && (
-        <BookingModal
-          expert={selectedExpertForBooking}
-          onClose={() => setSelectedExpertForBooking(null)}
-          theme={theme}
-          clientProfile={clientProfile}
-          onBookSuccess={async (newBooking: any, cost: number) => {
-            const bookingWithClient = {
-              ...newBooking,
-              client: newBooking.client || clientProfile?.name || "Client ABC",
-              clientEmail: newBooking.clientEmail || clientProfile?.email || "client@company.com"
-            };
-
-            const scheduledDate = bookingWithClient.date || (bookingWithClient.when ? bookingWithClient.when.split(',')[0].trim() : '');
-            const scheduledTime = bookingWithClient.timeSlot || (bookingWithClient.when ? bookingWithClient.when.split(',')[1]?.trim() : '');
-
-            // FIX 2: Await createConsultationBooking FIRST before updating state or deducting wallet!
-            const res = await createConsultationBooking({
-              id: bookingWithClient.id,
-              clientId: clientProfile?.id || bookingWithClient.clientId || clientProfile?.email || 'client-1',
-              clientName: bookingWithClient.client,
-              clientEmail: bookingWithClient.clientEmail,
-              expertId: selectedExpertForBooking?.id || bookingWithClient.expertId || '',
-              expertName: selectedExpertForBooking?.name || bookingWithClient.expert || '',
-              expertEmail: selectedExpertForBooking?.email || bookingWithClient.expertEmail || '',
-              topic: bookingWithClient.topic || 'Consultation',
-              scheduledDate,
-              scheduledTime,
-              when: bookingWithClient.when,
-              durationMinutes: 60,
-              packageType: bookingWithClient.type === "hourly" || bookingWithClient.type === "Hourly" ? "Hourly Consultation" : "Project Advisory",
-              value: cost,
-              price: cost,
-              status: 'pending'
-            });
-
-            if (!res.success) {
-              console.error('[ROOT BOOKING] Failed to persist to Supabase:', res.error);
-              const userMessage = res.code === '23505'
-                ? "This slot was just booked, please choose another time"
-                : (res.error || "Failed to confirm booking.");
-              alert(`⚠️ Booking Error: ${userMessage}`);
-              return { success: false, error: userMessage, code: res.code };
-            }
-
-            const confirmedBooking = res.booking || bookingWithClient;
-            const emailKey = (clientProfile?.email || "guest").toLowerCase();
-            const storageKey = `client_upcoming_${emailKey}`;
-            const walletStorageKey = `client_wallet_${emailKey}`;
-
-            const savedBookings = localStorage.getItem(storageKey);
-            const prevBookings = savedBookings ? JSON.parse(savedBookings) : [];
-            const nextBookings = [confirmedBooking, ...prevBookings];
-            localStorage.setItem(storageKey, JSON.stringify(nextBookings));
-
-            const savedWallet = localStorage.getItem(walletStorageKey);
-            const prevBal = savedWallet !== null ? Number(savedWallet) : 0;
-            const nextBal = Math.max(0, (isNaN(prevBal) ? 0 : prevBal) - cost);
-            localStorage.setItem(walletStorageKey, String(nextBal));
-            mongoDB.syncKv(walletStorageKey, String(nextBal));
-
-            // Sync to Admin Meeting & Session OPS Desk
-            syncSessionToAdminOps({
-              id: confirmedBooking.id,
-              client: confirmedBooking.client,
-              clientEmail: confirmedBooking.clientEmail,
-              expert: confirmedBooking.expert,
-              expertEmail: confirmedBooking.expertEmail,
-              topic: confirmedBooking.topic,
-              when: confirmedBooking.when,
-              type: confirmedBooking.type === "hourly" || confirmedBooking.type === "Hourly" ? "Hourly Consultation" : "Project Advisory",
-              rate: cost,
-              payout: Math.round(cost * 0.85),
-              status: "Pending Expert Acceptance",
-              isLive: false,
-              completed: false,
-              meetUrl: "",
-              meetCode: ""
-            });
-
-            // Sync into expert requests queue
-            try {
-              const expName = selectedExpertForBooking?.name || bookingWithClient.expert || "";
-              const expEmail = selectedExpertForBooking?.email || bookingWithClient.expertEmail || "";
-              const expId = selectedExpertForBooking?.id || bookingWithClient.expertId || "";
-
-              const reqItem = {
-                id: bookingWithClient.id,
-                client: bookingWithClient.client,
-                clientEmail: bookingWithClient.clientEmail,
-                topic: bookingWithClient.topic,
-                when: bookingWithClient.when,
-                type: bookingWithClient.type || "Hourly",
-                status: "Pending Expert Acceptance",
-                rate: cost,
-                meetUrl: ""
-              };
-
-              const keysToSync = [
-                expEmail.toLowerCase().trim(),
-                expName.toLowerCase().trim(),
-                expId.toLowerCase().trim()
-              ].filter(Boolean);
-
-              keysToSync.forEach(k => {
-                const reqKey = `expert_requests_${k}`;
-                const existingRaw = localStorage.getItem(reqKey);
-                const existing = existingRaw ? JSON.parse(existingRaw) : [];
-                const updated = [reqItem, ...existing.filter((r: any) => r.id !== reqItem.id)];
-                localStorage.setItem(reqKey, JSON.stringify(updated));
-              });
-            } catch {}
-
-            // Real-time multi-party notifications
-            notificationService.add({
-              target: "expert",
-              recipientId: selectedExpertForBooking?.email || bookingWithClient.expertEmail || bookingWithClient.expert,
-              type: "booking",
-              title: "New Advisory Session Booked!",
-              message: `${bookingWithClient.client} booked "${bookingWithClient.topic}" for ${bookingWithClient.when}.`,
-              actionLink: "expert"
-            });
-            notificationService.add({
-              target: "client",
-              recipientId: bookingWithClient.clientEmail,
-              type: "booking",
-              title: "Consultation Scheduled!",
-              message: `Your session with ${bookingWithClient.expert} on ${bookingWithClient.when} is confirmed.`,
-              actionLink: "client"
-            });
-            notificationService.add({
-              target: "admin",
-              type: "booking",
-              title: "New Platform Booking",
-              message: `${bookingWithClient.client} booked ${bookingWithClient.expert} (₹${cost}).`,
-              actionLink: "owner"
-            });
-
-            setSelectedExpertForBooking(null);
-            navigateTo("client");
-            return { success: true, booking: confirmedBooking };
-          }}
-          walletBalance={(() => {
-            const emailKey = (clientProfile?.email || "guest").toLowerCase();
-            const savedWallet = localStorage.getItem(`client_wallet_${emailKey}`);
-            const num = savedWallet !== null ? Number(savedWallet) : 0;
-            return !isNaN(num) ? num : 0;
-          })()}
-          onSwitchToProjectReview={(expert: any) => {
-            setSelectedExpertForBooking(null);
-            setPendingProjectReviewExpert(expert);
-            navigateTo("client");
-          }}
-        />
-      )}
     </div>
   );
 }
