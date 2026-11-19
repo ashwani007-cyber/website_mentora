@@ -5364,7 +5364,7 @@ function ClientPage({
     window.addEventListener('storage', handlePRUpdate);
     window.addEventListener('mongo_kv_updated', handlePRUpdate);
     // EGRESS FIX: was every 3 s. Updates also arrive through the events above.
-    const stopPolling = startVisibleInterval(loadClientProjectReviews, 30_000);
+    const stopPolling = startVisibleInterval(loadClientProjectReviews, 60_000);
     return () => {
       window.removeEventListener('project_review_updated', handlePRUpdate);
       window.removeEventListener('storage', handlePRUpdate);
@@ -7175,7 +7175,7 @@ function ExpertPage({
     const handlePRUpdate = () => loadExpertProjectReviews();
     window.addEventListener('project_review_updated', handlePRUpdate);
     window.addEventListener('storage', handlePRUpdate);
-    const interval = startVisibleInterval(loadExpertProjectReviews, 30_000); // EGRESS FIX: was every 3 s, now 30 s and only while the tab is visible
+    const interval = startVisibleInterval(loadExpertProjectReviews, 60_000); // EGRESS FIX: was every 3 s, now 60 s and only while the tab is visible
     return () => {
       window.removeEventListener('project_review_updated', handlePRUpdate);
       window.removeEventListener('storage', handlePRUpdate);

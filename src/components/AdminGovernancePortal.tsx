@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { supabase } from '../supabaseClient';
+import { startVisibleInterval } from '../lib/polling'; // egress-safe timers (skip hidden tabs)
 import {
   ShieldCheck,
   Briefcase,
@@ -544,6 +545,8 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
   const [rejectReasonText, setRejectReasonText] = useState("");
   const [isSubmittingAction, setIsSubmittingAction] = useState(false);
   const reconnectTimeoutRef = useRef<any>(null);
+  const reconnectAttemptRef = useRef(0); // for exponential backoff of reconnect refreshes
+  const lastForcedRefreshRef = useRef(0); // limits cache-skipping refreshes to one per 5 s
 
   // Sync local state with prop changes while avoiding overwrite of live realtime additions
   useEffect(() => {
@@ -578,12 +581,11 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
       config: { broadcast: { self: false } }
     });
 
-    // Handle incoming postgres_changes on experts table
+    // EGRESS FIX: the desk used to listen to postgres_changes on the WHOLE experts table. Supabase
+    // sends the full old + new row for every change (incl. the large `documents` column), to every
+    // open admin tab. Every KYC action (register, upload, approve, reject, delete) already sends a
+    // tiny broadcast message below, so we listen to those only and then re-read the slim list.
     channel
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'experts' }, (payload) => {
-        console.log('[REALTIME] Postgres change on experts table:', payload);
-        handleRefresh();
-      })
       // Direct Realtime Broadcast Events for Zero-Latency Cross-Browser Sync
       .on('broadcast', { event: 'expert_registered' }, (e) => {
         const p = e.payload;
@@ -667,7 +669,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
             }
             return item;
           }));
-          handleRefresh();
+          handleRefresh({ force: true }); // a broadcast means data changed → skip the cache
         }
       })
       .on('broadcast', { event: 'document_deleted' }, (e) => {
@@ -692,7 +694,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
             }
             return item;
           }));
-          handleRefresh();
+          handleRefresh({ force: true }); // a broadcast means data changed → skip the cache
         }
       })
       .on('broadcast', { event: 'expert_status_changed' }, (e) => {
@@ -719,7 +721,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
               return item;
             }));
           }
-          handleRefresh();
+          handleRefresh({ force: true }); // a broadcast means data changed → skip the cache
         }
       })
       .on('broadcast', { event: 'expert_deleted' }, (e) => {
@@ -734,12 +736,20 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
         console.log('[REALTIME] Subscription status:', status);
         if (status === 'SUBSCRIBED') {
           setRealtimeSyncStatus('connected');
+          reconnectAttemptRef.current = 0; // healthy again → reset the backoff
         } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
           setRealtimeSyncStatus('reconnecting');
-          clearTimeout(reconnectTimeoutRef.current);
-          reconnectTimeoutRef.current = setTimeout(() => {
-            handleRefresh();
-          }, 3000);
+          // EGRESS FIX: this used to refresh 3 s after EVERY error, and errors repeat on every
+          // reconnect attempt. Now: at most one pending refresh, waiting 60 s, then 2, 4, 8 min
+          // (capped at 10 min) while the errors continue. The refresh uses the 15 s cache.
+          if (!reconnectTimeoutRef.current) {
+            const delay = Math.min(60_000 * 2 ** reconnectAttemptRef.current, 10 * 60_000);
+            reconnectAttemptRef.current += 1;
+            reconnectTimeoutRef.current = setTimeout(() => {
+              reconnectTimeoutRef.current = null;
+              if (document.visibilityState === 'visible') handleRefresh();
+            }, delay);
+          }
         } else if (status === 'CLOSED') {
           setRealtimeSyncStatus('offline');
         }
@@ -748,6 +758,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
     return () => {
       console.log('[REALTIME] Cleaning up channel on unmount:', channelName);
       clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
       supabase.removeChannel(channel);
     };
   }, [activeDesk]);
@@ -792,35 +803,32 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
     [taxonomyDomains]
   );
 
-  // Auto-refresh pending verifications every 30 seconds
+  // Auto-refresh pending verifications.
+  // EGRESS FIX: was every 30 s, also in hidden tabs (Chrome still fires hidden-tab timers about once a
+  // minute, so a forgotten admin tab kept downloading the expert list all day). Now every 60 s and
+  // only while the tab is visible, through the shared 15 s cache.
   useEffect(() => {
-    const interval = setInterval(() => {
-      if (activeDesk === 'kyc') {
-        console.log('[ADMIN] Auto-refreshing pending verifications');
-        window.dispatchEvent(new Event('mongo_db_updated'));
-        setLastRefresh(new Date());
-      }
-    }, 30000); // 30 seconds
-
-    return () => clearInterval(interval);
+    if (activeDesk !== 'kyc') return;
+    const stop = startVisibleInterval(() => {
+      handleRefresh();
+    }, 60_000);
+    return stop;
   }, [activeDesk]);
 
-  // Manual refresh handler
-  const handleRefresh = async () => {
+  // Refresh handler for the KYC queue.
+  // Goes through mongoDB.getPendingVerificationsRaw → 15 s cache, so several triggers at once cause
+  // at most ONE request. { force: true } (used when a broadcast says data changed) skips the cache,
+  // but no more than once every 5 s.
+  const handleRefresh = async (opts: { force?: boolean } = {}) => {
     setIsRefreshing(true);
-    console.log('[ADMIN] Manual refresh triggered');
+    const force = opts.force === true && Date.now() - lastForcedRefreshRef.current > 5_000;
+    if (force) lastForcedRefreshRef.current = Date.now();
 
-    // Directly fetch fresh data from API
     try {
-      const url = statusFilter && statusFilter !== 'all'
-        ? `/api/admin/pending-verifications?status=${statusFilter}`
-        : '/api/admin/pending-verifications';
-
-      console.log('[ADMIN] Fetching fresh data from:', url);
-      const response = await fetch(url);
-      const data = await response.json();
-
-      console.log('[ADMIN] Fresh data received:', data);
+      const data = await mongoDB.getPendingVerificationsRaw(
+        statusFilter && statusFilter !== 'all' ? statusFilter : undefined,
+        { force }
+      );
 
       if (Array.isArray(data)) {
         // Update local state immediately
@@ -1675,10 +1683,13 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
     window.addEventListener("mongo_kv_updated", scanAllActiveSessions);
     window.addEventListener("mongo_db_updated", scanAllActiveSessions);
     window.addEventListener("app_platform_sessions_updated", scanAllActiveSessions);
-    const scanTimer = setInterval(() => {
-      scanAllActiveSessions();
-      loadAuthoritativeSupabaseBookings();
-    }, 2500);
+    // EGRESS FIX: this timer used to download ALL bookings from the server every 2.5 s, even in
+    // hidden tabs. Now:
+    //  - the local scan (reads localStorage only, no network) keeps its 2.5 s rhythm for live labels,
+    //  - the server/database reload runs every 60 s and only while the tab is visible.
+    // New/changed bookings still appear instantly through the realtime feed + BroadcastChannel above.
+    const scanTimer = setInterval(scanAllActiveSessions, 2500);
+    const stopBookingsReload = startVisibleInterval(loadAuthoritativeSupabaseBookings, 60_000);
 
     return () => {
       unsubRealtime();
@@ -1691,6 +1702,7 @@ export const AdminGovernancePortal: React.FC<AdminGovernancePortalProps> = ({
       window.removeEventListener("mongo_db_updated", scanAllActiveSessions);
       window.removeEventListener("app_platform_sessions_updated", scanAllActiveSessions);
       clearInterval(scanTimer);
+      stopBookingsReload();
     };
   }, []);
 

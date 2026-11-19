@@ -116,8 +116,8 @@ export const ProjectReviewWorkspace: React.FC<ProjectReviewWorkspaceProps> = ({
 
   useEffect(() => {
     loadReviewData();
-    // EGRESS FIX: was every 2.5 s; 15 s while visible keeps chat reasonably live (events above refresh instantly).
-    const stopReviewPoll = startVisibleInterval(loadReviewData, 15_000);
+    // EGRESS FIX: was every 2.5 s. Now 60 s while visible; your own actions refresh instantly via the events above.
+    const stopReviewPoll = startVisibleInterval(loadReviewData, 60_000);
 
     const handleUpdate = () => loadReviewData();
     window.addEventListener('project_review_updated', handleUpdate);

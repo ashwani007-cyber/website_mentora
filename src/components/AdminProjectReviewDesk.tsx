@@ -188,7 +188,7 @@ export const AdminProjectReviewDesk: React.FC<AdminProjectReviewDeskProps> = ({
   useEffect(() => {
     loadReviews();
     // EGRESS FIX: was every 3 s.
-    const stopReviewsPoll = startVisibleInterval(loadReviews, 30_000);
+    const stopReviewsPoll = startVisibleInterval(loadReviews, 60_000);
     const handleUpdate = () => loadReviews();
     window.addEventListener('project_review_updated', handleUpdate);
     window.addEventListener('storage', handleUpdate);

@@ -122,16 +122,23 @@ export const mongoDB = {
 
   // Admin KYC queue. Cached for 15 s and shared between callers so several components asking
   // at once cause ONE request. { force: true } skips the cache (e.g. right after approve/reject).
+  // Raw KYC queue exactly as the server returns it (all statuses, incl. rejected), through the
+  // same 15 s cache. Used by the admin KYC desk so its refreshes never bypass the cache.
+  async getPendingVerificationsRaw(status?: string, opts: { force?: boolean } = {}): Promise<any[]> {
+    const url = status ? `/api/admin/pending-verifications?status=${status}` : '/api/admin/pending-verifications';
+    const cacheKey = `pending:${status || 'all'}`;
+    if (opts.force) invalidate(cacheKey);
+    const data = await cached(cacheKey, 15_000, async () => {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`pending-verifications HTTP ${response.status}`);
+      return response.json();
+    });
+    return Array.isArray(data) ? data : [];
+  },
+
   async getPendingVerifications(status?: string, opts: { force?: boolean } = {}): Promise<any[]> {
     try {
-      const url = status ? `/api/admin/pending-verifications?status=${status}` : '/api/admin/pending-verifications';
-      const cacheKey = `pending:${status || 'all'}`;
-      if (opts.force) invalidate(cacheKey);
-      const data = await cached(cacheKey, 15_000, async () => {
-        const response = await fetch(url);
-        if (!response.ok) throw new Error(`pending-verifications HTTP ${response.status}`);
-        return response.json();
-      });
+      const data = await this.getPendingVerificationsRaw(status, opts);
       if (Array.isArray(data)) {
         return data.filter((e: any) => !e.verified && e.verificationStatus !== 'approved');
       }
