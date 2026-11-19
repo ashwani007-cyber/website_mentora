@@ -11,6 +11,11 @@ import express from 'express';
 import cors from 'cors';
 import { supabase } from './server/supabaseClient.js';
 import {
+  COLUMNS,
+  PROJECT_REVIEW_PAGE_SIZE,
+  withCamelAliases,
+  isMissingFunction,
+  clampInt,
   clearMemo,
   fetchExpertsSlim,
   fetchExpertByKeySlim,
@@ -375,7 +380,8 @@ async function findSupabaseExpert(sbClient, expertId, email) {
   const cleanEmail = (email || '').toLowerCase().trim();
   const filter = getExpertFilter(expertId, cleanEmail);
   if (!filter) return null;
-  const { data, error } = await sbClient.from('experts').select('*').or(filter);
+  // Single-expert lookup used before updates — needs documents to merge changes safely.
+  const { data, error } = await sbClient.from('experts').select(COLUMNS.EXPERT_WITH_DOCUMENTS).or(filter).limit(5);
   if (error) {
     throw error;
   }
@@ -991,8 +997,9 @@ app.get('/api/expert-documents', async (req, res) => {
     try {
       const { data, error } = await supabase
         .from('expert_documents')
-        .select('*')
-        .eq('expert_id', expertId);
+        .select(COLUMNS.EXPERT_DOCUMENT)
+        .eq('expert_id', expertId)
+        .limit(20);
 
       if (!error && Array.isArray(data) && data.length > 0) {
         docsList = data;
@@ -1189,13 +1196,19 @@ app.post('/api/admin/start-review', async (req, res) => {
 app.get('/api/availability', async (req, res) => {
   try {
     const { expertId, date, status } = req.query;
-    let query = supabase.from('expert_availability').select('*');
+    // Explicit columns, stable order, capped (paged with ?limit=&offset=, default 500).
+    const aLimit = clampInt(req.query.limit, 500, 1, 1000);
+    const aOffset = clampInt(req.query.offset, 0, 0, 100000);
+    let query = supabase.from('expert_availability').select(COLUMNS.AVAILABILITY);
 
     if (expertId) query = query.eq('expert_id', expertId);
     if (date) query = query.eq('availability_date', date);
     if (status) query = query.eq('status', status);
 
-    const { data: availabilities, error } = await query;
+    const { data: availabilities, error } = await query
+      .order('availability_date', { ascending: true })
+      .order('start_time', { ascending: true })
+      .range(aOffset, aOffset + aLimit - 1);
     if (error) throw error;
 
     res.json({ success: true, availabilities });
@@ -1424,9 +1437,10 @@ async function getExpertReviewsFromStores(expertId, expertEmail, expertName) {
 
   // Try Supabase reviews table first
   try {
-    let query = supabase.from('reviews').select('*');
+    // NOTE: the `reviews` table does not exist in the database yet (404) — see EGRESS_FIX_GUIDE.md.
+    let query = supabase.from('reviews').select(COLUMNS.REVIEW);
     if (expertId) query = query.or(`expert_id.eq.${expertId},expert_email.ilike.${expertEmail || expertId}`);
-    const { data: sbRevs, error } = await query;
+    const { data: sbRevs, error } = await query.order('created_at', { ascending: false }).limit(500);
     if (!error && Array.isArray(sbRevs)) {
       allReviews = sbRevs;
     }
@@ -1728,40 +1742,75 @@ app.post('/api/reviews', async (req, res) => {
 // ============================================================
 
 // Get Project Reviews
+// ============================================================
+// PROJECT REVIEWS — read routes (egress-safe)
+// ------------------------------------------------------------
+// - LIST (no ?id): summary columns only (no chat / activity_timeline / proposed_times),
+//   plus a chat_count, paged with ?limit= (max 20) & ?offset=. Response has hasMore/nextOffset.
+// - ONE (?id=…): the full row, only when a review is opened.
+// - /activity: the latest N audit events, computed in the database.
+// Rows include camelCase copies of each field (projectReviewId, clientName…) because the
+// screens read camelCase names.
+// ============================================================
+app.get('/api/project-reviews/activity', async (req, res) => {
+  try {
+    const limit = clampInt(req.query.limit, 100, 1, 200);
+    const { data, error } = await supabase.rpc('get_project_review_activity', { p_limit: limit }, { get: true });
+    if (error) {
+      if (isMissingFunction(error)) return res.json({ success: true, events: [], note: 'Run supabase/egress-fix/05 to enable' });
+      throw error;
+    }
+    res.json({ success: true, events: data || [] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.get('/api/project-reviews', async (req, res) => {
   try {
     const { id, clientId, expertId, status } = req.query;
-    let query = supabase.from('project_reviews').select('*');
 
-    if (id) query = query.eq('project_review_id', id);
-    if (clientId) query = query.eq('client_id', clientId);
-    if (expertId) query = query.eq('expert_id', expertId);
-    if (status) query = query.eq('status', status);
+    // One opened review → full row.
+    if (id) {
+      const { data, error } = await supabase
+        .from('project_reviews')
+        .select(COLUMNS.PROJECT_REVIEW_FULL)
+        .eq('project_review_id', id)
+        .maybeSingle();
+      if (error) throw error;
+      if (!data) return res.status(404).json({ success: false, error: 'Project Review not found' });
+      return res.json({ success: true, projectReview: withCamelAliases(data) });
+    }
 
-    // Stable newest-first order; lists are capped at 100 (a single review by id is unaffected).
-    query = query.order('updated_at', { ascending: false }).order('project_review_id', { ascending: true });
-    if (!id) query = query.limit(100);
-
-    const { data: reviews, error } = await query;
+    // List → slim summary page.
+    const limit = clampInt(req.query.limit, PROJECT_REVIEW_PAGE_SIZE, 1, PROJECT_REVIEW_PAGE_SIZE);
+    const offset = clampInt(req.query.offset, 0, 0, 100000);
+    const runList = async (columns) => {
+      let query = supabase.from('project_reviews').select(columns);
+      if (clientId) query = query.eq('client_id', clientId);
+      if (expertId) query = query.eq('expert_id', expertId);
+      if (status) query = query.eq('status', status);
+      // Stable order (updated_at, then id) so pages never skip or repeat rows.
+      // We ask for one extra row to know whether another page exists.
+      return query
+        .order('updated_at', { ascending: false })
+        .order('project_review_id', { ascending: true })
+        .range(offset, offset + limit);
+    };
+    let { data, error } = await runList(`${COLUMNS.PROJECT_REVIEW_SUMMARY}, chat_count`);
+    if (error && /chat_count/i.test(error.message || '')) {
+      // SQL 05 not installed yet → same list without the message count.
+      ({ data, error } = await runList(COLUMNS.PROJECT_REVIEW_SUMMARY));
+    }
     if (error) throw error;
 
-    if (id && reviews && reviews.length > 0) {
-      return res.json({ success: true, projectReview: reviews[0] });
-    }
-
-    res.json({ success: true, projectReviews: reviews || [] });
+    const rows = data || [];
+    const hasMore = rows.length > limit;
+    const page = rows.slice(0, limit).map((r) => withCamelAliases({ ...r, chatCount: r.chat_count ?? 0 }));
+    res.json({ success: true, projectReviews: page, hasMore, nextOffset: hasMore ? offset + limit : null });
   } catch (err) {
-    try {
-      const dbPath = path.resolve(__dirname, 'db.json');
-      const db = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
-      let list = db.projectReviews || [];
-      if (req.query.id) list = list.filter(r => r.id === req.query.id || r.project_review_id === req.query.id);
-      if (req.query.clientId) list = list.filter(r => r.clientId === req.query.clientId || r.client_id === req.query.clientId);
-      if (req.query.expertId) list = list.filter(r => r.expertId === req.query.expertId || r.expert_id === req.query.expertId);
-      res.json({ success: true, projectReviews: list });
-    } catch {
-      res.status(500).json({ success: false, error: err.message });
-    }
+    console.error('[project-reviews] read failed:', err.message);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -1884,7 +1933,7 @@ app.get('/api/platform-settings', async (req, res) => {
   try {
     const { data: settings } = await supabase
       .from('platform_settings')
-      .select('*');
+      .select(COLUMNS.PLATFORM_SETTING);
 
     const config = settings?.find(s => s.key === 'platform_charge')?.value ||
                   { feeType: 'fixed', feeValue: 200, currency: 'INR' };
@@ -2069,7 +2118,10 @@ app.get('/api/bookings', async (req, res) => {
 
     let bookings = [];
     try {
-      let query = supabase.from('bookings').select('*');
+      // Only real booking columns (never select('*')); paged with ?limit=&offset= (default 200).
+      const bLimit = clampInt(req.query.limit, 200, 1, 500);
+      const bOffset = clampInt(req.query.offset, 0, 0, 100000);
+      let query = supabase.from('bookings').select(COLUMNS.BOOKING);
 
       if (clientId && clientEmail) {
         query = query.or(`client_id.eq.${clientId},client_email.ilike.${clientEmail.toLowerCase()}`);
@@ -2091,7 +2143,7 @@ app.get('/api/bookings', async (req, res) => {
         query = query.ilike('status', `%${status}%`);
       }
 
-      query = query.order('created_at', { ascending: false });
+      query = query.order('created_at', { ascending: false }).order('id', { ascending: true }).range(bOffset, bOffset + bLimit - 1);
 
       const { data, error } = await query;
       if (!error && Array.isArray(data) && data.length > 0) {
@@ -2220,7 +2272,7 @@ app.patch('/api/bookings/:id', async (req, res) => {
     let existing = db.bookings.find(b => b.id === id) || (db.kv?.app_platform_sessions || []).find(s => s.id === id);
     if (!existing) {
       try {
-        const { data: supaExisting } = await supabase.from('bookings').select('*').eq('id', id).maybeSingle();
+        const { data: supaExisting } = await supabase.from('bookings').select(COLUMNS.BOOKING).eq('id', id).maybeSingle();
         if (supaExisting) existing = supaExisting;
       } catch {}
     }

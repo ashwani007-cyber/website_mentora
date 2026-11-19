@@ -1,13 +1,15 @@
 // Supabase-based Expertise Service
 import { supabase } from '../supabaseClient';
 import { cached, invalidate } from '../lib/requestCache';
+import { COLUMNS } from '../lib/columns';
 
 // ---------------------------------------------------------------------------
 // EGRESS NOTES (why this file looks the way it does)
 // - Expert lists are read through the database function get_experts_list(), which returns
 //   every expert WITHOUT the heavy base64 file data that used to live in experts.documents.
 //   (SQL: supabase/egress-fix/01_slim_read_functions.sql)
-// - If that function is not installed yet, we fall back to the old select('*') so nothing breaks.
+// - If that function is not installed yet, we fall back to a plain list query WITHOUT the documents
+//   column (COLUMNS.EXPERT_LIST), so nothing breaks and the response stays small.
 // - Results are cached for EXPERTS_TTL_MS and concurrent callers share one request.
 // - Every write calls invalidate('experts') so the next read is fresh (no stale data).
 // ---------------------------------------------------------------------------
@@ -29,8 +31,8 @@ async function loadExpertsSlim(): Promise<Expert[] | null> {
     logSupabaseError('get_experts_list', error);
     return null;
   }
-  // Fallback (SQL function not installed yet): old full query.
-  const res = await supabase.from('experts').select('*').order('created_at', { ascending: false });
+  // Fallback (SQL function not installed yet): list columns only, never the heavy documents JSON.
+  const res = await supabase.from('experts').select(COLUMNS.EXPERT_LIST).order('created_at', { ascending: false }).limit(500);
   if (res.error) {
     logSupabaseError('select experts', res.error);
     return null;
@@ -46,7 +48,7 @@ async function loadExpertSlimByKey(key: string): Promise<Expert | null> {
     return null;
   }
   // Fallback (SQL function not installed yet): same lookup the app used before.
-  const res = await supabase.from('experts').select('*').or(`id.eq.${key},email.ilike.${key}`).limit(1);
+  const res = await supabase.from('experts').select(COLUMNS.EXPERT_WITH_DOCUMENTS).or(`id.eq.${key},email.ilike.${key}`).limit(1);
   if (res.error) logSupabaseError('select expert', res.error);
   return (Array.isArray(res.data) && res.data[0] as Expert) || null;
 }
@@ -168,14 +170,15 @@ export const expertiseService = {
     try {
       let query = supabase
         .from('expert_availability')
-        .select('*')
+        .select('id, expert_id, availability_date, start_time, end_time, status, booking_id, client_id, client_name, created_at, updated_at')
         .eq('expert_id', expertId);
 
       if (date) {
         query = query.eq('availability_date', date);
       }
 
-      const { data, error } = await query;
+      // Stable order + a safety cap (one expert's calendar is far below 500 slots).
+      const { data, error } = await query.order('availability_date', { ascending: true }).order('start_time', { ascending: true }).limit(500);
       if (!error && data && data.length > 0) return data;
       return await this.getLocalAvailability(expertId, date);
     } catch {

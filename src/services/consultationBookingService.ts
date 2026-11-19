@@ -1,4 +1,5 @@
 import { supabase } from '../supabaseClient';
+import { COLUMNS, PAGE } from '../lib/columns';
 import {
   BOOKING_STATUS,
   BookingStatus,
@@ -389,7 +390,7 @@ export async function createConsultationBooking(
     const { data, error } = await supabase
       .from('bookings')
       .insert(sbPayload)
-      .select()
+      .select(COLUMNS.BOOKING)
       .maybeSingle();
 
     console.log('📡 [BOOKINGS INSERT] Direct Supabase Response/Error:', { data, error: error?.message });
@@ -529,7 +530,8 @@ export async function fetchClientBookings(
 
   // 2. Direct Supabase Query fallback
   try {
-    let query = supabase.from('bookings').select('*');
+    // Only real booking columns (never select('*')); newest first, capped — see src/lib/columns.ts
+    let query = supabase.from('bookings').select(COLUMNS.BOOKING);
 
     const validIds = Array.isArray(bookingIds) ? bookingIds.filter(Boolean) : [];
 
@@ -545,7 +547,7 @@ export async function fetchClientBookings(
       query = query.eq('client_id', cleanId);
     }
 
-    query = query.order('created_at', { ascending: false });
+    query = query.order('created_at', { ascending: false }).order('id', { ascending: true }).limit(PAGE.BOOKINGS);
 
     const { data, error } = await query;
     if (!error && Array.isArray(data)) {
@@ -628,7 +630,8 @@ export async function fetchExpertBookings(
 
   // 2. Direct Supabase Query fallback
   try {
-    let query = supabase.from('bookings').select('*');
+    // Only real booking columns (never select('*')); newest first, capped — see src/lib/columns.ts
+    let query = supabase.from('bookings').select(COLUMNS.BOOKING);
 
     const orClauses: string[] = [];
     if (cleanId) orClauses.push(`expert_id.eq.${cleanId}`);
@@ -645,7 +648,7 @@ export async function fetchExpertBookings(
       query = query.or('status.eq.accepted,status.ilike.%accepted%,status.ilike.%confirmed%');
     }
 
-    query = query.order('created_at', { ascending: false });
+    query = query.order('created_at', { ascending: false }).order('id', { ascending: true }).limit(PAGE.BOOKINGS);
 
     const { data, error } = await query;
     if (!error && Array.isArray(data)) {
@@ -708,8 +711,10 @@ export async function fetchAllBookingsForAdmin(): Promise<ConsultationBooking[]>
   try {
     const { data, error } = await supabase
       .from('bookings')
-      .select('*')
-      .order('created_at', { ascending: false });
+      .select(COLUMNS.BOOKING)
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .limit(PAGE.BOOKINGS);
 
     if (!error && Array.isArray(data) && data.length > 0) {
       const normalized = data.map(normalizeBooking);
@@ -806,7 +811,7 @@ export async function updateBookingStatus(
         .from('bookings')
         .update(payload)
         .eq('id', bookingId)
-        .select()
+        .select(COLUMNS.BOOKING)
         .maybeSingle();
 
       if (error) {

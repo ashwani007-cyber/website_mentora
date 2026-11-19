@@ -4546,16 +4546,8 @@ function AuthPage({
           }
         }
 
-        if (!userProfile) {
-          try {
-            const { data: supaExpert } = await supabase
-              .from('expert_profiles')
-              .select('*')
-              .eq('email', cleanEmail)
-              .maybeSingle();
-            if (supaExpert) userProfile = { ...supaExpert, role: 'expert' };
-          } catch {}
-        }
+        // (Removed: a lookup in the 'expert_profiles' table. That table does not exist in the
+        //  database, so the request failed with 404 on every login and never found anything.)
 
         if (!userProfile) {
           try {
@@ -6624,7 +6616,7 @@ function ClientPage({
                             {pr.completedMeetingCount} / 2 used
                           </div>
                           <div className={`text-[10px] ${isLight ? "text-slate-500" : "text-slate-400"}`}>
-                            {pr.submission?.files?.length || 0} docs · {pr.chat?.length || 0} msgs
+                            {pr.submission?.files?.length || 0} docs · {pr.chat?.length ?? pr.chatCount ?? 0} msgs
                           </div>
                         </div>
 
@@ -10091,7 +10083,7 @@ function ExpertPage({
                                   {pr.completedMeetingCount} / 2 used
                                 </div>
                                 <div className={`text-[10px] ${isLight ? "text-slate-500" : "text-slate-400"}`}>
-                                  {pr.submission?.files?.length || 0} docs · {pr.chat?.length || 0} msgs
+                                  {pr.submission?.files?.length || 0} docs · {pr.chat?.length ?? pr.chatCount ?? 0} msgs
                                 </div>
                               </div>
 

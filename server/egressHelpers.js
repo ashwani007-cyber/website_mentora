@@ -11,6 +11,87 @@
 // ---------------------------------------------------------------------------
 import { supabase } from './supabaseClient.js';
 
+/**
+ * The exact columns each server query downloads (never select('*')).
+ * Matches the real tables (checked against the 19 Nov 2026 backup). Same lists as src/lib/columns.ts.
+ * ⚠️ If you add columns to a table that the app must read, add them here too.
+ */
+export const COLUMNS = {
+  EXPERT_LIST:
+    'id, user_id, name, field, domain_id, years_of_experience, base_rate, admin_markup, rate, project_rate, rating, total_sessions, verified, initials, title, phone, email, bio, skills, created_at, updated_at',
+  EXPERT_WITH_DOCUMENTS:
+    'id, user_id, name, field, domain_id, years_of_experience, base_rate, admin_markup, rate, project_rate, rating, total_sessions, verified, initials, title, phone, email, bio, skills, documents, created_at, updated_at',
+  /** Only what the public landing page / directory cards show (no phone, email or documents). */
+  EXPERT_PUBLIC:
+    'id, name, field, domain_id, years_of_experience, base_rate, admin_markup, rate, project_rate, rating, total_sessions, verified, initials, title, bio, skills, created_at',
+  BOOKING:
+    'id, client_id, client_name, client_email, expert_id, expert_name, expert_email, availability_id, booking_date, start_time, end_time, status, price, platform_fee, payment_status, meeting_link, meet_link, meeting_link_sent_at, notes, topic, scheduled_date, scheduled_time, scheduled_start, scheduled_end, duration_minutes, package_type, value, created_at, updated_at',
+  AVAILABILITY: 'id, expert_id, availability_date, start_time, end_time, status, booking_id, client_id, client_name, created_at, updated_at',
+  NOTIFICATION: 'id, user_id, user_role, title, message, type, link, is_read, metadata, created_at',
+  REVIEW: 'id, expert_id, client_id, session_id, rating, comment, client_name, client_email, expert_name, expert_email, created_at',
+  EXPERT_DOCUMENT: 'id, expert_id, doc_type, file_path, file_name, file_size, mime_type, status, admin_remark, uploaded_at, updated_at',
+  PLATFORM_SETTING: 'key, value, description, updated_at',
+  /** Project review LIST rows: everything except the big chat / activity_timeline / proposed_times. */
+  PROJECT_REVIEW_SUMMARY:
+    'project_review_id, client_id, client_name, client_email, expert_id, expert_name, expert_email, package_id, package_name, price, expert_earning, platform_fee, platform_charge_type, status, payment_status, expert_earning_status, request_notes, expected_scope, review_type, submission, meetings, completed_meeting_count, review_feedback, client_wallet_tx_id, expert_wallet_tx_id, client_archived, expert_archived, created_at, updated_at',
+  /** One opened project review: every column. */
+  PROJECT_REVIEW_FULL:
+    'project_review_id, client_id, client_name, client_email, expert_id, expert_name, expert_email, package_id, package_name, price, expert_earning, platform_fee, platform_charge_type, status, payment_status, expert_earning_status, request_notes, expected_scope, review_type, submission, chat, proposed_times, meetings, completed_meeting_count, review_feedback, client_wallet_tx_id, expert_wallet_tx_id, client_archived, expert_archived, activity_timeline, created_at, updated_at'
+};
+
+/** Page size for project review lists (each summary row is ~1.5 KB → a page is ~30 KB). */
+export const PROJECT_REVIEW_PAGE_SIZE = 20;
+
+/**
+ * Adds camelCase copies of snake_case keys (project_review_id → projectReviewId) without removing
+ * anything. The screens read camelCase names; the database uses snake_case.
+ */
+export function withCamelAliases(row) {
+  if (!row || typeof row !== 'object') return row;
+  const out = { ...row };
+  for (const [k, v] of Object.entries(row)) {
+    if (k.includes('_')) {
+      const camel = k.replace(/_([a-z])/g, (_m, c) => c.toUpperCase());
+      if (!(camel in out)) out[camel] = v;
+    }
+  }
+  return out;
+}
+
+/**
+ * Turns a FULL project review (camelCase, from db.json) into a list summary: removes the big
+ * chat / activityTimeline / proposedTimes arrays but keeps their counts for the list cards.
+ */
+export function summarizeProjectReview(r) {
+  if (!r || typeof r !== 'object') return r;
+  const { chat, activityTimeline, proposedTimes, ...rest } = r;
+  return {
+    ...rest,
+    chatCount: Array.isArray(chat) ? chat.length : 0,
+    activityCount: Array.isArray(activityTimeline) ? activityTimeline.length : 0,
+    proposedTimesCount: Array.isArray(proposedTimes) ? proposedTimes.length : 0
+  };
+}
+
+/** Latest N activity events across many reviews, newest first (for the admin audit tab). */
+export function flattenProjectReviewActivity(reviews, limit = 100) {
+  const events = [];
+  for (const r of reviews || []) {
+    for (const a of r.activityTimeline || r.activity_timeline || []) {
+      events.push({ ...a, reviewId: r.projectReviewId || r.project_review_id, clientName: r.clientName || r.client_name, expertName: r.expertName || r.expert_name });
+    }
+  }
+  events.sort((x, y) => new Date(y.timestamp || 0).getTime() - new Date(x.timestamp || 0).getTime());
+  return events.slice(0, limit);
+}
+
+/** Reads a positive integer query parameter, clamped to [min, max]. */
+export function clampInt(value, fallback, min, max) {
+  const n = Number.parseInt(String(value ?? ''), 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(n, min), max);
+}
+
 /** PostgREST error meaning "this SQL function does not exist (yet)". */
 export function isMissingFunction(error) {
   return !!error && (error.code === 'PGRST202' || error.code === '42883' || /could not find the function/i.test(error.message || ''));
@@ -54,7 +135,8 @@ export async function fetchExpertsSlim({ force = false } = {}) {
     const { data, error } = await supabase.rpc('get_experts_list', undefined, { get: true });
     if (!error) return Array.isArray(data) ? data : [];
     if (!isMissingFunction(error)) throw error;
-    const res = await supabase.from('experts').select('*').order('created_at', { ascending: false });
+    // Fallback until the SQL is installed: list columns only — never the heavy documents JSON.
+    const res = await supabase.from('experts').select(COLUMNS.EXPERT_LIST).order('created_at', { ascending: false }).limit(500);
     if (res.error) throw res.error;
     return res.data || [];
   });
@@ -67,7 +149,13 @@ export async function fetchUnverifiedExpertsSlim({ force = false } = {}) {
     const { data, error } = await supabase.rpc('get_unverified_experts', undefined, { get: true });
     if (!error) return Array.isArray(data) ? data : [];
     if (!isMissingFunction(error)) throw error;
-    const res = await supabase.from('experts').select('*');
+    // Fallback: only unverified rows (the KYC desk needs their documents metadata).
+    const res = await supabase
+      .from('experts')
+      .select(COLUMNS.EXPERT_WITH_DOCUMENTS)
+      .or('verified.is.null,verified.eq.false')
+      .order('created_at', { ascending: false })
+      .limit(200);
     if (res.error) throw res.error;
     return res.data || [];
   });
@@ -80,7 +168,7 @@ export async function fetchExpertByKeySlim(key) {
   const { data, error } = await supabase.rpc('get_expert_by_key', { p_key: clean }, { get: true });
   if (!error) return data || null;
   if (!isMissingFunction(error)) throw error;
-  const res = await supabase.from('experts').select('*').eq('id', clean).maybeSingle();
+  const res = await supabase.from('experts').select(COLUMNS.EXPERT_WITH_DOCUMENTS).eq('id', clean).maybeSingle();
   if (res.error) throw res.error;
   return res.data || null;
 }

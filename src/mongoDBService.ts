@@ -426,16 +426,48 @@ export const mongoDB = {
   },
 
   // Project Reviews
+  // Project review LISTS. The server sends small summary rows (no chat / activity timeline) in
+  // pages of 20. We follow `nextOffset` until every page is loaded (max 10 pages = 200 reviews),
+  // so the lists stay complete. Full details load only when one review is opened (?id=…).
   async getProjectReviews(filters: any) {
     try {
-      const params = new URLSearchParams(filters);
-      const response = await fetch(`/api/project-reviews?${params}`);
+      // Drop empty filters so the URL never contains "clientId=undefined".
+      const clean: Record<string, string> = {};
+      for (const [k, v] of Object.entries(filters || {})) {
+        if (v !== undefined && v !== null && v !== '') clean[k] = String(v);
+      }
+      if (clean.id) {
+        const response = await fetch(`/api/project-reviews?${new URLSearchParams(clean)}`);
+        if (!response.ok) return [];
+        const data = await response.json();
+        return data?.projectReview ? [data.projectReview] : [];
+      }
+
+      const all: any[] = [];
+      let offset = 0;
+      for (let page = 0; page < 10; page++) {
+        const params = new URLSearchParams({ ...clean, offset: String(offset) });
+        const response = await fetch(`/api/project-reviews?${params}`);
+        if (!response.ok) break;
+        const data = await response.json();
+        const rows = Array.isArray(data) ? data : Array.isArray(data?.projectReviews) ? data.projectReviews : [];
+        all.push(...rows);
+        if (!data?.hasMore || data?.nextOffset == null) break;
+        offset = data.nextOffset;
+      }
+      return all;
+    } catch {
+      return [];
+    }
+  },
+
+  // Latest audit events across all project reviews (admin audit tab), computed on the server.
+  async getProjectReviewActivity(limit = 100): Promise<any[]> {
+    try {
+      const response = await fetch(`/api/project-reviews/activity?limit=${limit}`);
       if (!response.ok) return [];
       const data = await response.json();
-      if (Array.isArray(data)) return data;
-      if (Array.isArray(data?.projectReviews)) return data.projectReviews;
-      if (data?.projectReview) return [data.projectReview];
-      return [];
+      return Array.isArray(data?.events) ? data.events : [];
     } catch {
       return [];
     }

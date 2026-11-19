@@ -1,5 +1,6 @@
 // Supabase-based Notification Service
 import { supabase } from '../supabaseClient';
+import { COLUMNS, PAGE } from '../lib/columns';
 
 export interface Notification {
   id: string;
@@ -20,9 +21,10 @@ export const notificationService = {
     try {
       const { data, error } = await supabase
         .from('notifications')
-        .select('*')
+        .select(COLUMNS.NOTIFICATION) // only real columns, never select('*')
         .eq('user_id', userId)
-        .order('created_at', { ascending: false });
+        .order('created_at', { ascending: false })
+        .limit(PAGE.NOTIFICATIONS); // newest 50 — older ones are not shown
 
       if (error) throw error;
       return data || [];
@@ -38,7 +40,7 @@ export const notificationService = {
       const { data, error } = await supabase
         .from('notifications')
         .insert(notification)
-        .select()
+        .select(COLUMNS.NOTIFICATION)
         .single();
 
       if (error) throw error;
@@ -100,14 +102,15 @@ export const notificationService = {
   // Get unread count
   async getUnreadCount(userId: string): Promise<number> {
     try {
-      const { data, error } = await supabase
+      // head: true → the database returns ONLY the number, no rows at all.
+      const { count, error } = await supabase
         .from('notifications')
-        .select('id', { count: 'exact' })
+        .select('id', { count: 'exact', head: true })
         .eq('user_id', userId)
         .eq('is_read', false);
 
       if (error) throw error;
-      return data?.length || 0;
+      return count || 0;
     } catch (err) {
       console.error('Error getting unread count:', err);
       return 0;

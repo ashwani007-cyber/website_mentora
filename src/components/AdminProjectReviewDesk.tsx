@@ -18,6 +18,7 @@ export const AdminProjectReviewDesk: React.FC<AdminProjectReviewDeskProps> = ({
   onInspectReview
 }) => {
   const [reviews, setReviews] = useState<ProjectReviewRecord[]>([]);
+  const [activityEvents, setActivityEvents] = useState<any[]>([]); // admin audit feed (latest 100)
   const [isLoading, setIsLoading] = useState(true);
   const [activeSubTab, setActiveSubTab] = useState<
     'requests' | 'active' | 'completed' | 'meetings' | 'financials' | 'audit' | 'pricing'
@@ -175,8 +176,14 @@ export const AdminProjectReviewDesk: React.FC<AdminProjectReviewDeskProps> = ({
 
   const loadReviews = async () => {
     try {
-      const list = await mongoDB.getProjectReviews({ includeArchived: true });
+      // Lists arrive as small summaries (no chat / activity timeline). The audit tab gets its
+      // events from a separate, server-computed feed of the latest 100 events.
+      const [list, events] = await Promise.all([
+        mongoDB.getProjectReviews({ includeArchived: true }),
+        mongoDB.getProjectReviewActivity(100)
+      ]);
       setReviews(Array.isArray(list) ? list : (Array.isArray((list as any)?.projectReviews) ? (list as any).projectReviews : []));
+      setActivityEvents(Array.isArray(events) ? events : []);
     } catch (e) {
       console.error('Failed to load project reviews for admin:', e);
       setReviews([]);
@@ -235,16 +242,11 @@ export const AdminProjectReviewDesk: React.FC<AdminProjectReviewDeskProps> = ({
     }))
   );
 
-  // All activity events flattened
-  const allAuditEvents = filteredReviews
-    .flatMap((r) =>
-      (r.activityTimeline || []).map((a) => ({
-        ...a,
-        reviewId: r.projectReviewId,
-        clientName: r.clientName,
-        expertName: r.expertName
-      }))
-    )
+  // All activity events, newest first. They come from the server feed (latest 100) and are
+  // limited to the reviews currently shown by the filters.
+  const visibleReviewIds = new Set(filteredReviews.map((r) => r.projectReviewId));
+  const allAuditEvents = activityEvents
+    .filter((a) => visibleReviewIds.has(a.reviewId))
     .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
   // Metrics
@@ -545,7 +547,7 @@ export const AdminProjectReviewDesk: React.FC<AdminProjectReviewDeskProps> = ({
                       </span>
                     </td>
                     <td className="p-3.5 font-mono text-slate-400">
-                      {r.chat?.length || 0} messages
+                      {r.chat?.length ?? r.chatCount ?? 0} messages
                     </td>
                     <td className="p-3.5 text-right">
                       <button

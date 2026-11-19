@@ -96,11 +96,17 @@ function getExpertFilter(expertId?: string | null, cleanEmail?: string | null): 
   return parts.join(',')
 }
 
+// Same list as COLUMNS.EXPERT_WITH_DOCUMENTS in server/egressHelpers.js (kept here because this
+// helper runs outside the request handlers).
+const EXPERT_WITH_DOCUMENTS_COLUMNS =
+  'id, user_id, name, field, domain_id, years_of_experience, base_rate, admin_markup, rate, project_rate, rating, total_sessions, verified, initials, title, phone, email, bio, skills, documents, created_at, updated_at'
+
 async function findSupabaseExpert(sbClient: any, expertId?: string | null, email?: string | null): Promise<any> {
   const cleanEmail = (email || '').toLowerCase().trim()
   const filter = getExpertFilter(expertId, cleanEmail)
   if (!filter) return null
-  const { data, error } = await sbClient.from('experts').select('*').or(filter)
+  // Single-expert lookup used before updates — needs documents to merge changes safely.
+  const { data, error } = await sbClient.from('experts').select(EXPERT_WITH_DOCUMENTS_COLUMNS).or(filter).limit(5)
   if (error) {
     throw error
   }
@@ -1516,7 +1522,11 @@ function sharedDbPlugin(): Plugin {
           let bookings: any[] = []
           try {
             const sb = await getSbAdmin()
-            let query = sb.from('bookings').select('*')
+            // Only real booking columns (never select('*')); paged with ?limit=&offset= (default 200).
+            const { COLUMNS, clampInt } = await getEgressHelpers()
+            const bLimit = clampInt(parsedUrl.searchParams.get('limit'), 200, 1, 500)
+            const bOffset = clampInt(parsedUrl.searchParams.get('offset'), 0, 0, 100000)
+            let query = sb.from('bookings').select(COLUMNS.BOOKING)
 
             if (clientId && clientEmail) {
               query = query.or(`client_id.eq.${clientId},client_email.ilike.${clientEmail}`)
@@ -1538,7 +1548,7 @@ function sharedDbPlugin(): Plugin {
               query = query.ilike('status', `%${status}%`)
             }
 
-            query = query.order('created_at', { ascending: false })
+            query = query.order('created_at', { ascending: false }).order('id', { ascending: true }).range(bOffset, bOffset + bLimit - 1)
             const { data, error } = await query
             if (!error && Array.isArray(data) && data.length > 0) {
               bookings = data
@@ -1694,7 +1704,7 @@ function sharedDbPlugin(): Plugin {
             if (!existing) {
               try {
                 const sb = await getSbAdmin()
-                const { data: supaExisting } = await sb.from('bookings').select('*').eq('id', id).maybeSingle()
+                const { data: supaExisting } = await sb.from('bookings').select((await getEgressHelpers()).COLUMNS.BOOKING).eq('id', id).maybeSingle()
                 if (supaExisting) existing = supaExisting
               } catch {}
             }
@@ -2108,6 +2118,15 @@ function sharedDbPlugin(): Plugin {
         const current = readDb()
         let list: any[] = current.projectReviews || []
 
+        // Admin audit tab: latest activity events across all reviews (same as production).
+        if (pathname === '/api/project-reviews/activity') {
+          const { flattenProjectReviewActivity, clampInt } = await getEgressHelpers()
+          const limit = clampInt(parsedUrl.searchParams.get('limit'), 100, 1, 200)
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ success: true, events: flattenProjectReviewActivity(list, limit) }))
+          return
+        }
+
         if (id) {
           const item = list.find(r => r.projectReviewId === id)
           if (!item) {
@@ -2156,8 +2175,16 @@ function sharedDbPlugin(): Plugin {
         // Sort by updatedAt descending
         list.sort((a, b) => new Date(b.updatedAt || b.createdAt).getTime() - new Date(a.updatedAt || a.createdAt).getTime())
 
+        // Same paging + slim summary rows as production (server.js): no chat / activityTimeline /
+        // proposedTimes in lists — those load only when one review is opened (?id=).
+        const { summarizeProjectReview, PROJECT_REVIEW_PAGE_SIZE, clampInt } = await getEgressHelpers()
+        const limit = clampInt(parsedUrl.searchParams.get('limit'), PROJECT_REVIEW_PAGE_SIZE, 1, PROJECT_REVIEW_PAGE_SIZE)
+        const offset = clampInt(parsedUrl.searchParams.get('offset'), 0, 0, 100000)
+        const pageRows = list.slice(offset, offset + limit).map(summarizeProjectReview)
+        const hasMore = offset + limit < list.length
+
         res.setHeader('Content-Type', 'application/json')
-        res.end(JSON.stringify({ success: true, projectReviews: list }))
+        res.end(JSON.stringify({ success: true, projectReviews: pageRows, hasMore, nextOffset: hasMore ? offset + limit : null }))
         return
       }
 
@@ -3240,8 +3267,9 @@ function sharedDbPlugin(): Plugin {
           const sb = await getSupabaseAdmin()
           const { data, error } = await sb
             .from('expert_documents')
-            .select('*')
+            .select((await getEgressHelpers()).COLUMNS.EXPERT_DOCUMENT)
             .eq('expert_id', expertId)
+            .limit(20)
           if (!error && Array.isArray(data) && data.length > 0) {
             docsList = data
           }
