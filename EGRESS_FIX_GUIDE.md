@@ -59,6 +59,7 @@ Environment Variables (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `VITE_SUPABA
 | 2 | `supabase/egress-fix/02_indexes.sql` | Indexes for every filter/sort the app uses (skips missing columns) |
 | 3 | `supabase/egress-fix/03_integrity_constraints.sql` | Positive amounts, no double charge per booking, unique expert email, auto `updated_at` (only adds rules that your current data passes) |
 | 4 | `supabase/egress-fix/04_rls_fast_policies.sql` | Rewrites `auth.uid()` → `(select auth.uid())` in existing policies (same meaning, faster) |
+| 5 | `supabase/egress-fix/05_project_review_summaries.sql` | `chat_count` for list cards and a "latest 100 activity events" feed for the admin audit tab, so review lists never download full chats/timelines |
 | undo | `supabase/egress-fix/99_rollback.sql` | Removes everything above (no data is touched) |
 
 All four were tested on a local Postgres: they run cleanly, can be re-run safely, and the rollback works.
@@ -125,6 +126,20 @@ Reports → API to see which endpoints are hit most, and Logs → API Gateway to
 5. Always check `error` after a save and show it to the user. Never "optimistic success".
 6. Use one Supabase client. Never put the service_role key in code.
 7. After adding a feature, run `__supabaseStats()` for 2 minutes and look for repeats or big responses.
+
+## 7b. Production (Vercel) wiring — fixed, must be confirmed on a preview deploy
+- `server.js` now exports the app and `api/index.js` serves it. `vercel.json` sends every `/api/...`
+  request there. Before this, nothing was exported, so the live `/api` routes could not have worked.
+- `/api/db` and `/api/kv` (without a key) are disabled in production. They used to return the
+  whole `db.json`. `.vercelignore` keeps `db.json`, backups and scratch files out of Vercel.
+- After deploying, open `https://<your-site>/api/health` and `https://<your-site>/api/experts/list`.
+  Both should return JSON. The second should have the header `cache-control: public, max-age=0, s-maxage=60…`.
+
+## 7c. Tables your code uses that do NOT exist in the database
+`expert_documents`, `reviews`, `expert_profiles`, `expert_profile_changes`, `profiles`, `kyc_documents`
+and `audit_logs` all return 404. Writes to them fail and fall back to local storage or `db.json`, which
+is not saved permanently on Vercel. The ones that matter are **`expert_documents`** (KYC upload
+records) and **`reviews`** (client ratings). Creating them is a database change that needs your OK.
 
 ## 8. Not done (needs your decision) — please read
 - **Security model:** the app logs users in with its own `users` table, not Supabase Auth, so
